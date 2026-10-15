@@ -48,7 +48,7 @@ import sounddevice as sd
 import numpy as np
 from google import genai
 from google.genai import types
-from ui import JarvisUI
+from ui_headless import JarvisUI
 from memory.memory_manager import (
     load_memory, update_memory, format_memory_for_prompt,
     save_session_summary, pop_last_session,
@@ -2310,13 +2310,9 @@ def main():
     def runner():
         ui.wait_for_api_key()
         jarvis = JarvisLive(ui)
-        try:
-            asyncio.run(jarvis.run())
-        except KeyboardInterrupt:
-            print("\n🔴 Shutting down...")
+        asyncio.run(jarvis.run())
 
-    threading.Thread(target=runner, daemon=True).start()
-    ui.root.mainloop()
+    runner()
 
 if __name__ == "__main__":
     main()
