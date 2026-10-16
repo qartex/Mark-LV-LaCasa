@@ -65,12 +65,24 @@ class HeadlessTests(unittest.IsolatedAsyncioTestCase):
         live = self.make_live()
         cfg = live._build_config()
         decls = cfg.tools[0].function_declarations
-        self.assertEqual([d.name for d in decls], ['home_assistant'])
+        self.assertEqual([d.name for d in decls],
+                         ['home_assistant', 'spotify_control'])
         self.assertNotIn('set', decls[0].parameters.properties['action'].enum)
+        self.assertEqual(
+            decls[1].parameters.properties['action'].enum,
+            ['play', 'pause', 'resume', 'next', 'previous', 'volume', 'current'])
         for name, args in [('home_assistant', {'action': 'set', 'entity': 'light.x', 'value': 'on'}), ('shutdown_jarvis', {}), ('save_memory', {'key':'x','value':'y'}), ('cannabis_status', {})]:
             with patch('plugins.home_assistant.run', side_effect=AssertionError('dispatched forbidden action')):
                 result = await live._execute_tool(NS(name=name, args=args, id='1'))
             self.assertIn('denied', str(result.response).lower())
+        for action in ('play', 'pause', 'resume', 'next', 'previous', 'volume', 'current'):
+            with patch('plugins.spotify_control.run', return_value='ok') as run:
+                result = await live._execute_tool(NS(name='spotify_control', args={'action': action}, id='1'))
+            run.assert_called_once()
+            self.assertEqual(result.response['result'], 'ok')
+        with patch('plugins.spotify_control.run', side_effect=AssertionError('unknown action executed')):
+            result = await live._execute_tool(NS(name='spotify_control', args={'action': 'bogus'}, id='1'))
+        self.assertIn('denied', str(result.response).lower())
 
     async def test_speaking_tail_and_stop_discard_input(self):
         live = self.make_live()

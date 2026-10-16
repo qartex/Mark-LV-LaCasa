@@ -19,7 +19,12 @@ def capture_source() -> str:
 
 
 def tool_allowed(name: str, args: dict) -> bool:
-    return name == 'home_assistant' and args.get('action') in ('list', 'query', 'temperature')
+    if name == 'home_assistant' and args.get('action') in ('list', 'query', 'temperature'):
+        return True
+    if name == 'spotify_control' and args.get('action') in (
+            'play', 'pause', 'resume', 'next', 'previous', 'volume', 'current'):
+        return True
+    return False
 
 
 def error_text(error):
@@ -38,19 +43,35 @@ def output_device(name, hardware):
     raise RuntimeError('Configured output device unavailable; refusing headless fallback')
 
 
-def read_only_registry():
-    # Import exactly one trusted plugin. Do not discover/import unused desktop
-    # actions or arbitrary plugins merely to hide their declarations afterward.
+def trusted_headless_registry() -> 'PluginRegistry':
+    # Import exactly the two trusted plugins. Do not discover/import unused
+    # desktop actions or arbitrary plugins merely to hide their declarations
+    # afterward — the headless allowlist is explicit, never permissive.
     from core.plugin_loader import PluginRegistry, PluginRecord
     from plugins import home_assistant
-    meta = copy.deepcopy(home_assistant.PLUGIN)
-    meta['description'] = 'Read Home Assistant states and temperatures in °C. Read-only.'
-    meta['parameters']['properties']['action'] = {
-        'type': 'STRING', 'enum': ['list', 'query', 'temperature']}
-    meta['parameters']['properties'].pop('value', None)
-    record = PluginRecord(name=meta['name'], description=meta['description'],
-                          parameters=meta['parameters'], run=home_assistant.run, valid=True)
-    return PluginRegistry({record.name: record}, print)
+    from plugins import spotify_control
+
+    def _runner(module):
+        def _invoke(parameters, player=None, session_memory=None):
+            return module.run(parameters, player=player, session_memory=session_memory)
+        return _invoke
+
+    records = []
+    for module in (home_assistant, spotify_control):
+        meta = copy.deepcopy(module.PLUGIN)
+        if module is home_assistant:
+            meta['description'] = 'Read Home Assistant states and temperatures in °C. Read-only.'
+            meta['parameters']['properties']['action'] = {
+                'type': 'STRING', 'enum': ['list', 'query', 'temperature']}
+            meta['parameters']['properties'].pop('value', None)
+        records.append(PluginRecord(
+            name=meta['name'],
+            description=meta['description'],
+            parameters=meta['parameters'],
+            run=_runner(module),
+            valid=True,
+        ))
+    return PluginRegistry({r.name: r for r in records}, print)
 
 
 def drain(queue) -> None:

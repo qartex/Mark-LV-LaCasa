@@ -329,3 +329,15 @@ class SpotifyHTTPTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReceiverConfigConsistencyTests(unittest.TestCase):
+    """Read only the public deployment template; assert the exact Web API target."""
+
+    def test_raspotify_display_name_and_routing(self):
+        from pathlib import Path
+        conf = Path(__file__).resolve().parent.parent / "deploy" / "spotify" / "raspotify.conf"
+        text = conf.read_text(encoding="utf-8")
+        self.assertIn('LIBRESPOT_NAME="raspotify (lacasa-server)"', text)
+        self.assertIn('LIBRESPOT_DEVICE="lacasa_spotify"', text)
+        self.assertIn('LIBRESPOT_MIXER=softvol', text)
