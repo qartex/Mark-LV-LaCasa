@@ -218,7 +218,7 @@ class OAuthStore:
             try:
                 file_fd = os.open(
                     filename,
-                    os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                    os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC | os.O_NOFOLLOW,
                     dir_fd=parent_fd,
                 )
             except FileNotFoundError:

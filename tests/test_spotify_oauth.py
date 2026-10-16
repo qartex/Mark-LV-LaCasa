@@ -3,6 +3,8 @@ import json
 import logging
 import os
 import stat
+import subprocess
+import sys
 import tempfile
 import unittest
 from dataclasses import replace
@@ -133,6 +135,35 @@ class SpotifyOAuthStoreTests(unittest.TestCase):
         os.chmod(self.store_path, 0o600)
         with self.assertRaises(SpotifyConfigError):
             OAuthStore(self.store_path).load()
+
+    def test_fifo_at_store_path_fails_closed_without_blocking(self):
+        os.mkfifo(self.store_path, 0o600)
+        os.chmod(self.store_path, 0o600)
+        probe = """
+import sys
+from pathlib import Path
+from core.spotify import OAuthStore, SpotifyConfigError
+
+try:
+    OAuthStore(Path(sys.argv[1])).load()
+except SpotifyConfigError:
+    raise SystemExit(0)
+except Exception as exc:
+    print(type(exc).__name__, file=sys.stderr)
+    raise SystemExit(2)
+raise SystemExit(3)
+"""
+        try:
+            result = subprocess.run(
+                [sys.executable, "-c", probe, str(self.store_path)],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            self.fail("loading a FIFO blocked instead of raising SpotifyConfigError")
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_foreign_file_owner_fails_closed(self):
         write_store(self.store_path, valid_store_data())
@@ -292,8 +323,12 @@ class SpotifyOAuthStoreTests(unittest.TestCase):
         log_output = StringIO()
         handler = logging.StreamHandler(log_output)
         spotify_logger = logging.getLogger("core.spotify")
+        old_level = spotify_logger.level
+        spotify_logger.setLevel(logging.DEBUG)
+        handler.setLevel(logging.DEBUG)
         spotify_logger.addHandler(handler)
         self.addCleanup(spotify_logger.removeHandler, handler)
+        self.addCleanup(spotify_logger.setLevel, old_level)
 
         with self.assertRaises(SpotifyConfigError) as raised:
             OAuthStore(self.store_path).load()
