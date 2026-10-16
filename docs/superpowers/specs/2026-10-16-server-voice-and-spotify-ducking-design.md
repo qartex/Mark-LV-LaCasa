@@ -1,6 +1,6 @@
 # LaCasa JARVIS: iPhone-Eingabe, Server-Ausgabe und Spotify-Ducking
 
-Status: Designentwurf zur Prüfung; noch keine Freigabe zur Implementierung.
+Status: Builder-Check abgeschlossen. Die offene Bedienfrage wurde vom Gärtner geklärt: Mikrofon während der Antwort geschlossen, Abbruch per Stopptaste. Die vollständige Designbeschreibung wird jetzt zur Freigabe vorgelegt; Implementierung noch nicht begonnen.
 
 ## Zweck und vom Gärtner festgelegtes Verhalten
 
@@ -36,8 +36,8 @@ Der Ducking-Controller verändert ausschließlich den identifizierten Spotify-St
 1. JARVIS startet als Serverdienst ohne Bildschirm, globale Tastenkürzel oder lokales Mikrofon. Lokale Lautsprecherausgabe ist aktiv, lokale Aufnahme in dieser Betriebsart deaktiviert.
 2. Ein expliziter Headless-Kopplungsbefehl erzeugt einen kurzlebigen Link und QR-Code für genau diesen Server. Keine Schlüssel, HA-Tokens oder Gemini-Keys im Git. Ein neuer Schlüssel ersetzt den alten; Gültigkeit und Widerruf werden getestet.
 3. Zugriff nur über das private Netz/Tailscale und eine für Safari vertrauenswürdige HTTPS-Adresse. Bevorzugt Tailscale Serve mit Zertifikat für den tatsächlichen `lacasa-server`-Hostnamen. Vor der Einrichtung vorhandene Serve-Konfiguration prüfen und erhalten. Kein öffentliches Funnel, kein willkürlich geöffnetes WAN-Portforwarding, keine automatischen Firewalländerungen.
-4. Die vorhandene schlichte Remote-Seite wird wiederverwendet, nicht durch eine Desktop-GUI ersetzt. Empfehlung des Erstellers: eine explizite Aufnahmetaste statt Dauerlauschen. Erst eine Benutzeraktion öffnet das iPhone-Mikrofon. Stoppen/Trennen beendet die Aufnahme. Safari-Mikrofonrechte und Secure Context werden auf einem echten iPhone geprüft.
-5. Mikrofon-Audio wird authentifiziert zum Server übertragen und an Gemini Live gegeben. Der Server spielt die Antwort auf den angeschlossenen Boxen ab. Auf dem iPhone erscheint der Text/Status, aber in diesem Meilenstein keine Audioantwort.
+4. Die vorhandene schlichte Remote-Seite wird wiederverwendet, nicht durch eine Desktop-GUI ersetzt. Eine explizite Aufnahmetaste öffnet das iPhone-Mikrofon; es gibt kein Dauerlauschen. Vom Gärtner bestätigt: Während einer JARVIS-Antwort bleibt die Aufnahme gesperrt; Unterbrechung erfolgt ausschließlich über die Stopptaste. Der Server nimmt in dieser Phase keine weiteren Mikrofonframes zur Verarbeitung an. Wartende Aufnahmeframes werden verworfen, nicht nachträglich als neuer Befehl abgespielt. Stoppen/Trennen beendet die Aufnahme. Safari-Mikrofonrechte und Secure Context werden auf einem echten iPhone geprüft.
+5. Mikrofon-Audio wird authentifiziert zum Server übertragen und an Gemini Live gegeben. Der Server spielt die Antwort auf den angeschlossenen Boxen ab. Auf dem iPhone erscheint der Text/Status, aber in diesem Meilenstein keine Audioantwort. Die Stopptaste bleibt während der Aufnahme-Sperre über den authentifizierten Steuerkanal verfügbar: Sie bricht die aktuelle Antwort ab, leert noch nicht abgespielte Antwortframes und verwirft weitere Frames dieser abgebrochenen Antwort. Erst nach dem verbleibenden hörbaren Ausklang wird die Aufnahmetaste wieder freigegeben. Dieses Halbduplex-Verhalten benötigt keine geräteübergreifende Echo-Unterdrückung; automatische Sprachunterbrechung ist ausdrücklich kein Abnahmekriterium.
 6. Unauthentifizierte Mikrofon-, Steuer- und WebSocket-Anfragen sind abzuweisen. Es gibt nicht gleichzeitig mehrere aktive iPhone-Mikrofonquellen; eine zweite Quelle erhält einen klaren Besetztstatus. Keine Vermischung von Audiositzungen.
 
 ## Ducking: präzises Verhalten
