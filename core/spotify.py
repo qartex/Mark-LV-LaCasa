@@ -691,3 +691,172 @@ def _access_token_with_lock(oauth: SpotifyOAuth) -> str:
 def _refresh_if_needed(oauth: SpotifyOAuth) -> None:
     with oauth._lock:
         oauth._refresh_if_needed_internal()
+
+
+# ── Exact receiver resolution and voice-control actions (Task 4) ──────────────
+
+@dataclass(frozen=True)
+class SpotifyDevice:
+    id: str
+    name: str
+    restricted: bool
+    supports_volume: bool
+
+
+class SpotifyController:
+    """Controls playback on the exact configured LaCasa receiver."""
+    def __init__(self, http: SpotifyHTTP, target_name: str = TARGET_DEVICE_NAME):
+        self._http = http
+        self._target_name = target_name
+    def resolve_device(self, *, require_volume: bool = False) -> SpotifyDevice:
+        resp = self._http.request("GET", "/me/player/devices")
+        try:
+            data = resp.json()
+        except Exception as exc:
+            raise SpotifyAPIError("bad_response", "malformed devices response") from exc
+        raw_devices = data.get("devices")
+        if not isinstance(raw_devices, list):
+            raise SpotifyAPIError("bad_response", "malformed devices payload")
+        matches: list[SpotifyDevice] = []
+        for item in raw_devices:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name")
+            dev_id = item.get("id")
+            if name == self._target_name:
+                if not isinstance(dev_id, str) or not dev_id:
+                    raise SpotifyAPIError("no_device", f"device '{self._target_name}' has invalid ID")
+                restricted = bool(item.get("is_restricted", False))
+                if restricted:
+                    raise SpotifyAPIError("no_device", f"device '{self._target_name}' is restricted")
+                supports_volume = bool(item.get("supports_volume", False))
+                if require_volume and not supports_volume:
+                    raise SpotifyAPIError("no_device", f"device '{self._target_name}' does not support volume control")
+                matches.append(SpotifyDevice(id=dev_id, name=name, restricted=restricted, supports_volume=supports_volume))
+        if len(matches) == 0:
+            raise SpotifyAPIError("no_device", f"Empfänger '{self._target_name}' nicht gefunden")
+        if len(matches) > 1:
+            raise SpotifyAPIError("no_device", f"Mehrere Empfänger mit Name '{self._target_name}' gefunden")
+        return matches[0]
+    def perform(
+        self,
+        action: str,
+        *,
+        query: str | None = None,
+        kind: str = "track",
+        volume_percent: int | None = None,
+    ) -> str:
+        try:
+            return self._perform_internal(action, query=query, kind=kind, volume_percent=volume_percent)
+        except SpotifyAPIError as err:
+            return self._format_error(err)
+    def _perform_internal(
+        self,
+        action: str,
+        *,
+        query: str | None = None,
+        kind: str = "track",
+        volume_percent: int | None = None,
+    ) -> str:
+        if action == "play":
+            if not query or not isinstance(query, str) or not query.strip():
+                raise SpotifyAPIError("bad_response", "query required for play")
+            if kind not in ("track", "album", "artist"):
+                raise SpotifyAPIError("bad_response", f"invalid kind '{kind}'")
+            search_resp = self._http.request("GET", f"/search", params={"q": query.strip(), "type": kind, "limit": 3})
+            try:
+                search_data = search_resp.json()
+            except Exception as exc:
+                raise SpotifyAPIError("bad_response", "malformed search response") from exc
+            key = kind + "s"
+            container = search_data.get(key, {}) if isinstance(search_data, dict) else {}
+            items = container.get("items", []) if isinstance(container, dict) else []
+            if not items or not isinstance(items, list):
+                return f"Nichts gefunden für '{query.strip()}'."
+            first = items[0]
+            if not isinstance(first, dict) or not first.get("uri"):
+                return f"Nichts gefunden für '{query.strip()}'."
+            uri = first["uri"]
+            device = self.resolve_device()
+            if kind == "track":
+                play_body = {"uris": [uri]}
+            else:
+                play_body = {"context_uri": uri}
+            self._http.request("PUT", "/me/player/play", params={"device_id": device.id}, json_body=play_body)
+            return f"Spielt {kind} '{query.strip()}' auf {self._target_name}."
+        elif action == "pause":
+            device = self.resolve_device()
+            self._http.request("PUT", "/me/player/pause", params={"device_id": device.id})
+            return f"Wiedergabe auf {self._target_name} pausiert."
+        elif action == "resume":
+            device = self.resolve_device()
+            self._http.request("PUT", "/me/player/play", params={"device_id": device.id})
+            return f"Wiedergabe auf {self._target_name} fortgesetzt."
+        elif action == "next":
+            device = self.resolve_device()
+            self._http.request("POST", "/me/player/next", params={"device_id": device.id})
+            return f"Nächster Titel auf {self._target_name}."
+        elif action == "previous":
+            device = self.resolve_device()
+            self._http.request("POST", "/me/player/previous", params={"device_id": device.id})
+            return f"Vorheriger Titel auf {self._target_name}."
+        elif action == "volume":
+            if volume_percent is None or type(volume_percent) is not int or not (0 <= volume_percent <= 100):
+                raise SpotifyAPIError("bad_response", "volume_percent must be an integer between 0 and 100")
+            device = self.resolve_device(require_volume=True)
+            self._http.request("PUT", "/me/player/volume", params={"device_id": device.id, "volume_percent": volume_percent})
+            return f"Lautstärke auf {self._target_name} auf {volume_percent}% gesetzt."
+        elif action == "current":
+            device = self.resolve_device()
+            resp = self._http.request("GET", "/me/player")
+            if resp.status_code == 204 or not resp.text:
+                return f"Auf {self._target_name} läuft zurzeit nichts."
+            try:
+                data = resp.json()
+            except Exception as exc:
+                raise SpotifyAPIError("bad_response", "malformed player response") from exc
+            if not isinstance(data, dict):
+                return f"Auf {self._target_name} läuft zurzeit nichts."
+            curr_device = data.get("device", {})
+            curr_dev_id = curr_device.get("id") if isinstance(curr_device, dict) else None
+            if curr_dev_id != device.id:
+                return f"Auf {self._target_name} läuft zurzeit nichts."
+            if not data.get("is_playing"):
+                return f"Auf {self._target_name} läuft zurzeit nichts."
+            item = data.get("item")
+            if not isinstance(item, dict) or not item.get("name"):
+                return f"Auf {self._target_name} läuft zurzeit nichts."
+            track_name = item.get("name", "")
+            artists_raw = item.get("artists", [])
+            artist_names = []
+            if isinstance(artists_raw, list):
+                for a in artists_raw:
+                    if isinstance(a, dict) and a.get("name"):
+                        artist_names.append(a["name"])
+            artist_str = ", ".join(artist_names) if artist_names else "unbekannter Künstler"
+            return f"Auf {self._target_name} läuft gerade '{track_name}' von {artist_str}."
+        else:
+            raise SpotifyAPIError("bad_response", f"unknown action '{action}'")
+    def _format_error(self, err: SpotifyAPIError) -> str:
+        cat = err.category
+        if cat == "unauthorized":
+            return "Spotify-Autorisierung abgelaufen oder ungültig. Bitte einmal neu autorisieren."
+        elif cat == "no_device":
+            return f"Empfänger '{self._target_name}' ist zurzeit nicht aktiv oder erreichbar."
+        elif cat == "premium":
+            return "Spotify Premium wird für diese Funktion benötigt."
+        elif cat == "rate_limited":
+            return "Zu viele Anfragen an Spotify. Bitte kurz warten."
+        elif cat == "network":
+            return "Spotify API ist zurzeit nicht erreichbar."
+        else:
+            return f"Spotify-Fehler: {err}"
+_default_controller: SpotifyController | None = None
+_default_controller_lock = threading.Lock()
+def default_controller() -> SpotifyController:
+    global _default_controller
+    if _default_controller is None:
+        with _default_controller_lock:
+            if _default_controller is None:
+                _default_controller = SpotifyController(SpotifyHTTP(default_oauth()))
+    return _default_controller
