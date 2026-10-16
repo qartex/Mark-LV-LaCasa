@@ -12,6 +12,9 @@ config/certs/
 # Linked WhatsApp session
 config/whatsapp_web/
 # OAuth tokens and client secrets
+# Spotify OAuth private token store (explicit name, overrides broad patterns)
+config/spotify_oauth.json
+
 **/token*.json
 **/client_secret*.json
 *credentials*.json

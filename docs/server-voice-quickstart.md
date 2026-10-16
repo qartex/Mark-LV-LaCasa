@@ -95,3 +95,31 @@ Das sind **keine** Nachweise für Safari-Mikrofonrechte auf deinem konkreten iPh
 ## Rollback-Hinweis
 
 Vor der einmaligen System-zu-Benutzerdienst-Migration wurden Paketkonfiguration und Spotify-Zustand privat unter `~/.local/state/lacasa-audio-backup/` gesichert. Die Datei `latest` verweist auf die betreffende Sicherung. Kein automatisches Rollback ausführen, während der neue Empfänger funktioniert; sonst entsteht eine konkurrierende Audio-/Connect-Instanz oder laufende Musik wird unterbrochen.
+
+## Spotify voice control (Task 5)
+
+App name: any personal name
+Website: blank
+Redirect URI: https://lacasa-server.tail7a9c2.ts.net/api/spotify/callback
+API/SDK: Web API
+Credential requested from user: Client ID only (never client secret/password)
+Start: .venv/bin/python -m core.headless spotify-auth-start --client-id '<CLIENT_ID>'
+Status: .venv/bin/python -m core.headless spotify-auth-status
+
+The authorization URL is opened by the operator over trusted HTTPS. Consent must be repeated after six calendar months/revocation/invalid_grant. The status command never displays tokens. Spotify Premium is required for playback mutating actions; reads (search, playlists, library, get_state) work on Free.
+
+Seven German voice-action examples:
+- play <track/album/artist>
+- pause / resume
+- next / previous
+- volume <0-100>
+- what's playing / current
+
+Exact receiver: respotify (lacasa-server). All playback is directed exclusively at this receiver; the iPhone or any other device is never controlled.
+
+Safe troubleshooting:
+- If `spotify-auth-status` returns `authorized: false`, re-run `spotify-auth-start`.
+- If a 401 occurs during playback, JARVIS silently reauthorizes and resumes.
+- Network errors appear as "Spotify API ist zurzeit nicht erreichbar" in the assistant output.
+
+These steps are explicitly deferred to the separate durable-device plan; current transient `pair` instructions stay valid.
