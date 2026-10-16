@@ -1,6 +1,6 @@
 # LaCasa JARVIS: iPhone-Eingabe, Server-Ausgabe und Spotify-Ducking
 
-Status: Builder-Check abgeschlossen. Die offene Bedienfrage wurde vom Gärtner geklärt: Mikrofon während der Antwort geschlossen, Abbruch per Stopptaste. Die vollständige Designbeschreibung wird jetzt zur Freigabe vorgelegt; Implementierung noch nicht begonnen.
+Status: Vom Gärtner freigegeben; Umsetzung beauftragt. Builder-Check abgeschlossen. Die bestätigte Bedienung lautet: Mikrofon während der Antwort geschlossen, Abbruch per Stopptaste. Implementierungsplan und tatsächliche Nachweise stehen unter `docs/superpowers/plans/2026-10-16-server-voice-and-spotify-ducking.md` und `docs/server-voice-quickstart.md`. Die Freigabe dieses Designs ist kein Ersatz für die dort getrennt ausgewiesenen technischen und akustischen Abnahmen.
 
 ## Zweck und vom Gärtner festgelegtes Verhalten
 
