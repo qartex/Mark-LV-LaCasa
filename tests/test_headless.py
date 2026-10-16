@@ -321,7 +321,7 @@ class HeadlessTests(unittest.IsolatedAsyncioTestCase):
         hardware = Mock()
         hardware.RawOutputStream.side_effect = RuntimeError('selected device unavailable')
         hardware.query_devices.return_value = [{'name':'Pulse analog','max_output_channels':2}]
-        with patch.dict('sys.modules',{'sounddevice':hardware}), patch.object(main,'get_output_device',return_value='Pulse analog'):
+        with patch.dict(os.environ, {'JARVIS_DUCKING':'0'}), patch.dict('sys.modules',{'sounddevice':hardware}), patch.object(main,'get_output_device',return_value='Pulse analog'):
             with self.assertRaises(RuntimeError):
                 await live._play_audio()
         self.assertEqual(hardware.RawOutputStream.call_count,1)
@@ -369,7 +369,9 @@ class HeadlessTests(unittest.IsolatedAsyncioTestCase):
         hardware = Mock(RawOutputStream=Mock(return_value=stream))
         hardware.query_devices.return_value = [
             {'name': 'Test Pulse output', 'max_output_channels': 2}]
-        with patch.dict('sys.modules', {'sounddevice': hardware}), patch.object(
+        # This test owns only fake hardware. Never contact the real mixer when
+        # the complete suite is run alongside the live service on the target.
+        with patch.dict(os.environ, {'JARVIS_DUCKING':'0'}), patch.dict('sys.modules', {'sounddevice': hardware}), patch.object(
                 main, 'get_output_device', return_value='Test Pulse output'):
             task = asyncio.create_task(live._play_audio())
             try:

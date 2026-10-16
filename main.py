@@ -577,6 +577,10 @@ class JarvisLive:
         # guessed; see _play_audio.
         self._out_latency          = 0.20    # seconds, replaced with the real value
         self._tail_until           = 0.0     # monotonic time the echo tail expires
+        self._buffered_until = 0.0  # PCM duration committed to the hardware, monotonic
+        self._playback_active = False  # includes in-flight write, drain and tail
+        self._output_generation = 0  # Stop fences batches already removed from queue
+        self._ducking = None  # lazily constructed; may be injected by hardware tests
         # Wall-clock time at which the audio written next will begin to sound.
         # The mouth is scheduled against this, never against "now": batches are
         # handed to the device far faster than they play, so "now" ran the lips
@@ -863,7 +867,7 @@ class JarvisLive:
         return time.monotonic() < self._tail_until
 
     def audio_allowed(self) -> bool:
-        return (self.session is not None and not self._is_speaking
+        return (self.session is not None and not self._is_speaking and not self._playback_active
                 and not self._tail_active() and not self._interrupted and not self.ui.muted
                 and (self.audio_in_queue is None or self.audio_in_queue.empty()))
 
@@ -888,7 +892,8 @@ class JarvisLive:
             # margin for the room. The microphone is NOT muted during it — the
             # guard still lets a genuine reply through, so answering instantly
             # still works. Only our own echo is dropped.
-            self._tail_until = time.monotonic() + self._out_latency + _TAIL_MARGIN
+            self._tail_until = max(self._tail_until, max(time.monotonic(), self._buffered_until)
+                                   + self._out_latency + _TAIL_MARGIN)
         if not value:
             # The echo history is deliberately NOT cleared here: the tail above
             # still needs it to recognise our own voice. It is dropped when the
@@ -944,6 +949,7 @@ class JarvisLive:
 
     def interrupt(self) -> None:
         """Drain output/input and suppress the interrupted turn; retain tail gate."""
+        self._output_generation += 1
         self._interrupted = self._turn_active
         self._discard_microphone()
         q = self.audio_in_queue
@@ -1382,7 +1388,7 @@ class JarvisLive:
             # So the test is not "is the mic loud" but "is the mic louder than
             # the echo of what we are playing right now", sustained long enough
             # that a cough or a keystroke cannot trigger it.
-            if jarvis_speaking:
+            if jarvis_speaking or self._playback_active:
                 # Nothing is streamed while JARVIS talks.
                 #
                 # Interrupting by voice used to live here: `EchoGuard` can pick a
@@ -1657,6 +1663,15 @@ class JarvisLive:
             raise
 
     async def _play_audio(self):
+        # Validate configuration before opening hardware; bad environment values
+        # must not leak a live stream outside the draining finally path.
+        import os
+        if (self._ducking is None and headless.enabled()
+                and _platform.system() == 'Linux' and os.environ.get('JARVIS_DUCKING', '1') != '0'):
+            from core.ducking import DuckingController
+            self._ducking = DuckingController(
+                reduction_db=float(os.environ.get('JARVIS_DUCK_DB', '18')),
+                ramp_seconds=float(os.environ.get('JARVIS_DUCK_RAMP_SECONDS', '.08')))
         import sounddevice as sd
         print("[JARVIS] 🔊 Play started")
 
@@ -1704,27 +1719,64 @@ class JarvisLive:
         except Exception:
             pass
 
+        duck = self._ducking
+        gain_operation = write_operation = None
+        phase_started = False
+        draining = False
+
+        last_duck_error = None
+
+        def report_duck_error():
+            nonlocal last_duck_error
+            error = duck.error if duck else None
+            if error and error != last_duck_error:
+                message = f'ERR: Spotify ducking degraded — {error}'
+                self.ui.write_log(message)
+                if self._dashboard:
+                    asyncio.create_task(self._dashboard.broadcast({
+                        'type': 'log', 'speaker': 'system', 'text': message,
+                        'ts': datetime.now().isoformat()}))
+            last_duck_error = error
+
+        async def keep_lease():
+            # Separate task from write/queue wait, including slow hardware writes
+            # and sentence gaps. Only journal I/O, not audio device enumeration.
+            while True:
+                await asyncio.sleep(.25)
+                if phase_started and duck and duck.token:
+                    hold_for = max(self._tail_until - time.monotonic(),
+                                   .25 + self._out_latency + _TAIL_MARGIN)
+                    if not await asyncio.to_thread(duck.heartbeat, hold_for):
+                        report_duck_error()
+
+        lease_task = asyncio.create_task(keep_lease())
         try:
             while True:
                 try:
-                    chunk = await asyncio.wait_for(
-                        self.audio_in_queue.get(),
-                        timeout=0.1
-                    )
+                    chunk = await asyncio.wait_for(self.audio_in_queue.get(), timeout=0.05)
                 except asyncio.TimeoutError:
-                    if (
-                        self._turn_done_event
-                        and self._turn_done_event.is_set()
-                        and self.audio_in_queue.empty()
-                    ):
-                        if self._is_speaking:
-                            self.set_speaking(False)
-                        self._turn_done_event.clear()
+                    finished = ((self._turn_done_event and self._turn_done_event.is_set())
+                                or self._interrupted)
+                    if finished and self.audio_in_queue.empty():
+                        if phase_started:
+                            if not draining:
+                                self.set_speaking(False)
+                                draining = True
+                            if not self._tail_active():
+                                if duck:
+                                    gain_operation = asyncio.create_task(asyncio.to_thread(duck.end))
+                                    await asyncio.shield(gain_operation)
+                                    report_duck_error()
+                                self._playback_active = False
+                                phase_started = False
+                                draining = False
+                        if not phase_started and self._turn_done_event:
+                            self._turn_done_event.clear()
                     continue
 
-                if self._interrupted:
+                if self._interrupted or not chunk:
                     continue
-                self.set_speaking(True)
+                output_generation = self._output_generation
 
                 # Batch all immediately-available chunks into one write to reduce
                 # thread-pool round-trips (was one asyncio.to_thread per 50ms slice).
@@ -1786,17 +1838,75 @@ class JarvisLive:
                 except Exception:
                     pass
 
+                # Acquire only for actual PCM, immediately before the hardware
+                # write. Retain one baseline across all chunks and short gaps.
+                if not phase_started:
+                    self._playback_active = True
+                    phase_started = True
+                    if duck:
+                        gain_operation = asyncio.create_task(asyncio.to_thread(duck.begin))
+                        await asyncio.shield(gain_operation)
+                        report_duck_error()
+                if self._interrupted or output_generation != self._output_generation:
+                    continue  # Stop may have arrived during the mixer ramp.
+                draining = False
+                self.set_speaking(True)
+                now = time.monotonic()
+                self._buffered_until = max(now, self._buffered_until) + len(batch) / (
+                    RECEIVE_SAMPLE_RATE * CHANNELS * 2)
+                self._tail_until = self._buffered_until + self._out_latency + _TAIL_MARGIN
+                if duck:
+                    gain_operation = asyncio.create_task(asyncio.to_thread(
+                        duck.heartbeat, max(0, self._tail_until - now)))
+                    await asyncio.shield(gain_operation)
+                if self._interrupted or output_generation != self._output_generation:
+                    continue
+                write_operation = asyncio.create_task(asyncio.to_thread(stream.write, bytes(batch)))
                 try:
-                    await asyncio.to_thread(stream.write, bytes(batch))
-                except (RuntimeError, asyncio.CancelledError):
-                    break   # executor shutting down — exit cleanly
+                    await asyncio.shield(write_operation)
+                finally:
+                    # A write can block longer than the nominal PCM duration.
+                    # Cleanup also waits for the worker; cancellation cannot make
+                    # us close a stream while its C write is still running.
+                    if write_operation.done():
+                        self._tail_until = max(self._tail_until,
+                                               time.monotonic() + self._out_latency + _TAIL_MARGIN)
         except Exception as e:
             print(f"[JARVIS] ❌ Play: {e}")
             raise
         finally:
-            self.set_speaking(False)
-            stream.stop()
-            stream.close()
+            async def cleanup():
+                try:
+                    if gain_operation:
+                        await asyncio.gather(gain_operation, return_exceptions=True)
+                    if write_operation:
+                        await asyncio.gather(write_operation, return_exceptions=True)
+                        self._tail_until = max(self._tail_until,
+                                               time.monotonic() + self._out_latency + _TAIL_MARGIN)
+                    if phase_started:
+                        self.set_speaking(False)
+                        while self._tail_active():
+                            await asyncio.sleep(.02)
+                    await asyncio.to_thread(stream.stop)
+                finally:
+                    try:
+                        await asyncio.to_thread(stream.close)
+                    finally:
+                        if duck and phase_started:
+                            await asyncio.to_thread(duck.end)
+                            report_duck_error()
+                        self._playback_active = False
+                        lease_task.cancel()
+                        await asyncio.gather(lease_task, return_exceptions=True)
+            # Shield resource cleanup from cancellation, including a second Stop
+            # or SIGTERM. The independent guard covers uncatchable process death.
+            cleanup_task = asyncio.create_task(cleanup())
+            while not cleanup_task.done():
+                try:
+                    await asyncio.shield(cleanup_task)
+                except asyncio.CancelledError:
+                    continue
+            cleanup_task.result()
 
     # ── Morning briefing ────────────────────────────────────────────────────────
 
@@ -2259,16 +2369,10 @@ class JarvisLive:
                         self._briefing_sent = True
                         tg.create_task(self._send_startup_briefing())
 
-            except KeyboardInterrupt:
+            except (KeyboardInterrupt, SystemExit, asyncio.CancelledError):
                 raise
-            except SystemExit:
-                raise
-            except BaseException as e:
-                # Catches both Exception and BaseExceptionGroup (Python 3.11+
-                # TaskGroup raises BaseExceptionGroup when tasks are cancelled
-                # externally, which `except Exception` would miss, letting the
-                # exception escape the while-loop and causing asyncio.run() to
-                # start shutdown — resulting in "executor after shutdown" errors).
+            except Exception as e:
+                # Recover ordinary session failures, never process cancellation.
                 # Voluntary reconnect (voice change) — not an error. Rebuild the
                 # session immediately with no backoff and no scary logs.
                 if _is_reconnect_signal(e):
@@ -2394,13 +2498,40 @@ class JarvisLive:
             print(f"[JARVIS] Reconnecting in {delay}s...")
             await asyncio.sleep(delay)
 
+async def _run_service(jarvis):
+    """Let systemd SIGTERM run the same draining finally path as cancellation."""
+    import signal
+    loop = asyncio.get_running_loop()
+    task = asyncio.current_task()
+    terminating = False
+
+    def terminate():
+        nonlocal terminating
+        if not terminating:
+            terminating = True
+            task.cancel()
+
+    installed = False
+    if headless.enabled() and _platform.system() == 'Linux':
+        loop.add_signal_handler(signal.SIGTERM, terminate)
+        installed = True
+    try:
+        await jarvis.run()
+    except asyncio.CancelledError:
+        if not terminating:
+            raise
+    finally:
+        if installed:
+            loop.remove_signal_handler(signal.SIGTERM)
+
+
 def main():
     ui = JarvisUI("face.png")
 
     def runner():
         ui.wait_for_api_key()
         jarvis = JarvisLive(ui)
-        asyncio.run(jarvis.run())
+        asyncio.run(_run_service(jarvis))
 
     runner()
 
