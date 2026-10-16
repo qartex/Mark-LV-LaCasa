@@ -233,7 +233,7 @@ class DuckingController:
                 if state and state['generation'] == self.token:
                     self._refresh(state, hold_for)
                     return True
-                return False
+                raise RuntimeError('Spotify ducking lease lost: output phase recovered or replaced')
         except Exception as exc:
             return self._failure(exc)
 

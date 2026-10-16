@@ -195,6 +195,59 @@ class PlaybackDuckingTests(unittest.IsolatedAsyncioTestCase):
         await self.wait_restored()
         self.assertTrue(self.live.audio_allowed())
 
+    async def model_complete(self):
+        # Exercise the real receiver's completion state, then send no more events.
+        async def receive():
+            yield NS(data=None, tool_call=None, server_content=NS(
+                output_transcription=None, input_transcription=None, turn_complete=True))
+            raise asyncio.CancelledError()
+        self.live.session.receive = receive
+        with self.assertRaises(asyncio.CancelledError):
+            await self.live._receive_audio()
+        self.assertFalse(self.live._turn_active)
+        self.assertTrue(self.live._turn_done_event.is_set())
+
+    async def test_stop_after_model_complete_during_blocked_write_restores_and_opens_mic(self):
+        self.stream.release.clear()
+        await self.first_write(.2)
+        await self.model_complete()
+        self.live.audio_in_queue.put_nowait(b'discard')
+        self.live.interrupt()
+        self.assertFalse(self.live._interrupted, 'completed model needs no suppression')
+        await asyncio.sleep(.3)
+        self.assertTrue(self.live._playback_active)
+        self.assertFalse(self.live.audio_allowed(), 'physical write still owns the microphone gate')
+        self.assertEqual(self.mixer.value, ((32846,16423), False))
+        self.assertTrue(self.ctl.state_path.exists())
+        self.stream.release.set()
+        await asyncio.sleep(.04)
+        self.assertFalse(self.live.audio_allowed(), 'Stop must retain the physical output tail')
+        self.assertEqual(self.mixer.value, ((32846,16423), False))
+        await self.wait_restored()
+        self.assertEqual(self.mixer.value, ((65536,32768), False))
+        self.assertFalse(self.ctl.state_path.exists())
+        self.assertTrue(self.live.audio_allowed())
+        self.assertEqual(len(self.stream.writes), 1)
+        self.assertFalse(self.task.done())
+
+    async def test_stop_after_model_complete_during_tail_restores_and_opens_mic(self):
+        await self.first_write(.2)
+        await self.model_complete()
+        async with asyncio.timeout(1):
+            while self.live._is_speaking:
+                await asyncio.sleep(.005)
+        self.assertTrue(self.live._tail_active())
+        self.assertTrue(self.live._playback_active)
+        self.live.interrupt()
+        self.assertFalse(self.live.audio_allowed())
+        self.assertEqual(self.mixer.value, ((32846,16423), False))
+        self.assertTrue(self.ctl.state_path.exists())
+        await self.wait_restored()
+        self.assertEqual(self.mixer.value, ((65536,32768), False))
+        self.assertFalse(self.ctl.state_path.exists())
+        self.assertTrue(self.live.audio_allowed())
+        self.assertFalse(self.task.done())
+
     async def test_cancellation_waits_for_inflight_write_and_restores_before_close(self):
         self.stream.release.clear()
         await self.first_write(.05)
@@ -217,6 +270,93 @@ class PlaybackDuckingTests(unittest.IsolatedAsyncioTestCase):
             await self.task
         self.assertEqual(self.mixer.value[0], (65536,32768))
         self.assertTrue(self.stream.closed)
+
+    async def assert_remote_lease_error(self):
+        from fastapi.testclient import TestClient
+        server = self.live._dashboard
+        assert server is not None
+        deadline = time.monotonic() + 1
+        def errors():
+            return [m for m in server._history
+                    if m.get('text', '').startswith('ERR: Spotify ducking degraded')
+                    and 'lease' in m['text'].lower()]
+        while not errors() and time.monotonic() < deadline:
+            await asyncio.sleep(.01)
+        self.assertTrue(errors(), 'lost envelope must appear in remote ERR history')
+        # Read history through the actual authenticated remote route, not just
+        # an in-memory logging spy. Credentials exist only inside this test app.
+        with TestClient(server.app) as client:
+            token = client.post('/login', json={'pin': self.remote_key}).json()['token']
+            with client.websocket_connect(f'/ws?token={token}') as ws:
+                self.assertEqual(ws.receive_json()['type'], 'status')
+                history = [ws.receive_json() for _ in server._history[-50:]]
+        self.assertTrue(any(m.get('text', '').startswith('ERR: Spotify ducking degraded')
+                            and 'lease' in m['text'].lower() for m in history))
+
+    async def test_recovered_lease_is_reported_by_background_heartbeat_and_speech_continues(self):
+        from dashboard.server import DashboardServer
+        self.live._dashboard = DashboardServer()
+        self.remote_key = self.live._dashboard.new_key()
+        now = [100.0]
+        self.ctl.clock = lambda: now[0]
+        await self.first_write(.05)
+        now[0] += 20
+        guard = DuckingController(self.mixer, self.ctl.state_path,
+                                 clock=lambda: now[0], ramp_seconds=0)
+        self.assertTrue(await asyncio.to_thread(guard.recover))
+        self.assertEqual(self.mixer.value, ((65536,32768), False))
+        await self.assert_remote_lease_error()
+        self.stream.started.clear()
+        self.live.audio_in_queue.put_nowait(b'\x02\x00'*1200)
+        self.assertTrue(await asyncio.to_thread(self.stream.started.wait, 1))
+        self.assertEqual(len(self.stream.writes), 2, 'lease loss must not disable speech')
+        self.assertEqual(self.mixer.value, ((65536,32768), False))
+        self.assertFalse(self.ctl.state_path.exists(), 'resumption must not reacquire behind the guard')
+        await self.model_complete()
+        await self.wait_restored()
+        self.assertTrue(self.live.audio_allowed())
+        self.assertFalse(self.task.done())
+
+    async def test_prewrite_lost_lease_reports_remote_error_without_stealing_new_generation(self):
+        from dashboard.server import DashboardServer
+        self.live._dashboard = DashboardServer()
+        self.remote_key = self.live._dashboard.new_key()
+        now = [100.0]
+        self.ctl.clock = lambda: now[0]
+        await self.first_write(.05)
+        # Isolate immediate pre-write reporting: no periodic heartbeat can rescue
+        # the assertion. Production controller, journal and playback stay real.
+        heartbeat_tasks = [t for t in asyncio.all_tasks()
+                           if t.get_coro().__qualname__ == 'JarvisLive._play_audio.<locals>.keep_lease']
+        self.assertEqual(len(heartbeat_tasks), 1)
+        heartbeat_tasks[0].cancel()
+        await asyncio.gather(*heartbeat_tasks, return_exceptions=True)
+        now[0] += 20
+        guard = DuckingController(self.mixer, self.ctl.state_path,
+                                 clock=lambda: now[0], ramp_seconds=0)
+        self.assertTrue(await asyncio.to_thread(guard.recover))
+        new = DuckingController(self.mixer, self.ctl.state_path,
+                               clock=lambda: now[0], ramp_seconds=0)
+        self.addCleanup(new.end)
+        self.assertTrue(await asyncio.to_thread(new.begin))
+        journal = self.ctl.state_path.read_bytes()
+        self.stream.started.clear()
+        self.live.audio_in_queue.put_nowait(b'\x02\x00'*1200)
+        self.assertTrue(await asyncio.to_thread(self.stream.started.wait, 1))
+        self.assertEqual(len(self.stream.writes), 2)
+        await self.assert_remote_lease_error()
+        self.assertEqual(self.ctl.state_path.read_bytes(), journal)
+        self.assertEqual(self.mixer.value, ((32846,16423), False))
+        await self.model_complete()
+        async with asyncio.timeout(2):
+            while self.live._playback_active:
+                await asyncio.sleep(.01)
+        self.assertTrue(self.live.audio_allowed())
+        self.assertEqual(self.ctl.state_path.read_bytes(), journal)
+        self.assertEqual(self.mixer.value, ((32846,16423), False), 'old phase must not restore new owner')
+        self.assertTrue(await asyncio.to_thread(new.end))
+        self.assertEqual(self.mixer.value, ((65536,32768), False))
+        self.assertFalse(self.task.done())
 
     async def test_failed_ducking_does_not_prevent_speech_and_reports_degraded(self):
         from dashboard.server import DashboardServer

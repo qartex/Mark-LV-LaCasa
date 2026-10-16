@@ -157,14 +157,30 @@ class DuckingTests(unittest.TestCase):
             self.now += 4
             self.assertTrue(guard.recover())
 
+    def test_resumed_owner_reports_lease_loss_after_guard_recovery(self):
+        old, guard = self.controller(), self.controller()
+        self.assertTrue(old.begin())
+        self.now += 20
+        self.assertTrue(guard.recover())
+        writes = list(self.mixer.writes)
+        self.assertFalse(old.heartbeat())
+        self.assertIn('lease', (old.error or '').lower())
+        self.assertFalse(self.path.exists(), 'lost owner must not silently reacquire')
+        self.assertEqual(self.mixer.writes, writes)
+        old.end()
+        self.assertEqual(self.mixer.value, ((65536, 32768), False))
+
     def test_old_owner_cannot_restore_or_heartbeat_restarted_generation(self):
         old, guard, new = self.controller(), self.controller(), self.controller()
-        old.begin()
+        self.assertTrue(old.begin())
         self.now += 20
-        guard.recover()
-        new.begin()
-        old.heartbeat()
+        self.assertTrue(guard.recover())
+        self.assertTrue(new.begin())
+        journal = self.path.read_bytes()
+        self.assertFalse(old.heartbeat())
+        self.assertIn('lease', (old.error or '').lower())
         old.end()
+        self.assertEqual(self.path.read_bytes(), journal, 'old generation changed the valid new lease')
         self.assertEqual(self.mixer.value[0], (32846, 16423))
         new.end()
         self.assertEqual(self.mixer.value[0], (65536, 32768))

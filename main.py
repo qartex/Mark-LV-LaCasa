@@ -888,10 +888,10 @@ class JarvisLive:
         if value:
             self._tail_until = 0.0
         else:
-            # Hold the guard open across the device's own output latency plus a
-            # margin for the room. The microphone is NOT muted during it — the
-            # guard still lets a genuine reply through, so answering instantly
-            # still works. Only our own echo is dropped.
+            # Hold the tail across the device's output latency and room decay.
+            # Headless half-duplex capture stays closed throughout it. The echo
+            # history below is retained for residual self-audio classification,
+            # not to let genuine replies through the microphone gate.
             self._tail_until = max(self._tail_until, max(time.monotonic(), self._buffered_until)
                                    + self._out_latency + _TAIL_MARGIN)
         if not value:
@@ -1722,6 +1722,7 @@ class JarvisLive:
         duck = self._ducking
         gain_operation = write_operation = None
         phase_started = False
+        phase_generation = None
         draining = False
 
         last_duck_error = None
@@ -1756,7 +1757,8 @@ class JarvisLive:
                     chunk = await asyncio.wait_for(self.audio_in_queue.get(), timeout=0.05)
                 except asyncio.TimeoutError:
                     finished = ((self._turn_done_event and self._turn_done_event.is_set())
-                                or self._interrupted)
+                                or self._interrupted
+                                or (phase_started and phase_generation != self._output_generation))
                     if finished and self.audio_in_queue.empty():
                         if phase_started:
                             if not draining:
@@ -1843,12 +1845,16 @@ class JarvisLive:
                 if not phase_started:
                     self._playback_active = True
                     phase_started = True
+                    phase_generation = output_generation
                     if duck:
                         gain_operation = asyncio.create_task(asyncio.to_thread(duck.begin))
                         await asyncio.shield(gain_operation)
                         report_duck_error()
                 if self._interrupted or output_generation != self._output_generation:
                     continue  # Stop may have arrived during the mixer ramp.
+                # Stop fences the physical phase independently of model completion.
+                # A valid later batch can resume the envelope under its generation.
+                phase_generation = output_generation
                 draining = False
                 self.set_speaking(True)
                 now = time.monotonic()
@@ -1858,7 +1864,8 @@ class JarvisLive:
                 if duck:
                     gain_operation = asyncio.create_task(asyncio.to_thread(
                         duck.heartbeat, max(0, self._tail_until - now)))
-                    await asyncio.shield(gain_operation)
+                    if not await asyncio.shield(gain_operation):
+                        report_duck_error()
                 if self._interrupted or output_generation != self._output_generation:
                     continue
                 write_operation = asyncio.create_task(asyncio.to_thread(stream.write, bytes(batch)))
