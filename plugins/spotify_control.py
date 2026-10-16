@@ -132,12 +132,3 @@ def run(parameters: dict, player=None, session_memory=None) -> str:
     except Exception as exc:  # noqa: BLE001 — last-resort guard, controller already
         # returns strings, but an unexpected error must not propagate.
         return f"Ein unerwarteter Fehler ist aufgetreten: {exc}"
-# Provided for headless registry construction.
-# The actual registration happens in main.py via trusted_headless_registry().
-PLUGIN_RECORD = {
-    "name": PLUGIN.metadata["name"],
-    "description": PLUGIN.metadata["description"],
-    "parameters": PLUGIN.metadata["parameters"],
-    "run": run,
-    "valid": True,
-}
