@@ -1,5 +1,7 @@
 import asyncio
+import json
 import os
+import socket
 import tempfile
 import time
 import unittest
@@ -8,6 +10,9 @@ from unittest.mock import Mock
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 from dashboard.server import DashboardServer
+from core.headless import request_control, request_pair, control_path
+from core.spotify import AuthorizationStart, AuthorizationStatus
+from datetime import datetime, timezone
 
 
 class DashboardTests(unittest.TestCase):
@@ -310,3 +315,165 @@ function messages(){return element('feed').children.map(x=>x.textContent||'').jo
 '''
         result = subprocess.run(['node','-e',script],input=html,text=True,capture_output=True,timeout=20)
         self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+
+
+class SpotifyCallbackRouteTests(unittest.TestCase):
+    def test_spotify_callback_success_returns_no_store_html(self):
+        fake = Mock()
+        fake.complete_authorization.return_value = AuthorizationStatus(
+            authorized=True, reauthorization_required=False,
+            authorized_at=datetime(2026, 8, 31, 12, 0, tzinfo=timezone.utc),
+            authorization_expires_at=datetime(2027, 2, 28, 12, 0, tzinfo=timezone.utc),
+            access_expires_at=datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc),
+        )
+        server = DashboardServer(public_url="https://lacasa-server.tail7a9c2.ts.net", host="127.0.0.1", spotify_oauth=fake)
+        client = TestClient(server.app)
+        response = client.get("/api/spotify/callback", params={"state": "one-use", "code": "code"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        self.assertNotIn("code", response.text)
+
+    def test_spotify_callback_error_cases_return_400_without_echoing(self):
+        fake = Mock()
+        fake.complete_authorization.return_value = AuthorizationStatus(
+            authorized=False, reauthorization_required=True,
+            authorized_at=None, authorization_expires_at=None, access_expires_at=None,
+        )
+        server = DashboardServer(public_url="https://lacasa-server.tail7a9c2.ts.net", host="127.0.0.1", spotify_oauth=fake)
+        client = TestClient(server.app)
+        for params in [{}, {"state": "one-use"}, {"state": "stale", "code": "code"},
+                       {"state": "replayed", "code": "code"}, {"error": "access_denied"}]:
+            with self.subTest(params=params):
+                response = client.get("/api/spotify/callback", params=params)
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(response.headers["cache-control"], "no-store")
+                for value in params.values():
+                    self.assertNotIn(value, response.text)
+
+
+class SpotifyControlTests(unittest.IsolatedAsyncioTestCase):
+    async def test_spotify_auth_start_and_status_commands(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "private" / "control.sock"
+            server = DashboardServer(public_url="https://lacasa-server.tail7a9c2.ts.net")
+            fake = Mock()
+            fake.start_authorization.return_value = AuthorizationStart(
+                url="https://accounts.spotify.com/authorize?x=1",
+                state_expires_at=datetime(2026, 1, 1, 12, 10, tzinfo=timezone.utc),
+            )
+            fake.status.return_value = AuthorizationStatus(
+                authorized=True, reauthorization_required=False,
+                authorized_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                authorization_expires_at=datetime(2027, 1, 1, tzinfo=timezone.utc),
+                access_expires_at=datetime(2026, 2, 1, tzinfo=timezone.utc),
+            )
+            server._spotify_oauth = fake
+            task = asyncio.create_task(server.serve_control(path))
+            try:
+                for _ in range(100):
+                    if path.exists():
+                        break
+                    await asyncio.sleep(0.01)
+                reply = await asyncio.to_thread(request_control, {"command": "spotify-auth-start", "client_id": "CID"}, path)
+                self.assertTrue(reply["ok"])
+                self.assertEqual(reply["authorization_url"], "https://accounts.spotify.com/authorize?x=1")
+                fake.start_authorization.assert_called_once_with("CID")
+                reply = await asyncio.to_thread(request_control, {"command": "spotify-auth-status"}, path)
+                self.assertTrue(reply["ok"])
+                self.assertTrue(reply["authorized"])
+                self.assertNotIn("access_token", json.dumps(reply))
+                self.assertNotIn("refresh_token", json.dumps(reply))
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+    async def test_control_server_rejects_malformed_framing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "private" / "control.sock"
+            server = DashboardServer(public_url="https://x")
+            task = asyncio.create_task(server.serve_control(path))
+            try:
+                for _ in range(100):
+                    if path.exists():
+                        break
+                    await asyncio.sleep(0.01)
+                def send_raw():
+                    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+                        sock.settimeout(2)
+                        sock.connect(str(path))
+                        sock.sendall(b'{not json\n')
+                        result = b""
+                        while b"\n" not in result and len(result) < 4096:
+                            chunk = sock.recv(4096)
+                            if not chunk:
+                                break
+                            result += chunk
+                        return result
+                result = await asyncio.to_thread(send_raw)
+                self.assertIn(b"\n", result)
+                reply = json.loads(result.partition(b"\n")[0])
+                self.assertFalse(reply["ok"])
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+    async def test_control_legacy_pair_still_works(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "private" / "control.sock"
+            server = DashboardServer(public_url="https://lacasa-server.tail7a9c2.ts.net")
+            fake = Mock()
+            server._spotify_oauth = fake
+            task = asyncio.create_task(server.serve_control(path))
+            try:
+                for _ in range(100):
+                    if path.exists():
+                        break
+                    await asyncio.sleep(0.01)
+                url = await asyncio.to_thread(request_pair, path)
+                self.assertTrue(url.startswith("https://lacasa-server.tail7a9c2.ts.net/auto-login?key="))
+                fake.start_authorization.assert_not_called()
+                fake.status.assert_not_called()
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+    async def test_control_request_sends_only_one_command(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "private" / "control.sock"
+            server = DashboardServer(public_url="https://lacasa-server.tail7a9c2.ts.net")
+            fake = Mock()
+            fake.start_authorization.return_value = AuthorizationStart(
+                url="https://x",
+                state_expires_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            )
+            server._spotify_oauth = fake
+            task = asyncio.create_task(server.serve_control(path))
+            try:
+                for _ in range(100):
+                    if path.exists():
+                        break
+                    await asyncio.sleep(0.01)
+                def send_two():
+                    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+                        sock.settimeout(2)
+                        sock.connect(str(path))
+                        sock.sendall(b'{"command":"spotify-auth-start","client_id":"CID"}\n{"command":"spotify-auth-start","client_id":"CID"}\n')
+                        result = b""
+                        while b"\n" not in result and len(result) < 4096:
+                            chunk = sock.recv(4096)
+                            if not chunk:
+                                break
+                            result += chunk
+                        return result
+                result = await asyncio.to_thread(send_two)
+                self.assertIn(b"\n", result)
+                reply = json.loads(result.partition(b"\n")[0])
+                self.assertFalse(reply["ok"])
+                self.assertEqual(reply["error"], "control frame must contain exactly one command")
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -22,6 +22,7 @@ import contextlib
 from pathlib import Path
 from urllib.parse import urlsplit
 from core import headless
+from core.spotify import default_oauth
 
 _DEPS_OK = False
 try:
@@ -461,7 +462,7 @@ def _read(name: str) -> str:
 
 class DashboardServer:
 
-    def __init__(self, public_url=None, host=None):
+    def __init__(self, public_url=None, host=None, spotify_oauth=None):
         self._host = host or os.environ.get('JARVIS_BIND', '127.0.0.1' if headless.enabled() else '0.0.0.0')
         self._public_url = (public_url or os.environ.get('JARVIS_PUBLIC_URL', '')).rstrip('/')
         if headless.enabled() and self._host not in ('127.0.0.1', '::1', 'localhost'):
@@ -497,6 +498,7 @@ class DashboardServer:
         self._uploads_dir                 = UPLOADS_DIR
         self._login_html                  = _read("login.html")
         self._app_html                    = _read("app.html")
+        self._spotify_oauth = spotify_oauth if spotify_oauth is not None else default_oauth()
         self.app                          = self._build_app()
 
     # ── one-time key management ───────────────────────────────────────────
@@ -600,6 +602,46 @@ class DashboardServer:
         return (self.audio_allowed() and message.get('epoch') == self._audio_epoch
                 and 0 <= time.monotonic() - message.get('at', 0) <= 1.0)
 
+
+    async def _read_control_message(self, reader):
+        raw = b''
+        while len(raw) < 4097:
+            chunk = await reader.read(4097 - len(raw))
+            if not chunk:
+                break
+            raw += chunk
+            if b'\n' in raw:
+                break
+        return raw
+
+    async def _dispatch_control(self, payload):
+        if not isinstance(payload, dict):
+            return {'ok': False, 'error': 'malformed control request'}
+        command = payload.get('command')
+        if command == 'spotify-auth-start':
+            client_id = payload.get('client_id')
+            if not isinstance(client_id, str) or not client_id:
+                return {'ok': False, 'error': 'invalid client_id'}
+            try:
+                start = self._spotify_oauth.start_authorization(client_id)
+            except Exception:
+                return {'ok': False, 'error': 'invalid client_id'}
+            return {'ok': True, 'authorization_url': start.url, 'state_expires_at': start.state_expires_at.isoformat()}
+        if command == 'spotify-auth-status':
+            try:
+                status = self._spotify_oauth.status()
+            except Exception:
+                return {'ok': False, 'error': 'status unavailable'}
+            return {
+                'ok': True,
+                'authorized': status.authorized,
+                'reauthorization_required': status.reauthorization_required,
+                'authorized_at': status.authorized_at.isoformat() if status.authorized_at else None,
+                'authorization_expires_at': status.authorization_expires_at.isoformat() if status.authorization_expires_at else None,
+                'access_expires_at': status.access_expires_at.isoformat() if status.access_expires_at else None,
+            }
+        return {'ok': False, 'error': 'unknown control command'}
+
     async def serve_control(self, path=None):
         """Local operator channel, inside a private directory, socket mode 0600."""
         path = Path(path or headless.control_path())
@@ -618,21 +660,38 @@ class DashboardServer:
                 raise RuntimeError('A JARVIS control socket is already active')
 
         async def handle(reader, writer):
+            reply = None
             try:
-                command = await asyncio.wait_for(reader.readline(), 2)
-                if command != b'pair\n' or not self._public_url:
-                    reply = {'error': 'Set JARVIS_PUBLIC_URL to the trusted external HTTPS origin before pairing'}
+                raw = await asyncio.wait_for(self._read_control_message(reader), 2)
+                head, sep, tail = raw.partition(b'\n')
+                if not sep or tail:
+                    reply = {'ok': False, 'error': 'control frame must contain exactly one command'}
+                elif head == b'pair':
+                    if not self._public_url:
+                        reply = {'error': 'Set JARVIS_PUBLIC_URL to the trusted external HTTPS origin before pairing'}
+                    else:
+                        key = self.new_key()
+                        await asyncio.gather(*self._revocation_tasks, return_exceptions=True)
+                        reply = {'url': f'{self.get_url()}/auto-login?key={key}'}
                 else:
-                    key = self.new_key()
-                    await asyncio.gather(*self._revocation_tasks, return_exceptions=True)
-                    reply = {'url': f'{self.get_url()}/auto-login?key={key}'}
-                writer.write((json.dumps(reply) + '\n').encode())
-                await writer.drain()
-            except (TimeoutError, ConnectionError, ValueError):
-                pass
+                    try:
+                        payload = json.loads(head.decode('utf-8'))
+                    except (UnicodeDecodeError, ValueError):
+                        reply = {'ok': False, 'error': 'malformed control request'}
+                    else:
+                        reply = await self._dispatch_control(payload)
+            except TimeoutError:
+                reply = {'ok': False, 'error': 'control request timed out'}
             finally:
+                if reply is not None:
+                    try:
+                        writer.write((json.dumps(reply) + '\n').encode())
+                        await writer.drain()
+                    except Exception:
+                        pass
                 writer.close()
                 await writer.wait_closed()
+
 
         # Cancellation may race the bind's completion. Shield and reap it so a
         # sibling HTTP startup failure cannot leak a bound, unowned socket.
@@ -704,6 +763,30 @@ class DashboardServer:
         def _auth(req: Request) -> bool:
             tok = req.headers.get("authorization", "").removeprefix("Bearer ").strip()
             return bool(tok) and tok in self._tokens
+
+        _SPOTIFY_CONNECTED_HTML = (
+            "<!DOCTYPE html>"
+            "<html><head><meta charset=\"UTF-8\">"
+            "<title>Spotify Connected</title></head>"
+            "<body><h1>Spotify is connected</h1>"
+            "<p>You may close this window.</p></body></html>"
+        )
+        _SPOTIFY_ERROR_HTML = (
+            "<!DOCTYPE html>"
+            "<html><head><meta charset=\"UTF-8\">"
+            "<title>Spotify Connection Failed</title></head>"
+            "<body><h1>Spotify connection failed</h1>"
+            "<p>Try again from the JARVIS control interface.</p></body></html>"
+        )
+
+        @app.get("/api/spotify/callback")
+        async def spotify_callback(state: str = "", code: str = "", error: str = ""):
+            status = self._spotify_oauth.complete_authorization(
+                state=state or None, code=code or None, error=error or None
+            )
+            if status.authorized:
+                return HTMLResponse(_SPOTIFY_CONNECTED_HTML, status_code=200)
+            return HTMLResponse(_SPOTIFY_ERROR_HTML, status_code=400)
 
         def pairing_rate_allowed():
             now = time.monotonic()

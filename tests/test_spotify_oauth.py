@@ -1,17 +1,22 @@
 """RED/GREEN tests for the private Spotify OAuth store (Task 1)."""
+import base64
+import hashlib
 import json
 import logging
 import os
+import socket
 import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from io import StringIO
 from pathlib import Path
 from unittest import mock
+from unittest.mock import Mock
 
 from core.spotify import (
     OAuthRecord,
@@ -20,7 +25,11 @@ from core.spotify import (
     REDIRECT_URI,
     SpotifyConfigError,
     TARGET_DEVICE_NAME,
+    SpotifyOAuth,
+    AuthorizationStart,
+    AuthorizationStatus,
 )
+from urllib.parse import parse_qs, urlsplit
 
 
 ACCESS_SECRET = "access-secret-7d21c5"
@@ -397,6 +406,231 @@ raise SystemExit(3)
 
     def test_invalidation_missing_store_returns_none(self):
         self.assertIsNone(OAuthStore(self.store_path).invalidate_tokens())
+
+
+class SpotifyOAuthTests(unittest.TestCase):
+    """PKCE flow, one-use callback, and status (Task 2)."""
+
+    UNRESERVED = set(
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
+    )
+    FAKE_VERIFIER = "A" * 43
+    FAKE_STATE = "B" * 43
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.store = OAuthStore(Path(self.tmp.name) / "spotify_oauth.json")
+        self.base_time = datetime(2026, 8, 31, 12, 0, tzinfo=timezone.utc)
+        self.clock = Mock(return_value=self.base_time)
+        self.request = Mock()
+        self.oauth = SpotifyOAuth(self.store, request=self.request, clock=self.clock)
+
+    def _fake_token_response(self, status_code=200, json_data=None, raise_exc=None):
+        resp = Mock()
+        resp.status_code = status_code
+        if raise_exc:
+            resp.json.side_effect = raise_exc
+        else:
+            resp.json.return_value = json_data or {}
+        return resp
+
+    def _setup_start_with_fake_secrets(self, client_id="SpotifyClientID"):
+        tokens = iter([self.FAKE_VERIFIER, self.FAKE_STATE])
+        with mock.patch(
+            "core.spotify.secrets.token_urlsafe", side_effect=lambda n: next(tokens)
+        ):
+            return self.oauth.start_authorization(client_id)
+
+    def test_start_authorization_builds_exact_pkce_url(self):
+        start = self._setup_start_with_fake_secrets()
+        params = parse_qs(urlsplit(start.url).query)
+        self.assertEqual(
+            urlsplit(start.url)._replace(query="").geturl(),
+            "https://accounts.spotify.com/authorize",
+        )
+        self.assertEqual(params["response_type"], ["code"])
+        self.assertEqual(params["client_id"], ["SpotifyClientID"])
+        self.assertEqual(params["redirect_uri"], [REDIRECT_URI])
+        self.assertEqual(params["code_challenge_method"], ["S256"])
+        self.assertEqual(params["scope"], [" ".join(REQUIRED_SCOPES)])
+        self.assertEqual(
+            params["code_challenge"],
+            [
+                base64.urlsafe_b64encode(
+                    hashlib.sha256(self.FAKE_VERIFIER.encode("ascii")).digest()
+                )
+                .rstrip(b"=")
+                .decode("ascii")
+            ],
+        )
+        self.assertNotIn("client_secret", params)
+        self.assertNotIn("code_verifier", params)
+        self.assertEqual(params["state"], [self.FAKE_STATE])
+        self.assertTrue(
+            all(ch in self.UNRESERVED for ch in self.FAKE_VERIFIER)
+        )
+        self.assertTrue(43 <= len(self.FAKE_VERIFIER) <= 128)
+        self.assertEqual(
+            start.state_expires_at,
+            self.base_time + timedelta(seconds=600),
+        )
+        self.assertFalse(self.store.load())
+
+    def test_start_authorization_rejects_invalid_client_ids(self):
+        for bad in ("", " " * 10, "x" * 129, "tab\there", "new\nline", "ctrl\x00", "x\x7fy"):
+            with self.subTest(client_id=repr(bad)):
+                with self.assertRaises(ValueError):
+                    self.oauth.start_authorization(bad)
+
+    def test_start_authorization_preserves_client_id(self):
+        self._setup_start_with_fake_secrets(client_id="MyExactId!@#")
+        saved = self.oauth._pending[self.FAKE_STATE]
+        self.assertEqual(saved[0], "MyExactId!@#")
+
+    def test_complete_authorization_exchanges_code_and_saves_record(self):
+        token_response = {
+            "access_token": ACCESS_SECRET,
+            "token_type": "Bearer",
+            "expires_in": 3600,
+            "refresh_token": REFRESH_SECRET,
+            "scope": " ".join(REQUIRED_SCOPES),
+        }
+        self.request.return_value = self._fake_token_response(200, token_response)
+        self._setup_start_with_fake_secrets()
+        status = self.oauth.complete_authorization(state=self.FAKE_STATE, code="the-auth-code")
+        self.assertTrue(status.authorized)
+        self.assertFalse(status.reauthorization_required)
+        self.assertEqual(status.authorized_at, self.base_time)
+        self.assertEqual(
+            status.authorization_expires_at,
+            datetime(2027, 2, 28, 12, 0, tzinfo=timezone.utc),
+        )
+        self.assertEqual(status.access_expires_at, datetime(2026, 8, 31, 13, 0, tzinfo=timezone.utc))
+        self.request.assert_called_once()
+        call = self.request.call_args
+        self.assertEqual(call.args[0], "POST")
+        self.assertEqual(call.args[1], "https://accounts.spotify.com/api/token")
+        self.assertNotIn("auth", call.kwargs)
+        form = call.kwargs["data"]
+        self.assertEqual(form["grant_type"], "authorization_code")
+        self.assertEqual(form["code"], "the-auth-code")
+        self.assertEqual(form["redirect_uri"], REDIRECT_URI)
+        self.assertEqual(form["client_id"], "SpotifyClientID")
+        self.assertEqual(form["code_verifier"], self.FAKE_VERIFIER)
+        self.assertNotIn("client_secret", form)
+        record = self.store.load()
+        self.assertEqual(record.access_token, ACCESS_SECRET)
+        self.assertEqual(record.refresh_token, REFRESH_SECRET)
+        self.assertEqual(record.scopes, REQUIRED_SCOPES)
+
+    def test_complete_authorization_missing_state_no_exchange(self):
+        status = self.oauth.complete_authorization(state=None, code="code")
+        self.assertFalse(status.authorized)
+        self.request.assert_not_called()
+
+    def test_complete_authorization_wrong_state_no_exchange(self):
+        status = self.oauth.complete_authorization(state="wrong", code="code")
+        self.assertFalse(status.authorized)
+        self.request.assert_not_called()
+
+    def test_complete_authorization_stale_state_no_exchange(self):
+        self._setup_start_with_fake_secrets()
+        self.clock.return_value = self.base_time + timedelta(seconds=600)
+        status = self.oauth.complete_authorization(state=self.FAKE_STATE, code="code")
+        self.assertFalse(status.authorized)
+        self.request.assert_not_called()
+
+    def test_complete_authorization_replay_no_second_exchange(self):
+        token_response = {"access_token": ACCESS_SECRET, "expires_in": 3600,
+                          "refresh_token": REFRESH_SECRET,
+                          "scope": " ".join(REQUIRED_SCOPES)}
+        self.request.return_value = self._fake_token_response(200, token_response)
+        self._setup_start_with_fake_secrets()
+        self.oauth.complete_authorization(state=self.FAKE_STATE, code="code")
+        self.oauth.complete_authorization(state=self.FAKE_STATE, code="code")
+        self.request.assert_called_once()
+
+    def test_complete_authorization_missing_code_consumes_state_no_exchange(self):
+        self._setup_start_with_fake_secrets()
+        status = self.oauth.complete_authorization(state=self.FAKE_STATE, code=None)
+        self.assertFalse(status.authorized)
+        self.request.assert_not_called()
+
+    def test_complete_authorization_access_denied_consumes_state_no_exchange(self):
+        self._setup_start_with_fake_secrets()
+        status = self.oauth.complete_authorization(state=self.FAKE_STATE, error="access_denied")
+        self.assertFalse(status.authorized)
+        self.request.assert_not_called()
+
+    def test_complete_authorization_malformed_token_json_no_save(self):
+        self._setup_start_with_fake_secrets()
+        self.request.return_value = self._fake_token_response(200, {"bad": True})
+        status = self.oauth.complete_authorization(state=self.FAKE_STATE, code="code")
+        self.assertFalse(status.authorized)
+        self.assertIsNone(self.store.load())
+
+    def test_complete_authorization_missing_scope_no_save(self):
+        self._setup_start_with_fake_secrets()
+        self.request.return_value = self._fake_token_response(200, {
+            "access_token": ACCESS_SECRET, "expires_in": 3600,
+            "scope": "user-read-playback-state",
+        })
+        status = self.oauth.complete_authorization(state=self.FAKE_STATE, code="code")
+        self.assertFalse(status.authorized)
+        self.assertIsNone(self.store.load())
+
+    def test_complete_authorization_token_endpoint_failure_no_save(self):
+        self._setup_start_with_fake_secrets()
+        self.request.return_value = self._fake_token_response(500)
+        status = self.oauth.complete_authorization(state=self.FAKE_STATE, code="code")
+        self.assertFalse(status.authorized)
+        self.assertIsNone(self.store.load())
+
+    def test_complete_authorization_one_state_one_exchange_concurrency(self):
+        token_response = {"access_token": ACCESS_SECRET, "expires_in": 3600,
+                          "refresh_token": REFRESH_SECRET,
+                          "scope": " ".join(REQUIRED_SCOPES)}
+        self.request.return_value = self._fake_token_response(200, token_response)
+        self._setup_start_with_fake_secrets()
+        barrier = threading.Barrier(2)
+        results = []
+        def worker():
+            barrier.wait()
+            results.append(self.oauth.complete_authorization(state=self.FAKE_STATE, code="code"))
+        t1 = threading.Thread(target=worker)
+        t2 = threading.Thread(target=worker)
+        t1.start(); t2.start(); t1.join(); t2.join()
+        self.request.assert_called_once()
+        self.assertEqual(self.store.load().access_token, ACCESS_SECRET)
+        self.assertEqual(sum(1 for s in results if s.authorized), 1)
+
+    def test_status_returns_none_when_unauthorized(self):
+        status = self.oauth.status()
+        self.assertFalse(status.authorized)
+        self.assertTrue(status.reauthorization_required)
+        self.assertIsNone(status.authorized_at)
+
+    def test_status_reports_expired_authorization(self):
+        token_response = {"access_token": ACCESS_SECRET, "expires_in": 3600,
+                          "refresh_token": REFRESH_SECRET,
+                          "scope": " ".join(REQUIRED_SCOPES)}
+        self.request.return_value = self._fake_token_response(200, token_response)
+        self._setup_start_with_fake_secrets()
+        self.oauth.complete_authorization(state=self.FAKE_STATE, code="code")
+        self.clock.return_value = datetime(2027, 3, 1, 12, 0, tzinfo=timezone.utc)
+        status = self.oauth.status()
+        self.assertFalse(status.authorized)
+        self.assertTrue(status.reauthorization_required)
+
+
+class SpotifyDefaultOAuthTests(unittest.TestCase):
+    def test_default_oauth_lazy_singleton(self):
+        from core.spotify import default_oauth
+        a = default_oauth()
+        b = default_oauth()
+        self.assertIs(a, b)
+        self.assertIsInstance(a, SpotifyOAuth)
 
 
 if __name__ == "__main__":

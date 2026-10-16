@@ -322,3 +322,183 @@ class OAuthStore:
         )
         self.save(cleared)
         return cleared
+
+
+# ── PKCE authorization flow (Task 2) ────────────────────────────────────────────
+
+import base64
+import hashlib
+import requests
+import threading
+from collections.abc import Callable
+from dataclasses import dataclass
+from urllib.parse import urlencode
+
+
+TOKEN_ENDPOINT = "https://accounts.spotify.com/api/token"
+AUTHORIZE_ENDPOINT = "https://accounts.spotify.com/authorize"
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def no_secret_logger(message: str) -> None:
+    logger.debug("%s", message)
+
+
+@dataclass(frozen=True)
+class AuthorizationStart:
+    url: str
+    state_expires_at: datetime
+
+
+@dataclass(frozen=True)
+class AuthorizationStatus:
+    authorized: bool
+    reauthorization_required: bool
+    authorized_at: datetime | None
+    authorization_expires_at: datetime | None
+    access_expires_at: datetime | None
+
+
+def _validate_client_id(client_id: object) -> str:
+    if not isinstance(client_id, str) or not client_id:
+        raise ValueError("client_id must be a non-empty string")
+    if len(client_id) > 128:
+        raise ValueError("client_id must be at most 128 characters")
+    for ch in client_id:
+        if ch.isspace() or ord(ch) < 32 or ord(ch) == 127:
+            raise ValueError("client_id must be printable with no whitespace or control characters")
+    return client_id
+
+
+class SpotifyOAuth:
+    def __init__(
+        self,
+        store: OAuthStore,
+        request: Callable = requests.request,
+        clock: Callable[[], datetime] = utc_now,
+        pending_ttl_seconds: int = 600,
+        logger: Callable[[str], None] = no_secret_logger,
+    ):
+        self._store = store
+        self._request = request
+        self._clock = clock
+        self._pending_ttl_seconds = pending_ttl_seconds
+        self._logger = logger
+        self._pending: dict[str, tuple[str, str, datetime]] = {}
+        self._lock = threading.Lock()
+
+    def start_authorization(self, client_id: str) -> AuthorizationStart:
+        client_id = _validate_client_id(client_id)
+        now = self._clock()
+        verifier = secrets.token_urlsafe(32).rstrip("=")
+        state = secrets.token_urlsafe(16)
+        challenge = base64.urlsafe_b64encode(
+            hashlib.sha256(verifier.encode("ascii")).digest()
+        ).rstrip(b"=").decode("ascii")
+        with self._lock:
+            self._pending[state] = (client_id, verifier, now)
+        params = {
+            "response_type": "code",
+            "client_id": client_id,
+            "redirect_uri": REDIRECT_URI,
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+            "scope": " ".join(REQUIRED_SCOPES),
+            "state": state,
+        }
+        url = AUTHORIZE_ENDPOINT + "?" + urlencode(params)
+        self._logger("starting spotify authorization for " + client_id)
+        return AuthorizationStart(url=url, state_expires_at=now + timedelta(seconds=self._pending_ttl_seconds))
+
+    def complete_authorization(self, *, state: str | None, code: str | None = None, error: str | None = None) -> AuthorizationStatus:
+        now = self._clock()
+        record = self._store.load()
+        if not state:
+            return self._status(record, now)
+        with self._lock:
+            pending = self._pending.pop(state, None)
+        if pending is None:
+            return self._status(record, now)
+        client_id, verifier, created_at = pending
+        if now >= created_at + timedelta(seconds=self._pending_ttl_seconds):
+            return self._status(record, now)
+        if error:
+            return self._status(record, now)
+        if not code:
+            return self._status(record, now)
+        try:
+            new_record = self._exchange_token(client_id, code, verifier, now)
+        except SpotifyAuthorizationRequired:
+            return self._status(record, now)
+        self._store.save(new_record)
+        return self._status(new_record, now)
+
+    def status(self) -> AuthorizationStatus:
+        now = self._clock()
+        record = self._store.load()
+        return self._status(record, now)
+
+    def _status(self, record: OAuthRecord | None, now: datetime) -> AuthorizationStatus:
+        if record is None:
+            return AuthorizationStatus(False, True, None, None, None)
+        reauth = now >= record.authorization_expires_at
+        return AuthorizationStatus(
+            not reauth, reauth,
+            record.authorized_at, record.authorization_expires_at, record.access_expires_at,
+        )
+
+    def _exchange_token(self, client_id: str, code: str, verifier: str, now: datetime) -> OAuthRecord:
+        data = {
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": REDIRECT_URI,
+            "client_id": client_id,
+            "code_verifier": verifier,
+        }
+        response = self._request(
+            "POST", TOKEN_ENDPOINT, data=data,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            timeout=15,
+        )
+        if response.status_code != 200:
+            raise SpotifyAuthorizationRequired("token endpoint returned non-200")
+        try:
+            body = response.json()
+        except Exception as exc:
+            raise SpotifyAuthorizationRequired("malformed token response") from exc
+        if not isinstance(body, dict) or "access_token" not in body:
+            raise SpotifyAuthorizationRequired("malformed token response")
+        access_token = body["access_token"]
+        expires_in = body.get("expires_in")
+        if not isinstance(expires_in, (int, float)) or expires_in < 0:
+            raise SpotifyAuthorizationRequired("malformed token response")
+        refresh_token = body.get("refresh_token")
+        raw_scopes = body.get("scope", "")
+        returned_scopes = set(raw_scopes.split()) if isinstance(raw_scopes, str) else set()
+        if not set(REQUIRED_SCOPES).issubset(returned_scopes):
+            raise SpotifyAuthorizationRequired("missing required scope")
+        return OAuthRecord(
+            client_id=client_id,
+            authorized_at=now,
+            authorization_expires_at=_six_calendar_months(now),
+            access_token=access_token,
+            access_expires_at=now + timedelta(seconds=float(expires_in)),
+            refresh_token=refresh_token,
+            scopes=REQUIRED_SCOPES,
+        )
+
+
+_default_oauth: SpotifyOAuth | None = None
+_default_lock = threading.Lock()
+
+
+def default_oauth() -> SpotifyOAuth:
+    global _default_oauth
+    if _default_oauth is None:
+        with _default_lock:
+            if _default_oauth is None:
+                _default_oauth = SpotifyOAuth(OAuthStore())
+    return _default_oauth
