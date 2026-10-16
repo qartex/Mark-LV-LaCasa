@@ -29,12 +29,17 @@ class HeadlessTests(unittest.IsolatedAsyncioTestCase):
         confirm.bind(None, None)
 
     def test_missing_key_exits_without_gui(self):
-        with patch('memory.config_manager.load_api_keys', return_value={}):
-            ui = JarvisUI()
-        with self.assertRaises(SystemExit):
-            ui.wait_for_api_key()
-        with self.assertRaises(SystemExit):
+        for config in ({}, {'gemini_api_key': ''}, {'gemini_api_key': '  '},
+                       {'gemini_api_key': 123}, []):
+            with self.subTest(config=config):
+                with patch('memory.config_manager.load_api_keys', return_value=config):
+                    ui = JarvisUI()
+                with self.assertRaises(SystemExit) as missing:
+                    ui.wait_for_api_key()
+                self.assertEqual(missing.exception.code, 78)
+        with self.assertRaises(SystemExit) as invalid:
             ui.prompt_reconfig()
+        self.assertEqual(invalid.exception.code, 78)
 
     def test_defaults(self):
         from core.headless import enabled, capture_source
@@ -304,9 +309,17 @@ class HeadlessTests(unittest.IsolatedAsyncioTestCase):
         for error in (RuntimeError('API key not valid'), ExceptionGroup('tasks', [RuntimeError('API key not valid')])):
             with self.subTest(error=type(error).__name__):
                 live = self.make_live()
-                with patch.object(main.genai, 'Client', side_effect=error), patch('dashboard.server.DashboardServer.serve', new=AsyncMock()), patch('dashboard.server.DashboardServer.serve_control', new=AsyncMock()), patch.object(main.audio_devices, 'prefetch'):
-                    with self.assertRaises(SystemExit):
-                        await live.run()
+                with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {
+                        'JARVIS_PUBLIC_URL':'https://example.test',
+                        'JARVIS_CONTROL_SOCKET':str(Path(directory)/'private'/'control.sock')}), patch(
+                        'dashboard.server.PORT', 0), patch.object(main, '_get_api_key', return_value='synthetic'), patch.object(
+                        main.genai, 'Client', side_effect=error) as client:
+                    with self.assertRaises(SystemExit) as caught:
+                        async with asyncio.timeout(2):
+                            await live.run()
+                    self.assertEqual(caught.exception.code, 78)
+                    self.assertEqual(client.call_count, 1)
+                    self.assertFalse((Path(directory)/'private'/'control.sock').exists())
 
     async def test_stop_while_idle_does_not_poison_next_turn(self):
         live = self.make_live()

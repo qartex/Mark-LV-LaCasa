@@ -64,6 +64,10 @@ tailscale serve status
 
 `loginctl show-user lacasa -p Linger` sollte `Linger=yes` melden. Die Benutzersitzung benötigt dadurch keine offene SSH-Verbindung oder einen Desktop. Der richtige systemd-Start führt `.venv/bin/python main.py` im Deployment-Verzeichnis aus. Vorhandene Keys werden aus der lokalen ignorierten Konfiguration gelesen; Dateimodus 0600 beibehalten.
 
+### Startfehler und lokale Reparatur
+
+Die aktualisierte Unit verhindert automatische Neustarts nur bei **Exit 78 (`EX_CONFIG`)**: fehlende/ungültige lokale Gemini-Zugangsdaten oder ungültige Headless-Konfiguration zuerst lokal reparieren, danach `systemctl --user restart jarvis`. Ein HTTP-Bindefehler oder fehlgeschlagener Unix-Kontrollkanal beendet den Dienst dagegen mit einem normalen Fehlerstatus; `Restart=on-failure` darf ihn erneut starten. Modellverbindungen beginnen erst, wenn beide lokalen Eingänge bereit sind. Der unabhängige Spotify-Ducking-Guard bleibt davon unberührt. Nach einem Unit-Update ist vor dem nächsten geplanten JARVIS-Start ein `systemctl --user daemon-reload` erforderlich; Spotify oder die gemeinsame Audiositzung dafür nicht neu starten.
+
 ### Zugriff prüfen
 
 ```sh

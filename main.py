@@ -296,8 +296,17 @@ def _render_prompt(template: str, values: dict) -> str:
 
 
 def _get_api_key() -> str:
-    with open(API_CONFIG_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)["gemini_api_key"]
+    try:
+        with open(API_CONFIG_PATH, "r", encoding="utf-8") as f:
+            key = json.load(f)["gemini_api_key"]
+        if not isinstance(key, str) or not key.strip():
+            raise ValueError('Missing Gemini API key')
+        return key
+    except (OSError, ValueError, KeyError, TypeError):
+        if not headless.enabled():
+            raise
+        print('[JARVIS] Invalid or missing local credentials/config; repair config/api_keys.json.')
+        raise SystemExit(78) from None
 
 
 def _load_system_prompt() -> str:
@@ -560,6 +569,8 @@ class JarvisLive:
         self._turn_active = False
         self._turn_generation = 0  # guards pending-send cleanup against newer activity
         self._input_stream_open = False
+        self._input_epoch = None
+        self._input_capture = None
         # Transcript-driven mouth shapes for the avatar. Fed from the receive
         # loop as words arrive, drained by the playback loop against the audio.
         self._visemes              = VisemeStream()
@@ -1330,19 +1341,30 @@ class JarvisLive:
         while True:
             msg = await self.out_queue.get()
             if msg.get('audio_stream_end') and msg.get('control'):
-                if self._input_stream_open:
+                epoch = msg.get('epoch')
+                if self._input_stream_open and (epoch is None or
+                        (self._input_epoch is not None and self._input_epoch <= epoch)):
+                    self._input_stream_open = False
+                    await self.session.send_realtime_input(audio_stream_end=True)
+                continue
+            if msg.get('audio_stream_end'):
+                if (self._input_stream_open and
+                        self._input_capture == (msg.get('epoch'), msg.get('capture'))):
                     self._input_stream_open = False
                     await self.session.send_realtime_input(audio_stream_end=True)
                 continue
             if headless.capture_source() == 'phone':
                 if not self.audio_allowed() or not self._dashboard.audio_message_valid(msg):
                     continue
-            if msg.get('audio_stream_end'):
+            capture = (msg.get('epoch'), msg.get('capture'))
+            if self._input_stream_open and self._input_capture != capture:
+                # A replacement source never inherits an unfinished utterance.
                 self._input_stream_open = False
                 await self.session.send_realtime_input(audio_stream_end=True)
-                continue
             self._turn_generation += 1
             self._turn_active = True
+            self._input_epoch = msg.get('epoch')
+            self._input_capture = capture
             self._input_stream_open = True
             # Gemini 3.x Live rejects the old realtime_input.media_chunks field
             # (what `media=...` maps to) and closes the socket with a 1007. Send
@@ -2189,6 +2211,10 @@ class JarvisLive:
                 # No audio for 1 s → phone mic inactive, give PC mic back
                 self._phone_active = False
                 continue
+            if chunk.get('audio_stream_end'):
+                # Closure must survive a closed gate, expiry and backpressure.
+                await self.out_queue.put(chunk)
+                continue
             self._phone_active = True   # phone is streaming — silence PC mic
             with self._speaking_lock:
                 speaking = self._is_speaking
@@ -2275,22 +2301,53 @@ class JarvisLive:
         if not headless.enabled():
             audio_devices.prefetch()
 
-        # Start dashboard (optional — needs: pip install fastapi "uvicorn[standard]" cryptography)
+        # Phone-only entry points are essential, not an optional dashboard.
         try:
+            if headless.enabled():
+                headless.capture_source()
+                _get_api_key()
             from dashboard.server import DashboardServer
             self._dashboard = DashboardServer()
+            if headless.enabled() and not self._dashboard._public_url:
+                raise ValueError('Set JARVIS_PUBLIC_URL to the trusted private HTTPS origin')
             self._dashboard.set_connect_callback(self._on_phone_connected)
             self._dashboard.set_interrupt_callback(self.interrupt)
             self._dashboard.set_audio_allowed_callback(self.audio_allowed)
-            asyncio.create_task(self._dashboard.serve())
-            if headless.enabled():
-                asyncio.create_task(self._dashboard.serve_control())
-            # Runs for the whole lifetime, not just inside an active session
-            asyncio.create_task(self._process_dashboard_commands())
         except Exception as e:
+            if headless.enabled():
+                if isinstance(e, ValueError):
+                    self.ui.write_log(f'ERR: Invalid headless configuration: {e}')
+                    raise SystemExit(78) from None
+                raise
             print(f"[Dashboard] Disabled: {e}")
             self._dashboard = None
 
+        if headless.enabled():
+            async def essential(name, serve):
+                try:
+                    await serve()
+                except asyncio.CancelledError:
+                    if not asyncio.current_task().cancelling():
+                        raise RuntimeError(f'Essential {name} server stopped unexpectedly') from None
+                    raise
+                raise RuntimeError(f'Essential {name} server exited')
+
+            # A startup/lifetime failure cancels the model and the sibling
+            # listeners; cancellation awaits their resource cleanup. The guard
+            # remains a separate service and is deliberately not touched here.
+            async with asyncio.TaskGroup() as services:
+                services.create_task(essential('HTTP', self._dashboard.serve))
+                services.create_task(essential('pairing control', self._dashboard.serve_control))
+                await asyncio.wait_for(self._dashboard.wait_ready(), 10)
+                services.create_task(self._process_dashboard_commands())
+                await self._run_sessions()
+        else:
+            if self._dashboard:
+                asyncio.create_task(self._dashboard.serve())
+                asyncio.create_task(self._process_dashboard_commands())
+            await self._run_sessions()
+
+    async def _run_sessions(self):
         while True:
             try:
                 print("[JARVIS] Connecting...")

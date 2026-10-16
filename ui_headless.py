@@ -56,7 +56,8 @@ class JarvisUI:
         # API key handling — headless reads from config/api_keys.json directly
         from memory.config_manager import load_api_keys
         cfg = load_api_keys()
-        self._api_key = cfg.get("gemini_api_key", "")
+        key = cfg.get("gemini_api_key", "") if isinstance(cfg, dict) else ''
+        self._api_key = key if isinstance(key, str) and key.strip() else ''
         self._ready = bool(self._api_key)
 
         print("[JARVIS] Headless UI initialised — assistant ready.")
@@ -91,13 +92,13 @@ class JarvisUI:
             print("[JARVIS] No Gemini API key found in config/api_keys.json")
             print("Get one free at https://aistudio.google.com/app/apikey")
             print("Then run: python main.py again")
-            sys.exit(1)
+            sys.exit(78)
         print(f"[JARVIS] API key loaded ({len(self._api_key)} chars)")
 
     def prompt_reconfig(self):
         """Headless: just warn on console."""
         print("[JARVIS] API key invalid — check config/api_keys.json")
-        raise SystemExit(1)
+        raise SystemExit(78)
 
     # ── State & logging (these DO matter — they drive console output) ────
 

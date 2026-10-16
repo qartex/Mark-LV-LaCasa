@@ -19,8 +19,9 @@ RuntimeDirectory=jarvis
 RuntimeDirectoryMode=0700
 UMask=0077
 Restart=on-failure
-# Invalid credentials require repair, not an API retry storm.
-RestartPreventExitStatus=1
+# EX_CONFIG: invalid/missing credentials or configuration require local repair.
+# Ordinary listener/startup failures remain retryable under Restart=on-failure.
+RestartPreventExitStatus=78
 RestartSec=5
 NoNewPrivileges=true
 

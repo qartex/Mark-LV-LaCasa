@@ -464,6 +464,8 @@ class DashboardServer:
     def __init__(self, public_url=None, host=None):
         self._host = host or os.environ.get('JARVIS_BIND', '127.0.0.1' if headless.enabled() else '0.0.0.0')
         self._public_url = (public_url or os.environ.get('JARVIS_PUBLIC_URL', '')).rstrip('/')
+        if headless.enabled() and self._host not in ('127.0.0.1', '::1', 'localhost'):
+            raise ValueError('Headless dashboard must bind loopback behind trusted HTTPS')
         if self._public_url:
             parsed = urlsplit(self._public_url)
             if (parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password
@@ -475,6 +477,10 @@ class DashboardServer:
         self._audio_clients = set()
         self._audio_owner = None
         self._audio_epoch = 0
+        self._capture_serial = 0
+        self._audio_epoch_has_pcm = False
+        self._http_ready = asyncio.Event()
+        self._control_ready = asyncio.Event()
         self._pair_attempts = []
         self._ip = '127.0.0.1' if headless.enabled() else _local_ip()
         self._tokens: set[str]            = set()
@@ -576,8 +582,19 @@ class DashboardServer:
                 'audio_busy': self._audio_owner is not None}
 
     def invalidate_audio(self):
+        old_epoch = self._audio_epoch
         self._audio_epoch += 1
-        headless.drain(self._phone_audio_queue)
+        # Discard stale PCM, but retain a bounded upstream closure obligation.
+        # A cumulative epoch fence subsumes older pending closes; it cannot end
+        # input belonging to a newer owner, even if delivered late.
+        needs_close = self._audio_epoch_has_pcm
+        while not self._phone_audio_queue.empty():
+            message = self._phone_audio_queue.get_nowait()
+            needs_close |= bool(message.get('audio_stream_end'))
+        self._audio_epoch_has_pcm = False
+        if needs_close:
+            self._phone_audio_queue.put_nowait({'audio_stream_end': True,
+                                                'control': True, 'epoch': old_epoch})
 
     def audio_message_valid(self, message):
         return (self.audio_allowed() and message.get('epoch') == self._audio_epoch
@@ -617,13 +634,27 @@ class DashboardServer:
                 writer.close()
                 await writer.wait_closed()
 
-        server = await asyncio.start_unix_server(handle, str(path), limit=256)
-        os.chmod(path, 0o600)
+        # Cancellation may race the bind's completion. Shield and reap it so a
+        # sibling HTTP startup failure cannot leak a bound, unowned socket.
+        binding = asyncio.create_task(asyncio.start_unix_server(handle, str(path), limit=256))
+        server = None
         try:
+            server = self._control_server = await asyncio.shield(binding)
             async with server:
+                os.chmod(path, 0o600)
+                self._control_ready.set()
                 await server.serve_forever()
         finally:
+            self._control_ready.clear()
+            if server is None:
+                server = await binding
+            server.close()
+            await server.wait_closed()
             path.unlink(missing_ok=True)
+
+    async def wait_ready(self):
+        """Ready means HTTP is accepting and the private control socket is bound."""
+        await asyncio.gather(self._http_ready.wait(), self._control_ready.wait())
 
     async def _watch_status(self):
         previous = None
@@ -762,7 +793,11 @@ class DashboardServer:
   h2{color:#f87171;margin-bottom:12px}p{color:#5e6a7e;font-size:14px}
 </style></head>
 <body><div><h2>Link Expired</h2>
-<p>Press <strong style="color:#dde3ed">Remote Control</strong> in JARVIS to get a new QR code.</p>
+<p>Ask the server operator for a fresh pairing link. On the server, from the JARVIS checkout<br>
+using its Python environment, run <code>python -m core.headless pair</code>.</p>
+<p>Open the trusted private HTTPS link in Safari over the private network/Tailscale.<br>
+Tap the microphone button and allow microphone access in Safari's website permissions.<br>
+Do not bypass certificate warnings or browser security protections.</p>
 </div></body></html>""")
 
             del self._pending_keys[key]
@@ -869,6 +904,8 @@ class DashboardServer:
             self._audio_owner = websocket
             self._audio_clients.add(websocket)
             epoch = self._audio_epoch
+            self._capture_serial += 1
+            capture = self._capture_serial
             ended = False
             try:
                 await websocket.accept()
@@ -891,7 +928,8 @@ class DashboardServer:
                             await websocket.close(code=4002)
                             break
                         await self._phone_audio_queue.put({'audio_stream_end':True,
-                                                          'epoch':epoch, 'at':time.monotonic()})
+                                                          'epoch':epoch, 'capture':capture,
+                                                          'at':time.monotonic()})
                         ended = True
                         await websocket.send_json({'type':'audio_ended'})
                         await websocket.close(code=1000)
@@ -902,8 +940,9 @@ class DashboardServer:
                     try:
                         self._phone_audio_queue.put_nowait(
                             {'data':data, 'mime_type':'audio/pcm;rate=16000',
-                             'epoch':epoch, 'at':time.monotonic()}
+                             'epoch':epoch, 'capture':capture, 'at':time.monotonic()}
                         )
+                        self._audio_epoch_has_pcm = True
                     except asyncio.QueueFull:
                         pass  # drop frame rather than block
             except WebSocketDisconnect:
@@ -912,8 +951,8 @@ class DashboardServer:
                 self._audio_clients.discard(websocket)
                 if self._audio_owner is websocket:
                     self._audio_owner = None
-                if not ended:
-                    self.invalidate_audio()
+                    if not ended and epoch == self._audio_epoch:
+                        self.invalidate_audio()
 
         # ── File sharing ──────────────────────────────────────────────────────
 
@@ -1061,13 +1100,64 @@ class DashboardServer:
                 raise ValueError('Headless dashboard must bind loopback behind trusted HTTPS')
             cfg = uvicorn.Config(self.app, host=self._host, port=PORT,
                                  log_level='warning', access_log=False,
-                                 proxy_headers=False)
-            watcher = asyncio.create_task(self._watch_status())
-            try:
-                await uvicorn.Server(cfg).serve()
-            finally:
-                watcher.cancel()
-                await asyncio.gather(watcher, return_exceptions=True)
+                                 proxy_headers=False, timeout_graceful_shutdown=3)
+            # Bind ourselves: Uvicorn's normal bind path calls sys.exit(1),
+            # which escapes task supervision. An OSError here remains retryable.
+            family = socket.AF_INET6 if self._host == '::1' else socket.AF_INET
+            with socket.create_server((self._host, PORT), family=family) as listener:
+                listener.setblocking(False)
+                class OwnedHTTPServer(uvicorn.Server):
+                    cleaned = False
+
+                    def capture_signals(self):
+                        # The application owns SIGTERM, not nested HTTP.
+                        return contextlib.nullcontext()
+
+                    async def shutdown(self, sockets=None):
+                        try:
+                            await super().shutdown(sockets=sockets)
+                        finally:
+                            self.cleaned = True
+
+                server = self._http_server = OwnedHTTPServer(cfg)
+
+                async def serve_http():
+                    try:
+                        await server.serve(sockets=[listener])
+                    except SystemExit as exc:
+                        raise RuntimeError('HTTP server exited during startup') from exc
+
+                serving = asyncio.create_task(serve_http())
+                watcher = asyncio.create_task(self._watch_status())
+                try:
+                    while not server.started:
+                        if serving.done():
+                            await serving
+                            raise RuntimeError('HTTP startup failed')
+                        await asyncio.sleep(.01)
+                    if serving.done():
+                        await serving
+                        raise RuntimeError('HTTP startup failed')
+                    self._http_ready.set()
+                    done, _ = await asyncio.wait((serving, watcher),
+                                                 return_when=asyncio.FIRST_COMPLETED)
+                    for task in done:
+                        await task
+                finally:
+                    self._http_ready.clear()
+                    server.should_exit = True
+                    try:
+                        await asyncio.wait_for(asyncio.shield(serving), 5)
+                    except TimeoutError:
+                        serving.cancel()
+                        await asyncio.gather(serving, return_exceptions=True)
+                    finally:
+                        try:
+                            if server.started and not server.cleaned:
+                                await server.shutdown(sockets=[listener])
+                        finally:
+                            watcher.cancel()
+                            await asyncio.gather(watcher, return_exceptions=True)
             return
         if not _DEPS_OK:
             print("[Dashboard] fastapi/uvicorn not installed — dashboard disabled.")

@@ -1,6 +1,7 @@
 """Exercise JarvisLive's real playback loop through its hardware boundary."""
 import asyncio
 import tempfile
+import os
 import threading
 import time
 import unittest
@@ -96,17 +97,21 @@ class PlaybackDuckingTests(unittest.IsolatedAsyncioTestCase):
     async def test_run_cancellation_is_not_swallowed_as_reconnect(self):
         import main
         live = self.live
-        with patch.object(main, '_get_api_key', return_value='test'), patch.object(
-                main.genai, 'Client', side_effect=asyncio.CancelledError()), patch(
-                'dashboard.server.DashboardServer.serve', return_value=None), patch(
-                'dashboard.server.DashboardServer.serve_control', return_value=None):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {
+                'JARVIS_PUBLIC_URL': 'https://example.test',
+                'JARVIS_CONTROL_SOCKET': str(Path(directory)/'private'/'control.sock')}), patch(
+                'dashboard.server.PORT', 0), patch.object(main, '_get_api_key', return_value='test'), patch.object(
+                main.genai, 'Client', side_effect=asyncio.CancelledError()):
             task = asyncio.create_task(live.run())
-            await asyncio.sleep(.05)
-            swallowed = not task.done()
-            if swallowed:
+            try:
+                await asyncio.wait_for(asyncio.shield(task), 2)
+            except asyncio.CancelledError:
+                pass
+            except TimeoutError:
                 task.cancel()
+            swallowed = not task.done()
             with self.assertRaises(asyncio.CancelledError):
-                await asyncio.wait_for(task, .1)
+                await asyncio.wait_for(task, 2)
             self.assertFalse(swallowed, 'run converted cancellation into a reconnect')
 
     async def test_stop_during_gain_acquire_discards_batch_even_if_model_completes(self):
