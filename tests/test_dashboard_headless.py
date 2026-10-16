@@ -107,6 +107,81 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(self.client.get('/api/status',headers=self.headers).status_code,401)
 
 
+class WebSocketHandshakeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_audio_handshake_failure_releases_owner_and_allows_reconnect(self):
+        for stage in ('accept', 'send'):
+            for failure in (WebSocketDisconnect, RuntimeError, asyncio.CancelledError):
+                with self.subTest(stage=stage, failure=failure.__name__):
+                    server = DashboardServer()
+                    server._tokens.add('test-token')
+                    server.set_audio_allowed_callback(lambda: True)
+                    route = next(r.endpoint for r in server.app.routes
+                                 if r.path == '/ws/phone-audio')
+                    stale = {'data': b'\x00\x01', 'epoch': server._audio_epoch,
+                             'at': time.monotonic()}
+                    server._phone_audio_queue.put_nowait(stale)
+                    socket = HandshakeSocket(stage, failure)
+                    try:
+                        await route(socket, token='test-token')
+                    except (WebSocketDisconnect, RuntimeError, asyncio.CancelledError):
+                        pass
+                    self.assertIsNone(server._audio_owner)
+                    self.assertNotIn(socket, server._audio_clients)
+                    self.assertTrue(server._phone_audio_queue.empty())
+                    self.assertFalse(server.audio_message_valid(stale))
+                    replacement = HandshakeSocket()
+                    await route(replacement, token='test-token')
+                    self.assertEqual(replacement.messages,
+                                     [{'type': 'audio_ready'}, {'type': 'audio_ended'}])
+                    self.assertIsNone(server._audio_owner)
+                    self.assertFalse(server._audio_clients)
+
+    async def test_control_handshake_failure_does_not_leave_registered_client(self):
+        for stage in ('accept', 'send'):
+            for failure in (WebSocketDisconnect, RuntimeError, asyncio.CancelledError):
+                with self.subTest(stage=stage, failure=failure.__name__):
+                    server = DashboardServer()
+                    server._tokens.add('test-token')
+                    route = next(r.endpoint for r in server.app.routes if r.path == '/ws')
+                    socket = HandshakeSocket(stage, failure)
+                    try:
+                        await route(socket, token='test-token')
+                    except (WebSocketDisconnect, RuntimeError, asyncio.CancelledError):
+                        pass
+                    self.assertNotIn(socket, server._clients)
+                    replacement = HandshakeSocket()
+                    await route(replacement, token='test-token')
+                    self.assertEqual(replacement.messages[0]['type'], 'status')
+                    self.assertFalse(server._clients)
+
+
+class HandshakeSocket:
+    """Transport fault injection; production route/state/cleanup stay real."""
+    def __init__(self, stage=None, failure=None):
+        self.stage, self.failure = stage, failure
+        self.messages = []
+
+    def fail_at(self, stage):
+        if self.stage == stage:
+            raise self.failure(1006) if self.failure is WebSocketDisconnect else self.failure()
+
+    async def accept(self):
+        self.fail_at('accept')
+
+    async def send_json(self, message):
+        self.fail_at('send')
+        self.messages.append(message)
+
+    async def receive(self):
+        return {'type': 'websocket.receive', 'text': '{"type":"audio_stream_end"}'}
+
+    async def receive_json(self):
+        raise WebSocketDisconnect(1000)
+
+    async def close(self, **kwargs):
+        pass
+
+
 class ControlTests(unittest.IsolatedAsyncioTestCase):
     async def test_pair_cli_targets_running_instance_and_rotates_live_sockets(self):
         from core.headless import request_pair

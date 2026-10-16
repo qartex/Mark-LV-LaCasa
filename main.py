@@ -558,6 +558,7 @@ class JarvisLive:
         self._vision_busy          = False   # True while a vision capture/inject cycle is in flight
         self._interrupted          = False   # True while draining audio after user interrupt
         self._turn_active = False
+        self._turn_generation = 0  # guards pending-send cleanup against newer activity
         self._input_stream_open = False
         # Transcript-driven mouth shapes for the avatar. Fed from the receive
         # loop as words arrive, drained by the playback loop against the audio.
@@ -1334,6 +1335,7 @@ class JarvisLive:
                 self._input_stream_open = False
                 await self.session.send_realtime_input(audio_stream_end=True)
                 continue
+            self._turn_generation += 1
             self._turn_active = True
             self._input_stream_open = True
             # Gemini 3.x Live rejects the old realtime_input.media_chunks field
@@ -1534,6 +1536,9 @@ class JarvisLive:
                             if self._resume_handle is None:
                                 print("[JARVIS] 🔗 Session resumption armed")
                             self._resume_handle = _sru.new_handle
+
+                    if response.data or response.tool_call or response.server_content:
+                        self._turn_generation += 1
 
                     if response.data:
                         self._turn_active = True
@@ -2100,11 +2105,23 @@ class JarvisLive:
                     # has no desktop WAKE button — so it wakes JARVIS if asleep.
                     if self._wake_enabled and not self._awake:
                         self.wake(reason="remote command")
-                    await self.session.send_client_content(
-                        turns={"role": "user", "parts": [{"text": text}]},
-                        turn_complete=True,
-                    )
+                    # Stop must see the pending turn even while the send is blocked.
+                    was_active = self._turn_active
+                    self._turn_generation += 1
+                    generation = self._turn_generation
                     self._turn_active = True
+                    try:
+                        await self.session.send_client_content(
+                            turns={"role": "user", "parts": [{"text": text}]},
+                            turn_complete=True,
+                        )
+                    except BaseException:
+                        # A failed/cancelled send owns only this pending turn,
+                        # not an existing response or activity received meanwhile.
+                        if not was_active and self._turn_generation == generation:
+                            self._turn_active = False
+                            self._interrupted = False
+                        raise
                     self.ui.write_log(f"[Web]: {text}")
                 else:
                     print(f"[Dashboard] Dropped command (no session): {text}")

@@ -153,6 +153,152 @@ class HeadlessTests(unittest.IsolatedAsyncioTestCase):
                 await live._receive_audio()
         self.assertIn('interrupted', str(send.call_args).lower())
 
+    async def test_stop_during_dashboard_send_suppresses_reply_until_complete(self):
+        from dashboard.server import DashboardServer
+        live = self.make_live()
+        live._dashboard = DashboardServer()
+        live.audio_in_queue = asyncio.Queue()
+        live._turn_done_event = asyncio.Event()
+        started, release, sent = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+        async def send(**kwargs):
+            started.set()
+            await release.wait()
+            sent.set()
+
+        live.session = NS(send_client_content=send, send_tool_response=AsyncMock())
+        live._dashboard._command_queue.put_nowait('first command')
+        task = asyncio.create_task(live._process_dashboard_commands())
+        try:
+            await asyncio.wait_for(started.wait(), 1)
+            live.interrupt()
+            release.set()
+            await asyncio.wait_for(sent.wait(), 1)
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+        def response(data=None, done=False, tool=None):
+            return NS(data=data, tool_call=tool, server_content=NS(
+                output_transcription=None, input_transcription=None, turn_complete=done))
+
+        async def receive():
+            yield response(b'discard')
+            yield response(tool=NS(function_calls=[
+                NS(id='tool', name='home_assistant', args={'action': 'list'})]))
+            yield response(b'discard-too', done=True)
+            # A later command must work after the interrupted turn completes.
+            live._dashboard._command_queue.put_nowait('next command')
+            sent.clear()
+            next_task = asyncio.create_task(live._process_dashboard_commands())
+            try:
+                await asyncio.wait_for(sent.wait(), 1)
+            finally:
+                next_task.cancel()
+                await asyncio.gather(next_task, return_exceptions=True)
+            yield response(b'new-turn', done=True)
+            raise asyncio.CancelledError()
+
+        live.session.receive = receive
+        with patch.object(live, '_execute_tool', new=AsyncMock()) as execute:
+            with self.assertRaises(asyncio.CancelledError):
+                await live._receive_audio()
+        self.assertEqual(live.audio_in_queue.get_nowait(), b'new-turn')
+        self.assertTrue(live.audio_in_queue.empty())
+        execute.assert_not_awaited()
+        replies = live.session.send_tool_response.call_args.kwargs['function_responses']
+        self.assertIn('interrupted', replies[0].response['error'].lower())
+        self.assertFalse(live._interrupted)
+        self.assertFalse(live._turn_active)
+
+    async def test_dashboard_send_finishing_after_reply_does_not_reactivate_turn(self):
+        from dashboard.server import DashboardServer
+        live = self.make_live()
+        live._dashboard = DashboardServer()
+        live.audio_in_queue = asyncio.Queue()
+        started, release, sent = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+        async def send(**kwargs):
+            started.set()
+            await release.wait()
+            sent.set()
+
+        async def receive():
+            yield NS(data=None, tool_call=None, server_content=NS(
+                output_transcription=None, input_transcription=None, turn_complete=True))
+            raise asyncio.CancelledError()
+
+        live.session = NS(send_client_content=send, receive=receive)
+        live._dashboard._command_queue.put_nowait('command')
+        task = asyncio.create_task(live._process_dashboard_commands())
+        try:
+            await asyncio.wait_for(started.wait(), 1)
+            with self.assertRaises(asyncio.CancelledError):
+                await live._receive_audio()
+            release.set()
+            await asyncio.wait_for(sent.wait(), 1)
+            self.assertFalse(live._turn_active)
+            live.interrupt()
+            self.assertFalse(live._interrupted)
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    async def test_failed_dashboard_send_cleans_only_its_own_pending_turn(self):
+        from dashboard.server import DashboardServer
+        for failure in (RuntimeError, asyncio.CancelledError):
+            for progress in ('none', 'audio', 'tool', 'complete', 'already-active'):
+                with self.subTest(failure=failure.__name__, progress=progress):
+                    live = self.make_live()
+                    live._dashboard = DashboardServer()
+                    live.audio_in_queue = asyncio.Queue()
+                    live._turn_done_event = asyncio.Event()
+                    live._turn_active = progress == 'already-active'
+                    started, release = asyncio.Event(), asyncio.Event()
+
+                    async def send(**kwargs):
+                        started.set()
+                        await release.wait()
+                        raise failure('synthetic send failure')
+
+                    live.session = NS(send_client_content=send, send_tool_response=AsyncMock())
+                    live._dashboard._command_queue.put_nowait('command')
+                    task = asyncio.create_task(live._process_dashboard_commands())
+                    try:
+                        await asyncio.wait_for(started.wait(), 1)
+                        if progress in ('audio', 'tool', 'complete'):
+                            async def receive():
+                                tool = (NS(function_calls=[NS(id='tool', name='shutdown_jarvis', args={})])
+                                        if progress == 'tool' else None)
+                                content = (None if tool else NS(output_transcription=None,
+                                           input_transcription=None, turn_complete=progress == 'complete'))
+                                yield NS(data=None if tool else b'answer', tool_call=tool,
+                                         server_content=content)
+                                raise asyncio.CancelledError()
+                            live.session.receive = receive
+                            with self.assertRaises(asyncio.CancelledError):
+                                await live._receive_audio()
+                        live.interrupt()
+                        release.set()
+                        # Reaching the error handler proves send cleanup finished.
+                        with patch('main.print') as log:
+                            if failure is RuntimeError:
+                                for _ in range(100):
+                                    if any('Command error' in str(c) for c in log.call_args_list):
+                                        break
+                                    await asyncio.sleep(0)
+                                else:
+                                    self.fail('send failure was not handled')
+                            else:
+                                with self.assertRaises(asyncio.CancelledError):
+                                    await task
+                        active = progress in ('audio', 'tool', 'already-active')
+                        self.assertEqual(live._turn_active, active)
+                        self.assertEqual(live._interrupted, active)
+                    finally:
+                        task.cancel()
+                        await asyncio.gather(task, return_exceptions=True)
+
     async def test_invalid_key_stops_without_retry_or_private_gui(self):
         import main
         for error in (RuntimeError('API key not valid'), ExceptionGroup('tasks', [RuntimeError('API key not valid')])):
@@ -221,10 +367,17 @@ class HeadlessTests(unittest.IsolatedAsyncioTestCase):
             release.wait(2)
         stream = Mock(latency=.01, write=Mock(side_effect=write))
         hardware = Mock(RawOutputStream=Mock(return_value=stream))
-        with patch.dict('sys.modules',{'sounddevice':hardware}), patch.object(main.audio_devices,'resolve',return_value=7):
+        hardware.query_devices.return_value = [
+            {'name': 'Test Pulse output', 'max_output_channels': 2}]
+        with patch.dict('sys.modules', {'sounddevice': hardware}), patch.object(
+                main, 'get_output_device', return_value='Test Pulse output'):
             task = asyncio.create_task(live._play_audio())
             try:
-                self.assertTrue(await asyncio.to_thread(started.wait,1))
+                writing = await asyncio.to_thread(started.wait, 1)
+                if task.done():
+                    await task  # surface an early resolver/stream exception, not a timeout
+                self.assertTrue(writing)
+                self.assertEqual(hardware.RawOutputStream.call_args.kwargs['device'], 0)
                 live.audio_in_queue.put_nowait(b'discard')
                 live.interrupt()
                 self.assertTrue(live._interrupted)

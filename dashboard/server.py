@@ -869,10 +869,10 @@ class DashboardServer:
             self._audio_owner = websocket
             self._audio_clients.add(websocket)
             epoch = self._audio_epoch
-            await websocket.accept()
-            await websocket.send_json({'type':'audio_ready'})
             ended = False
             try:
+                await websocket.accept()
+                await websocket.send_json({'type':'audio_ready'})
                 while True:
                     message = await websocket.receive()
                     if message['type'] == 'websocket.disconnect':
@@ -1009,15 +1009,15 @@ class DashboardServer:
             if not tok or tok not in self._tokens:
                 await websocket.close(code=4001)
                 return
-            await websocket.accept()
-            self._clients.add(websocket)
-            await websocket.send_json(self.current_status())
-            for entry in self._history[-50:]:
-                try:
-                    await websocket.send_json(entry)
-                except Exception:
-                    break
             try:
+                await websocket.accept()
+                self._clients.add(websocket)
+                await websocket.send_json(self.current_status())
+                for entry in self._history[-50:]:
+                    try:
+                        await websocket.send_json(entry)
+                    except Exception:
+                        break
                 while True:
                     data = await websocket.receive_json()
                     if tok not in self._tokens:
