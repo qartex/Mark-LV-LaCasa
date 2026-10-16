@@ -1,0 +1,244 @@
+import asyncio
+import os
+import tempfile
+import unittest
+from pathlib import Path
+from types import SimpleNamespace as NS
+from unittest.mock import patch, Mock, AsyncMock
+
+from ui_headless import JarvisUI
+
+
+class HeadlessTests(unittest.IsolatedAsyncioTestCase):
+    def make_live(self):
+        import main
+        with patch('memory.config_manager.load_api_keys', return_value={'gemini_api_key': 'test-key'}):
+            return main.JarvisLive(JarvisUI())
+
+    def test_confirmation_fails_closed(self):
+        from core import confirm
+        ui = JarvisUI()
+        with self.assertRaises(PermissionError):
+            ui.show_confirm('Shutdown', 'Do not execute')
+        executed = Mock()
+        confirm.bind(ui.show_confirm, ui.hide_confirm)
+        result = confirm.request('x', 'Shutdown', 'details', executed)
+        confirm.resolve(True)
+        executed.assert_not_called()
+        self.assertIn('Nothing was done', result)
+        confirm.bind(None, None)
+
+    def test_missing_key_exits_without_gui(self):
+        with patch('memory.config_manager.load_api_keys', return_value={}):
+            ui = JarvisUI()
+        with self.assertRaises(SystemExit):
+            ui.wait_for_api_key()
+        with self.assertRaises(SystemExit):
+            ui.prompt_reconfig()
+
+    def test_defaults(self):
+        from core.headless import enabled, capture_source
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertTrue(enabled())
+            self.assertEqual(capture_source(), 'phone')
+        with patch.dict(os.environ, {'JARVIS_CAPTURE_SOURCE': 'bogus'}):
+            with self.assertRaises(ValueError):
+                capture_source()
+
+    def test_nested_authentication_failure_is_not_hidden_by_taskgroup(self):
+        from core.headless import error_text
+        error = ExceptionGroup('session failed', [ExceptionGroup('recv failed', [RuntimeError('API key not valid')])])
+        self.assertIn('API key not valid', error_text(error))
+
+    async def test_capture_phone_does_not_open_local_input(self):
+        import main
+        live = self.make_live()
+        with patch.dict('sys.modules', {'sounddevice': Mock(InputStream=Mock(side_effect=AssertionError('local mic')))}), patch.object(main.audio_devices, 'resolve', side_effect=AssertionError('probe')):
+            await asyncio.wait_for(live._listen_audio(), timeout=0.1)
+
+    async def test_allowlist_and_dispatch_reject_writes(self):
+        live = self.make_live()
+        cfg = live._build_config()
+        decls = cfg.tools[0].function_declarations
+        self.assertEqual([d.name for d in decls], ['home_assistant'])
+        self.assertNotIn('set', decls[0].parameters.properties['action'].enum)
+        for name, args in [('home_assistant', {'action': 'set', 'entity': 'light.x', 'value': 'on'}), ('shutdown_jarvis', {}), ('save_memory', {'key':'x','value':'y'}), ('cannabis_status', {})]:
+            with patch('plugins.home_assistant.run', side_effect=AssertionError('dispatched forbidden action')):
+                result = await live._execute_tool(NS(name=name, args=args, id='1'))
+            self.assertIn('denied', str(result.response).lower())
+
+    async def test_speaking_tail_and_stop_discard_input(self):
+        live = self.make_live()
+        live.session = NS(send_realtime_input=AsyncMock())
+        live.out_queue = asyncio.Queue()
+        live.audio_in_queue = asyncio.Queue()
+        live.out_queue.put_nowait({'data': b'old', 'mime_type':'audio/pcm;rate=16000'})
+        live.audio_in_queue.put_nowait(b'old')
+        live.set_speaking(True)
+        self.assertFalse(live.audio_allowed())
+        self.assertTrue(live.out_queue.empty())
+        live.interrupt()
+        self.assertTrue(live.audio_in_queue.empty())
+        live._interrupted = False
+        self.assertFalse(live.audio_allowed())  # tail is still locked
+        live._tail_until = 0
+        self.assertTrue(live.audio_allowed())
+
+    async def test_sender_rejects_stale_and_sends_end_after_valid_pcm(self):
+        import main
+        from dashboard.server import DashboardServer
+        live = self.make_live()
+        live.session = NS(send_realtime_input=AsyncMock())
+        live._dashboard = DashboardServer()
+        live._dashboard.set_audio_allowed_callback(live.audio_allowed)
+        live.out_queue = asyncio.Queue()
+        stale = {'data': b'old', 'epoch': -1, 'at': 0}
+        live.out_queue.put_nowait(stale)
+        live.out_queue.put_nowait({'data': b'\x00\x01', 'mime_type':'audio/pcm;rate=16000', 'epoch':0, 'at': main.time.monotonic()})
+        live.out_queue.put_nowait({'audio_stream_end':True, 'epoch':0, 'at': main.time.monotonic()})
+        task = asyncio.create_task(live._send_realtime())
+        await asyncio.sleep(.02)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        calls = live.session.send_realtime_input.call_args_list
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0].kwargs['audio'].mime_type, 'audio/pcm;rate=16000')
+        self.assertEqual(calls[1].kwargs, {'audio_stream_end':True})
+
+    async def test_stop_ends_already_open_input_stream_even_while_gate_is_closed(self):
+        live = self.make_live()
+        live.session = NS(send_realtime_input=AsyncMock())
+        live.out_queue = asyncio.Queue()
+        live._input_stream_open = True
+        live._turn_active = True
+        live.interrupt()
+        task = asyncio.create_task(live._send_realtime())
+        await asyncio.sleep(.02)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        live.session.send_realtime_input.assert_awaited_once_with(audio_stream_end=True)
+
+    async def test_interrupted_turn_never_requeues_until_complete(self):
+        live = self.make_live()
+        live.session = NS()
+        live.audio_in_queue = asyncio.Queue()
+        live._turn_done_event = asyncio.Event()
+        live._interrupted = True
+        def response(data, done=False):
+            return NS(data=data, server_content=NS(output_transcription=None, input_transcription=None, turn_complete=done), tool_call=None)
+        async def receive():
+            yield response(b'discard')
+            yield response(b'discard-too', True)
+            yield response(b'new-turn', True)
+            raise asyncio.CancelledError()
+        live.session = NS(receive=receive)
+        with self.assertRaises(asyncio.CancelledError):
+            await live._receive_audio()
+        self.assertEqual(live.audio_in_queue.get_nowait(), b'new-turn')
+        self.assertTrue(live.audio_in_queue.empty())
+        self.assertFalse(live._interrupted)
+
+    async def test_interrupted_tool_request_is_denied_but_acknowledged(self):
+        live = self.make_live()
+        live._interrupted = True
+        send = AsyncMock()
+        async def receive():
+            yield NS(data=None, server_content=None, tool_call=NS(function_calls=[
+                NS(id='tool',name='home_assistant',args={'action':'list'})]))
+            self.assertEqual(send.await_count,1,'a missing tool response stalls turn completion')
+            raise asyncio.CancelledError()
+        live.session = NS(receive=receive,send_tool_response=send)
+        with patch('plugins.home_assistant.run', side_effect=AssertionError('interrupted tool executed')):
+            with self.assertRaises(asyncio.CancelledError):
+                await live._receive_audio()
+        self.assertIn('interrupted', str(send.call_args).lower())
+
+    async def test_invalid_key_stops_without_retry_or_private_gui(self):
+        import main
+        for error in (RuntimeError('API key not valid'), ExceptionGroup('tasks', [RuntimeError('API key not valid')])):
+            with self.subTest(error=type(error).__name__):
+                live = self.make_live()
+                with patch.object(main.genai, 'Client', side_effect=error), patch('dashboard.server.DashboardServer.serve', new=AsyncMock()), patch('dashboard.server.DashboardServer.serve_control', new=AsyncMock()), patch.object(main.audio_devices, 'prefetch'):
+                    with self.assertRaises(SystemExit):
+                        await live.run()
+
+    async def test_stop_while_idle_does_not_poison_next_turn(self):
+        live = self.make_live()
+        live.session = NS()
+        live._turn_done_event = asyncio.Event()
+        live.interrupt()
+        self.assertFalse(live._interrupted)
+
+    async def test_headless_selected_output_failure_does_not_silently_route_elsewhere(self):
+        import main
+        live = self.make_live()
+        hardware = Mock()
+        hardware.RawOutputStream.side_effect = RuntimeError('selected device unavailable')
+        hardware.query_devices.return_value = [{'name':'Pulse analog','max_output_channels':2}]
+        with patch.dict('sys.modules',{'sounddevice':hardware}), patch.object(main,'get_output_device',return_value='Pulse analog'):
+            with self.assertRaises(RuntimeError):
+                await live._play_audio()
+        self.assertEqual(hardware.RawOutputStream.call_count,1)
+
+    def test_headless_output_resolver_does_not_probe_input_or_use_prefix_fallback(self):
+        from core import headless
+        hardware = Mock()
+        hardware.query_devices.return_value = [
+            {'name':'microphone','max_input_channels':1,'max_output_channels':0},
+            {'name':'Pulse analog','max_output_channels':2}]
+        self.assertEqual(headless.output_device('Pulse analog', hardware),1)
+        hardware.check_input_settings.assert_not_called()
+        with self.assertRaises(RuntimeError):
+            headless.output_device('Pulse', hardware)
+
+    async def test_first_received_audio_immediately_closes_capture_before_playback(self):
+        live = self.make_live()
+        live.audio_in_queue = asyncio.Queue()
+        live.out_queue = asyncio.Queue()
+        live.out_queue.put_nowait({'data':b'stale'})
+        async def receive():
+            yield NS(data=b'answer', server_content=None, tool_call=None)
+            self.assertFalse(live.audio_allowed())
+            self.assertTrue(live.out_queue.empty())
+            raise asyncio.CancelledError()
+        live.session = NS(receive=receive)
+        with self.assertRaises(asyncio.CancelledError):
+            await live._receive_audio()
+
+    async def test_playback_stop_during_write_discards_rest_and_waits_for_turn_complete(self):
+        import main
+        live = self.make_live()
+        live.session = NS()
+        live.audio_in_queue = asyncio.Queue()
+        live.out_queue = asyncio.Queue()
+        live._turn_done_event = asyncio.Event()
+        live._turn_active = True
+        live.audio_in_queue.put_nowait(b'\x01\x00'*100)
+        started = __import__('threading').Event()
+        release = __import__('threading').Event()
+        def write(data):
+            started.set()
+            release.wait(2)
+        stream = Mock(latency=.01, write=Mock(side_effect=write))
+        hardware = Mock(RawOutputStream=Mock(return_value=stream))
+        with patch.dict('sys.modules',{'sounddevice':hardware}), patch.object(main.audio_devices,'resolve',return_value=7):
+            task = asyncio.create_task(live._play_audio())
+            try:
+                self.assertTrue(await asyncio.to_thread(started.wait,1))
+                live.audio_in_queue.put_nowait(b'discard')
+                live.interrupt()
+                self.assertTrue(live._interrupted)
+                self.assertFalse(live.audio_allowed())
+                release.set()
+                await asyncio.sleep(.02)
+                self.assertEqual(stream.write.call_count,1)
+                self.assertTrue(live.audio_in_queue.empty())
+            finally:
+                release.set()
+                task.cancel()
+                await asyncio.gather(task,return_exceptions=True)
+        stream.close.assert_called_once()
+
+
+if __name__ == '__main__':
+    unittest.main()

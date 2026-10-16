@@ -16,7 +16,12 @@ import secrets
 import socket
 import string
 import time
+import os
+import json
+import contextlib
 from pathlib import Path
+from urllib.parse import urlsplit
+from core import headless
 
 _DEPS_OK = False
 try:
@@ -30,6 +35,7 @@ except ImportError:
 # python-multipart is required for file uploads — optional dependency
 _UPLOAD_OK = False
 try:
+    import python_multipart
     from fastapi import UploadFile, File as FastAPIFile
     _UPLOAD_OK = True
 except Exception:
@@ -320,7 +326,7 @@ def _ensure_crypto_js() -> None:
         print(f"[Dashboard] Encryption will fall back to CDN load on client.")
 
 
-_ensure_crypto_js()
+# CryptoJS is vendored: no startup network/download side effects.
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -455,8 +461,22 @@ def _read(name: str) -> str:
 
 class DashboardServer:
 
-    def __init__(self):
-        self._ip                          = _local_ip()
+    def __init__(self, public_url=None, host=None):
+        self._host = host or os.environ.get('JARVIS_BIND', '127.0.0.1' if headless.enabled() else '0.0.0.0')
+        self._public_url = (public_url or os.environ.get('JARVIS_PUBLIC_URL', '')).rstrip('/')
+        if self._public_url:
+            parsed = urlsplit(self._public_url)
+            if (parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password
+                    or parsed.query or parsed.fragment or parsed.path):
+                raise ValueError('JARVIS_PUBLIC_URL must be an HTTPS origin, without path or credentials')
+        self._interrupt_callback = None
+        self._audio_allowed_callback = None
+        self._status = {'type': 'status', 'state': 'sleeping'}
+        self._audio_clients = set()
+        self._audio_owner = None
+        self._audio_epoch = 0
+        self._pair_attempts = []
+        self._ip = '127.0.0.1' if headless.enabled() else _local_ip()
         self._tokens: set[str]            = set()
         self._token_keys: dict[str, str]  = {}   # auth_token → session_key
         self._aes_cache:  dict[str, bytes]= {}   # session_key → AES bytes
@@ -476,6 +496,22 @@ class DashboardServer:
     # ── one-time key management ───────────────────────────────────────────
 
     def new_key(self, expiry_secs: int = 600) -> str:
+        # Rotation is explicit and revokes *everything*, including paired devices.
+        self._pending_keys.clear()
+        self._tokens.clear()
+        self._token_keys.clear()
+        self._aes_cache.clear()
+        self._device_sessions.clear()
+        self.invalidate_audio()
+        self._history.clear()
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        self._revocation_tasks = []
+        if loop:
+            for ws in list(self._clients | self._audio_clients):
+                self._revocation_tasks.append(loop.create_task(ws.close(code=4001)))
         now = time.time()
         self._pending_keys = {k: v for k, v in self._pending_keys.items() if v > now}
         key = ''.join(secrets.choice(_KEY_CHARS) for _ in range(6))
@@ -488,10 +524,14 @@ class DashboardServer:
         return (certs / "jarvis.key").exists() and (certs / "jarvis.crt").exists()
 
     def get_url(self) -> str:
+        if self._public_url:
+            return self._public_url
         proto = "https" if self._ssl_enabled() else "http"
         return f"{proto}://{self._ip}:{PORT}"
 
     def get_manual_url(self) -> str:
+        if self._public_url:
+            return self._public_url
         """URL for manual browser entry. When HTTPS active, points to alias port (also HTTPS)."""
         if self._ssl_enabled():
             return f"{self._ip}:{PORT + 1}"
@@ -519,10 +559,94 @@ class DashboardServer:
     def set_connect_callback(self, fn) -> None:
         self._connect_callback = fn
 
+    def set_interrupt_callback(self, fn):
+        self._interrupt_callback = fn
+
+    def set_audio_allowed_callback(self, fn):
+        self._audio_allowed_callback = fn
+
+    def audio_allowed(self):
+        try:
+            return bool(self._audio_allowed_callback and self._audio_allowed_callback())
+        except Exception:
+            return False
+
+    def current_status(self):
+        return {**self._status, 'audio_allowed': self.audio_allowed(),
+                'audio_busy': self._audio_owner is not None}
+
+    def invalidate_audio(self):
+        self._audio_epoch += 1
+        headless.drain(self._phone_audio_queue)
+
+    def audio_message_valid(self, message):
+        return (self.audio_allowed() and message.get('epoch') == self._audio_epoch
+                and 0 <= time.monotonic() - message.get('at', 0) <= 1.0)
+
+    async def serve_control(self, path=None):
+        """Local operator channel, inside a private directory, socket mode 0600."""
+        path = Path(path or headless.control_path())
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if path.parent.stat().st_uid != os.getuid() or path.parent.stat().st_mode & 0o077:
+            raise PermissionError('Pairing control directory must be owned by service user and mode 0700')
+        # Refuse a second live instance. Only remove our own stale socket.
+        if path.exists():
+            try:
+                reader, writer = await asyncio.open_unix_connection(str(path))
+            except ConnectionRefusedError:
+                path.unlink()
+            else:
+                writer.close()
+                await writer.wait_closed()
+                raise RuntimeError('A JARVIS control socket is already active')
+
+        async def handle(reader, writer):
+            try:
+                command = await asyncio.wait_for(reader.readline(), 2)
+                if command != b'pair\n' or not self._public_url:
+                    reply = {'error': 'Set JARVIS_PUBLIC_URL to the trusted external HTTPS origin before pairing'}
+                else:
+                    key = self.new_key()
+                    await asyncio.gather(*self._revocation_tasks, return_exceptions=True)
+                    reply = {'url': f'{self.get_url()}/auto-login?key={key}'}
+                writer.write((json.dumps(reply) + '\n').encode())
+                await writer.drain()
+            except (TimeoutError, ConnectionError, ValueError):
+                pass
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        server = await asyncio.start_unix_server(handle, str(path), limit=256)
+        os.chmod(path, 0o600)
+        try:
+            async with server:
+                await server.serve_forever()
+        finally:
+            path.unlink(missing_ok=True)
+
+    async def _watch_status(self):
+        previous = None
+        while True:
+            status = self.current_status()
+            if status != previous:
+                if not status['audio_allowed']:
+                    self.invalidate_audio()
+                    for ws in list(self._audio_clients):
+                        with contextlib.suppress(Exception):
+                            await ws.close(code=4009)
+                await self.broadcast(status)
+                previous = status
+            await asyncio.sleep(0.1)
+
     # ── broadcast ────────────────────────────────────────────────────────
 
     async def broadcast(self, msg: dict) -> None:
-        self._history.append(msg)
+        if msg.get('type') == 'status':
+            self._status = {'type':'status', 'state':msg.get('state', self._status['state'])}
+            msg = self.current_status()
+        else:
+            self._history.append(msg)
         if len(self._history) > 300:
             self._history = self._history[-300:]
         dead: set[WebSocket] = set()
@@ -538,9 +662,44 @@ class DashboardServer:
     def _build_app(self) -> "FastAPI":
         app = FastAPI(docs_url=None, redoc_url=None)
 
+        @app.middleware('http')
+        async def private_headers(req, call_next):
+            response = await call_next(req)
+            response.headers['Cache-Control'] = 'no-store'
+            response.headers['Referrer-Policy'] = 'no-referrer'
+            response.headers['X-Content-Type-Options'] = 'nosniff'
+            return response
+
         def _auth(req: Request) -> bool:
             tok = req.headers.get("authorization", "").removeprefix("Bearer ").strip()
             return bool(tok) and tok in self._tokens
+
+        def pairing_rate_allowed():
+            now = time.monotonic()
+            self._pair_attempts = [t for t in self._pair_attempts if t > now - 60]
+            if len(self._pair_attempts) >= 10:
+                return False
+            self._pair_attempts.append(now)
+            return True
+
+        @app.get('/api/status')
+        async def status_ep(req: Request):
+            if not _auth(req):
+                return JSONResponse({'error':'Unauthorized'}, status_code=401)
+            return JSONResponse(self.current_status())
+
+        @app.post('/api/interrupt')
+        async def interrupt_ep(req: Request):
+            if not _auth(req):
+                return JSONResponse({'error':'Unauthorized'}, status_code=401)
+            self.invalidate_audio()
+            if self._interrupt_callback:
+                self._interrupt_callback()
+            for ws in list(self._audio_clients):
+                with contextlib.suppress(Exception):
+                    await ws.close(code=4009)
+            await self.broadcast(self.current_status())
+            return JSONResponse({'ok':True})
 
         # serve CryptoJS from local cache, fallback to CDN redirect
         @app.get("/static/crypto.js")
@@ -567,6 +726,8 @@ class DashboardServer:
 
         @app.post("/login")
         async def login(req: Request):
+            if not pairing_rate_allowed():
+                return JSONResponse({'error':'Try again later'}, status_code=429)
             body    = await req.json()
             entered = str(body.get("pin", "")).strip().upper()
             now     = time.time()
@@ -589,6 +750,8 @@ class DashboardServer:
         @app.get("/auto-login")
         async def auto_login(key: str = ""):
             """QR code target — validates one-time key, creates session, redirects phone."""
+            if not pairing_rate_allowed():
+                return JSONResponse({'error':'Try again later'}, status_code=429)
             now = time.time()
             if not key or key not in self._pending_keys or self._pending_keys[key] <= now:
                 return HTMLResponse("""<!DOCTYPE html>
@@ -699,25 +862,58 @@ class DashboardServer:
             if not tok or tok not in self._tokens:
                 await websocket.close(code=4001)
                 return
+            if (headless.capture_source() != 'phone' or self._audio_owner is not None
+                    or not self.audio_allowed()):
+                await websocket.close(code=4009)
+                return
+            self._audio_owner = websocket
+            self._audio_clients.add(websocket)
+            epoch = self._audio_epoch
             await websocket.accept()
-            asyncio.create_task(self.broadcast(
-                {"type": "sys", "text": "Phone microphone live."}
-            ))
+            await websocket.send_json({'type':'audio_ready'})
+            ended = False
             try:
                 while True:
-                    data = await websocket.receive_bytes()
+                    message = await websocket.receive()
+                    if message['type'] == 'websocket.disconnect':
+                        break
+                    if tok not in self._tokens or not self.audio_allowed() or epoch != self._audio_epoch:
+                        self.invalidate_audio()
+                        await websocket.close(code=4009)
+                        break
+                    data = message.get('bytes')
+                    if data is None:
+                        try:
+                            end = json.loads(message.get('text', '{}')).get('type') == 'audio_stream_end'
+                        except (ValueError, AttributeError):
+                            end = False
+                        if not end:
+                            await websocket.close(code=4002)
+                            break
+                        await self._phone_audio_queue.put({'audio_stream_end':True,
+                                                          'epoch':epoch, 'at':time.monotonic()})
+                        ended = True
+                        await websocket.send_json({'type':'audio_ended'})
+                        await websocket.close(code=1000)
+                        break
+                    if not data or len(data) > 8192 or len(data) % 2:
+                        await websocket.close(code=4002)
+                        break
                     try:
                         self._phone_audio_queue.put_nowait(
-                            {"data": data, "mime_type": "audio/pcm"}
+                            {'data':data, 'mime_type':'audio/pcm;rate=16000',
+                             'epoch':epoch, 'at':time.monotonic()}
                         )
                     except asyncio.QueueFull:
                         pass  # drop frame rather than block
             except WebSocketDisconnect:
                 pass
             finally:
-                asyncio.create_task(self.broadcast(
-                    {"type": "sys", "text": "Phone microphone stopped."}
-                ))
+                self._audio_clients.discard(websocket)
+                if self._audio_owner is websocket:
+                    self._audio_owner = None
+                if not ended:
+                    self.invalidate_audio()
 
         # ── File sharing ──────────────────────────────────────────────────────
 
@@ -815,6 +1011,7 @@ class DashboardServer:
                 return
             await websocket.accept()
             self._clients.add(websocket)
+            await websocket.send_json(self.current_status())
             for entry in self._history[-50:]:
                 try:
                     await websocket.send_json(entry)
@@ -823,6 +1020,9 @@ class DashboardServer:
             try:
                 while True:
                     data = await websocket.receive_json()
+                    if tok not in self._tokens:
+                        await websocket.close(code=4001)
+                        break
                     if data.get("type") == "command":
                         enc = data.get("enc", "")
                         t   = self._decrypt(tok, enc) if enc else (data.get("text") or "").strip()
@@ -854,6 +1054,21 @@ class DashboardServer:
         await uvicorn.Server(cfg).serve()
 
     async def serve(self) -> None:
+        if headless.enabled():
+            # Trusted private reverse proxy terminates TLS. No firewall changes,
+            # self-signed certificates, alias listeners or secret query logging.
+            if self._host not in ('127.0.0.1', '::1', 'localhost'):
+                raise ValueError('Headless dashboard must bind loopback behind trusted HTTPS')
+            cfg = uvicorn.Config(self.app, host=self._host, port=PORT,
+                                 log_level='warning', access_log=False,
+                                 proxy_headers=False)
+            watcher = asyncio.create_task(self._watch_status())
+            try:
+                await uvicorn.Server(cfg).serve()
+            finally:
+                watcher.cancel()
+                await asyncio.gather(watcher, return_exceptions=True)
+            return
         if not _DEPS_OK:
             print("[Dashboard] fastapi/uvicorn not installed — dashboard disabled.")
             print("[Dashboard] Run:  pip install fastapi 'uvicorn[standard]' cryptography")

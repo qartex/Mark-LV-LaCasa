@@ -97,6 +97,7 @@ class JarvisUI:
     def prompt_reconfig(self):
         """Headless: just warn on console."""
         print("[JARVIS] API key invalid — check config/api_keys.json")
+        raise SystemExit(1)
 
     # ── State & logging (these DO matter — they drive console output) ────
 
@@ -144,13 +145,11 @@ class JarvisUI:
     def notify_phone_connected(self):
         print("[JARVIS] Phone dashboard connected (headless)")
 
-    # ── Confirmation (headless: always confirm) ──────────────────────────
+    # ── Confirmation (headless: fail closed) ────────────────────────────
 
-    def show_confirm(self, message: str, on_confirm: callable, on_cancel: callable = None):
-        """Headless: auto-confirm after printing the message."""
-        print(f"[JARVIS] {message}")
-        print("[JARVIS] Auto-confirming (headless mode)")
-        on_confirm()
+    def show_confirm(self, title: str, detail: str):
+        """No authenticated approval UI exists: reject, clearing the core gate."""
+        raise PermissionError('Headless confirmation unavailable; action denied')
 
     def hide_confirm(self):
         pass

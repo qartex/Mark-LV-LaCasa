@@ -35,8 +35,10 @@ PLUGIN = {
 
 import os
 import json
+import math
 import requests
 from pathlib import Path
+from core.headless import enabled
 
 
 def _load_config() -> dict:
@@ -95,6 +97,24 @@ def call_service(domain: str, service: str, entity_id: str):
     return _api_post(f"/api/services/{domain}/{service}", {"entity_id": entity_id})
 
 
+def _temperature(state):
+    attrs = state.get('attributes', {})
+    unit = attrs.get('unit_of_measurement')
+    if unit not in ('°C', '°F', 'K'):
+        return None
+    try:
+        value = float(state.get('state'))
+    except (ValueError, TypeError):
+        return None
+    if not math.isfinite(value):
+        return None
+    if unit == '°F':
+        value = (value - 32) * 5 / 9
+    elif unit == 'K':
+        value -= 273.15
+    return f"{state['entity_id']}: {value:g} °C"
+
+
 def run(parameters: dict, player=None, session_memory=None) -> str:
     action = parameters.get("action", "")
     entity = parameters.get("entity", "")
@@ -112,10 +132,17 @@ def run(parameters: dict, player=None, session_memory=None) -> str:
             if not entity:
                 return "Bitte entity_id angeben, z.B. 'sensor.wohnzimmer_temperatur'"
             state = get_state(entity)
+            temperature = _temperature(state)
+            if temperature is not None:
+                return temperature
             attrs = state.get("attributes", {})
             return f"{state['entity_id']}: {state['state']} {attrs}"
 
         elif action == "set":
+            if value not in ('on', 'off'):
+                return 'Bitte value on/off angeben.'
+            if enabled():
+                return 'Home Assistant is read-only in headless mode; set denied.'
             if not entity:
                 return "Bitte entity_id und value angeben"
             domain = entity.split(".")[0]
@@ -125,15 +152,12 @@ def run(parameters: dict, player=None, session_memory=None) -> str:
 
         elif action == "temperature":
             states = get_states()
-            temps = [
-                s for s in states
-                if s["entity_id"].startswith("sensor.")
-                and "temp" in s["entity_id"].lower()
-            ]
+            temps = [_temperature(s) for s in states
+                     if s.get('entity_id', '').startswith('sensor.')]
+            temps = [t for t in temps if t is not None]
             if not temps:
                 return "Keine Temperatursensoren gefunden."
-            lines = [f"{t['entity_id']}: {t['state']}°C" for t in temps]
-            return "\n".join(lines)
+            return "\n".join(temps)
 
         else:
             return "Aktion nicht erkannt. Verfügbare Aktionen: list, query, set, temperature"
