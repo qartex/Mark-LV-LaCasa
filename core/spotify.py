@@ -6,6 +6,7 @@ import logging
 import os
 import secrets
 import stat
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -389,6 +390,7 @@ class SpotifyOAuth:
         self._logger = logger
         self._pending: dict[str, tuple[str, str, datetime]] = {}
         self._lock = threading.Lock()
+        self._access_token_lock = threading.Lock()
 
     def start_authorization(self, client_id: str) -> AuthorizationStart:
         client_id = _validate_client_id(client_id)
@@ -440,6 +442,76 @@ class SpotifyOAuth:
         now = self._clock()
         record = self._store.load()
         return self._status(record, now)
+
+    def access_token(self, *, force_refresh: bool = False) -> str:
+        with self._access_token_lock:
+            return self._access_token_internal(force_refresh=force_refresh)
+
+    def _access_token_internal(self, *, force_refresh: bool = False) -> str:
+        record = self._store.load()
+        if record is None:
+            raise SpotifyAuthorizationRequired("no authorized record")
+        now = self._clock()
+        if now >= record.authorization_expires_at:
+            self._store.invalidate_tokens()
+            raise SpotifyAuthorizationRequired("authorization expired (six-month deadline)")
+        if record.access_token is None:
+            raise SpotifyAuthorizationRequired("no access token")
+        if not force_refresh and record.access_expires_at is not None:
+            if now < record.access_expires_at - timedelta(seconds=60):
+                return record.access_token
+        return self._refresh_token(record, now)
+
+    def _refresh_token(self, record: OAuthRecord, now: datetime) -> str:
+        if record.refresh_token is None:
+            raise SpotifyAuthorizationRequired("no refresh token")
+        try:
+            new_record = self._do_refresh(record.client_id, record.refresh_token, now)
+        except SpotifyAuthorizationRequired:
+            self._store.invalidate_tokens()
+            raise
+        self._store.save(new_record)
+        return new_record.access_token or record.access_token or ""
+
+    def _do_refresh(self, client_id: str, refresh_token: str, now: datetime) -> OAuthRecord:
+        data = {
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "client_id": client_id,
+        }
+        response = self._request(
+            "POST", TOKEN_ENDPOINT, data=data,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            timeout=15,
+        )
+        if response.status_code != 200:
+            if response.status_code == 400:
+                body = response.json() if response.text else {}
+                if body.get("error") == "invalid_grant":
+                    raise SpotifyAuthorizationRequired("refresh token invalid")
+            raise SpotifyAuthorizationRequired(f"refresh failed: {response.status_code}")
+        try:
+            body = response.json()
+        except Exception as exc:
+            raise SpotifyAuthorizationRequired("malformed refresh response") from exc
+        if not isinstance(body, dict) or "access_token" not in body:
+            raise SpotifyAuthorizationRequired("malformed refresh response")
+        access_token = body["access_token"]
+        expires_in = body.get("expires_in")
+        if not isinstance(expires_in, (int, float)) or expires_in < 0:
+            expires_in = 3600
+        new_refresh = body.get("refresh_token")
+        returned_scopes = set(body.get("scope", "").split()) if isinstance(body.get("scope"), str) else set()
+        scopes = REQUIRED_SCOPES if set(REQUIRED_SCOPES).issubset(returned_scopes) else record.scopes
+        return OAuthRecord(
+            client_id=client_id,
+            authorized_at=record.authorized_at,
+            authorization_expires_at=record.authorization_expires_at,
+            access_token=access_token,
+            access_expires_at=now + timedelta(seconds=float(expires_in)),
+            refresh_token=new_refresh if new_refresh else refresh_token,
+            scopes=scopes,
+        )
 
     def _status(self, record: OAuthRecord | None, now: datetime) -> AuthorizationStatus:
         if record is None:
@@ -502,3 +574,120 @@ def default_oauth() -> SpotifyOAuth:
             if _default_oauth is None:
                 _default_oauth = SpotifyOAuth(OAuthStore())
     return _default_oauth
+
+
+# ── Token access and HTTP API client (Task 3) ────────────────────────────────
+
+class SpotifyAPIError(RuntimeError):
+    """Non-secret error category for Spotify Web API failures."""
+
+    def __init__(self, category: str, message: str = ""):
+        self.category = category
+        super().__init__(message or category)
+
+
+class SpotifyHTTP:
+    """Bounded-retry HTTP client for the Spotify Web API."""
+
+    BASE_URL = "https://api.spotify.com/v1"
+
+    def __init__(
+        self,
+        oauth: SpotifyOAuth,
+        request: Callable = requests.request,
+        sleep: Callable[[float], None] = lambda s: time.sleep(s),
+        timeout_seconds: float = 10.0,
+        max_retry_after_seconds: float = 5.0,
+    ):
+        self._oauth = oauth
+        self._request = request
+        self._sleep = sleep
+        self._timeout = timeout_seconds
+        self._max_retry_after = max_retry_after_seconds
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict | None = None,
+        json_body: dict | None = None,
+    ) -> requests.Response:
+        url = self.BASE_URL + path
+        headers = {"Authorization": f"Bearer {self._oauth.access_token()}"}
+        opts = {"timeout": self._timeout, "allow_redirects": False}
+        if params:
+            opts["params"] = params
+        if json_body is not None:
+            opts["json"] = json_body
+            headers["Content-Type"] = "application/json"
+
+        did_auth_retry = False
+        did_rate_retry = False
+        attempts = 0
+
+        while attempts < 3:
+            attempts += 1
+            try:
+                response = self._request(method, url, headers=headers, **opts)
+            except (requests.ConnectionError, requests.Timeout) as exc:
+                raise SpotifyAPIError("network", str(exc)) from exc
+
+            if response.status_code == 200 or response.status_code == 204:
+                return response
+
+            if response.status_code == 401 and not did_auth_retry:
+                did_auth_retry = True
+                self._oauth.invalidate_tokens()
+                raise SpotifyAPIError("unauthorized")
+
+            if response.status_code == 403:
+                reason = self._classify_403(response)
+                raise SpotifyAPIError(reason)
+
+            if response.status_code == 429 and not did_rate_retry:
+                retry_after = self._parse_retry_after(response)
+                if retry_after is not None and not did_rate_retry:
+                    did_rate_retry = True
+                    self._sleep(retry_after)
+                    continue
+                raise SpotifyAPIError("rate_limited")
+
+            if response.status_code >= 500:
+                raise SpotifyAPIError("bad_response", f"server error {response.status_code}")
+
+            raise SpotifyAPIError("bad_response", f"unexpected status {response.status_code}")
+
+        raise SpotifyAPIError("bad_response", "too many retry attempts")
+
+    @staticmethod
+    def _classify_403(response: requests.Response) -> str:
+        text = response.text.lower()
+        if "premium" in text or "premium required" in text:
+            return "premium"
+        if "no active device found" in text:
+            return "no_device"
+        return "premium"
+
+    @staticmethod
+    def _parse_retry_after(response: requests.Response) -> float | None:
+        raw = response.headers.get("Retry-After")
+        if raw is None:
+            return None
+        try:
+            value = float(raw)
+        except (ValueError, TypeError):
+            return None
+        if value < 0:
+            return None
+        return min(value, 5.0)
+
+
+def _access_token_with_lock(oauth: SpotifyOAuth) -> str:
+    with oauth._lock:
+        return oauth._access_token_internal()
+
+
+def _refresh_if_needed(oauth: SpotifyOAuth) -> None:
+    with oauth._lock:
+        oauth._refresh_if_needed_internal()
