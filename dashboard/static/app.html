@@ -227,7 +227,13 @@
       const s = m.state;
       _captureAllowed = m.audio_allowed === true;
       micBtn.disabled = !_captureAllowed;
-      if (!_captureAllowed) _stopVoice();
+      if (!_captureAllowed) {
+        if (_voiceWs || _micStarting) _micAutoResume = true;
+        _stopVoice(false, false);
+      } else if (_micAutoResume && !_voiceWs && !_micStarting) {
+        _micAutoResume = false; // consume this gate edge before reacquiring
+        doMic(true);
+      }
       if (s === 'active') {
         pill.className = 'pill on'; stTxt.textContent = 'Active'; wake.classList.remove('show');
       } else {
@@ -419,6 +425,7 @@
     let _captureAllowed = false;
     let _micAttempt = 0;
     let _micStarting = false;
+    let _micAutoResume = false;
     let _flushMic = null;
     micBtn.disabled = true;
 
@@ -448,15 +455,24 @@
       sys('Microphone requires Safari microphone permission and trusted HTTPS. Open the private server HTTPS link; do not bypass browser security.');
     }
 
-    async function doMic() {
-      if (_voiceWs || _micStarting) { _stopVoice(true); return; }
+    function _showManualResume() {
+      sys('Microphone paused — tap microphone to continue.');
+    }
+
+    async function doMic(automatic = false) {
+      if (_voiceWs || _micStarting) {
+        if (!automatic) _stopVoice(true);
+        return;
+      }
       if (!_captureAllowed) { sys('Microphone locked during speech, tail or reconnect.'); return; }
+      _micAutoResume = false;
       const attempt = ++_micAttempt;
       _micStarting = true;
 
       if (!navigator.mediaDevices?.getUserMedia) {
         _showVoiceSetup();
         _micStarting = false;
+        if (automatic) _showManualResume();
         return;
       }
       let stream;
@@ -465,10 +481,13 @@
           audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
         });
       } catch (e) {
+        if (attempt !== _micAttempt) return;
         _micStarting = false;
+        _micAutoResume = false;
         sys(e.name === 'NotAllowedError'
           ? 'Microphone denied — tap the address bar lock and allow microphone.'
           : 'Mic error: ' + e.message);
+        if (automatic) _showManualResume();
         return;
       }
       if (attempt !== _micAttempt || !_captureAllowed) {
@@ -484,7 +503,7 @@
       catch (_) { ctx = new AudioContext(); }
       _audioCtx = ctx;
       if (ctx.state === 'suspended') await ctx.resume();
-      if (attempt !== _micAttempt || !_captureAllowed) { _stopVoice(); return; }
+      if (attempt !== _micAttempt || !_captureAllowed) { _stopVoice(false, false); return; }
 
       const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
       const ws = new WebSocket(
@@ -495,7 +514,7 @@
       _micStarting = false;
 
       const beginCapture = async () => {
-        if (attempt !== _micAttempt || !_captureAllowed || _voiceWs !== ws) { _stopVoice(); return; }
+        if (attempt !== _micAttempt || !_captureAllowed || _voiceWs !== ws) { _stopVoice(false, false); return; }
         const rate = ctx.sampleRate;
         const src  = ctx.createMediaStreamSource(stream);
 
@@ -553,7 +572,12 @@
       // Server acknowledges exclusive ownership before capture starts.
       ws.onmessage = e => {
         const m = JSON.parse(e.data);
-        if (m.type === 'audio_ready') beginCapture().catch(() => _stopVoice());
+        if (m.type === 'audio_ready') beginCapture().catch(e => {
+          if (attempt !== _micAttempt) return;
+          _stopVoice();
+          sys('Voice setup failed: ' + e.message);
+          if (automatic) _showManualResume();
+        });
       };
 
       ws.onclose = () => { if (_voiceWs === ws) _stopVoice(); };
@@ -562,10 +586,16 @@
       _voiceWs  = ws;
       _audioCtx = ctx;
       _micStm   = stream;
-      } catch (e) { _stopVoice(); sys('Voice setup failed: ' + e.message); }
+      } catch (e) {
+        if (attempt !== _micAttempt) return;
+        _stopVoice();
+        sys('Voice setup failed: ' + e.message);
+        if (automatic) _showManualResume();
+      }
     }
 
-    function _stopVoice(explicit = false) {
+    function _stopVoice(explicit = false, clearResume = true) {
+      if (clearResume) _micAutoResume = false;
       if (explicit && _voiceWs?.readyState === 1) {
         if (_flushMic) _flushMic();
         const ending = _voiceWs;

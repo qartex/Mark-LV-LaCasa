@@ -211,7 +211,7 @@ class ControlTests(unittest.IsolatedAsyncioTestCase):
 
 
 class BrowserVoiceTests(unittest.TestCase):
-    def test_permission_race_disconnect_speaking_and_explicit_stop(self):
+    def test_half_duplex_capture_auto_resumes_once_and_cancellations_stay_idle(self):
         import subprocess
         html = (Path(__file__).resolve().parents[1]/'dashboard/static/app.html').read_text()
         script = r'''
@@ -220,11 +220,12 @@ let html = require('fs').readFileSync(0, 'utf8');
 assert(!html.includes('chrome://flags'));
 const elements = new Map();
 function element(id) {
- if(!elements.has(id)) elements.set(id, {innerHTML:'',textContent:'',value:'',disabled:false,
- classList:{add(){},remove(){}},addEventListener(){},appendChild(){},style:{},querySelector(){return element('child');}});
+ if(!elements.has(id)) elements.set(id, {innerHTML:'',textContent:'',value:'',disabled:false,children:[],
+ classList:{add(){},remove(){}},addEventListener(){},appendChild(child){this.children.push(child);},
+ style:{},querySelector(){return element('child');}});
  return elements.get(id);
 }
-let sockets = [], resolvePermission, stopped=0, requests=[];
+let sockets = [], permissions = [], stopped = 0, requests = [], mediaCalls = 0;
 class WS {
  constructor(url){this.url=url;this.readyState=0;this.sent=[];sockets.push(this);}
  send(value){this.sent.push(value);}
@@ -241,7 +242,7 @@ const context = vm.createContext({console,WebSocket:WS,AudioContext:AC,Blob,URL,
  document:{getElementById:element,createElement:()=>element(Math.random())},
  sessionStorage:{getItem:k=>k==='jarvis_token'?'token':null},
  location:{protocol:'https:',host:'private.example',origin:'https://private.example',replace(){}},
- navigator:{mediaDevices:{getUserMedia:()=>new Promise(resolve=>resolvePermission=resolve)}},
+ navigator:{mediaDevices:{getUserMedia:()=>{mediaCalls++;return new Promise((resolve,reject)=>permissions.push({resolve,reject}));}}},
  fetch:async (url,opts)=>{requests.push(url);return {ok:true,json:async()=>({type:'status',state:'active',audio_allowed:true})};},
  setTimeout:()=>1,clearTimeout(){},setInterval:()=>1,clearInterval(){},
  addEventListener(){},window:{addEventListener(){}},btoa:s=>Buffer.from(s).toString('base64')});
@@ -250,25 +251,60 @@ const control=sockets[0];
 function status(allowed){control.onmessage({data:JSON.stringify({type:'status',state:'active',audio_allowed:allowed})});}
 const tick=()=>new Promise(r=>setImmediate(r));
 function stream(){return {getTracks:()=>[{stop(){stopped++;}}]};}
+async function grant(request){request.resolve(stream());await tick();await tick();}
+function messages(){return element('feed').children.map(x=>x.textContent||'').join('\n');}
 (async()=>{
- status(true);
- let pending=vm.runInContext('doMic()',context);
- status(false);resolvePermission(stream());await pending;await tick();
- assert.equal(stopped,1,'late permission must immediately stop tracks');
- assert.equal(sockets.length,1,'gate changed: no voice connection');
- status(true);pending=vm.runInContext('doMic()',context);resolvePermission(stream());await pending;
- let voice=sockets.at(-1);voice.onerror();await tick();
- assert.equal(stopped,2,'failed connection closes mic');
- status(true);pending=vm.runInContext('doMic()',context);resolvePermission(stream());await pending;
- voice=sockets.at(-1);status(false);await tick();
- assert.equal(stopped,3,'speaking status closes mic');
- status(true);await tick();assert.equal(stopped,3,'idle never starts mic automatically');
- pending=vm.runInContext('doMic()',context);resolvePermission(stream());await pending;
+ status(true);await tick();
+ assert.equal(mediaCalls,0,'an initially idle user must never be recorded automatically');
+
+ let pending=vm.runInContext('doMic()',context), request=permissions.shift();
+ assert.equal(mediaCalls,1);
+ status(false);await grant(request);await pending;
+ assert.equal(stopped,1,'a gate close must stop a permission-pending stream');
+ assert.equal(sockets.length,1,'a cancelled permission attempt must not open phone audio');
+ status(true);assert.equal(mediaCalls,2,'pending capture resumes once on the next allowed status');
+ status(true);await tick();assert.equal(mediaCalls,2,'repeated allowed status must not duplicate pending resume');
+ await grant(permissions.shift());
+ let voice=sockets.at(-1);voice.readyState=1;
+ voice.onmessage({data:JSON.stringify({type:'audio_ready'})});await tick();await tick();
+
+ status(false);await tick();
+ assert.equal(stopped,2,'a live stream must pause during JARVIS speech or tail');
+ status(true);assert.equal(mediaCalls,3,'live capture resumes once after the speech tail');
+ status(true);await tick();assert.equal(mediaCalls,3,'repeated allowed status must not duplicate live resume');
+ await grant(permissions.shift());
  voice=sockets.at(-1);voice.readyState=1;
  await vm.runInContext('doMic()',context);await tick();
- assert(voice.sent.some(x=>typeof x==='string'&&JSON.parse(x).type==='audio_stream_end'),'explicit mic stop sends end');
- await vm.runInContext('doStop()',context);await tick();
+ assert(voice.sent.some(x=>typeof x==='string'&&JSON.parse(x).type==='audio_stream_end'),
+        'explicit microphone stop preserves ordered audio_stream_end');
+ status(false);status(true);await tick();
+ assert.equal(mediaCalls,3,'explicit microphone stop must cancel auto-resume');
+
+ pending=vm.runInContext('doMic()',context);await grant(permissions.shift());await pending;
+ await vm.runInContext('doStop()',context);await tick();status(true);await tick();
+ assert.equal(mediaCalls,4,'Stop must cancel auto-resume');
  assert(requests.includes('/api/interrupt'),'Stop uses authenticated control route');
+
+ pending=vm.runInContext('doMic()',context);await grant(permissions.shift());await pending;
+ voice=sockets.at(-1);voice.onerror();await tick();status(false);status(true);await tick();
+ assert.equal(mediaCalls,5,'phone-audio error or busy must not retry capture');
+
+ pending=vm.runInContext('doMic()',context);await grant(permissions.shift());await pending;
+ status(false);status(true);
+ assert.equal(mediaCalls,7,'the next allowed status starts one automatic reacquire');
+ const denied=Object.assign(new Error('denied'),{name:'NotAllowedError'});
+ permissions.shift().reject(denied);await tick();await tick();status(true);await tick();
+ assert.equal(mediaCalls,7,'permission failure must clear auto-resume');
+ assert.match(messages(),/tap microphone to continue/i,
+              'Safari automatic reacquire rejection must explain the manual recovery');
+
+ pending=vm.runInContext('doMic()',context);request=permissions.shift();
+ control.onerror();await grant(request);await pending;status(true);await tick();
+ assert.equal(mediaCalls,8,'control WebSocket error must clear pending auto-resume');
+
+ pending=vm.runInContext('doMic()',context);await grant(permissions.shift());await pending;
+ control.onclose();await tick();status(true);await tick();
+ assert.equal(mediaCalls,9,'control WebSocket close must clear active auto-resume');
  console.log('browser voice lifecycle passed');
 })().catch(e=>{console.error(e);process.exitCode=1;});
 '''

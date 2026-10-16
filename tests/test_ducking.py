@@ -4,8 +4,10 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -156,6 +158,49 @@ class DuckingTests(unittest.TestCase):
             self.assertFalse(guard.recover())
             self.now += 4
             self.assertTrue(guard.recover())
+
+    def test_normal_end_wins_waiting_heartbeat_without_false_lease_loss(self):
+        ctl = self.controller()
+        self.assertTrue(ctl.begin())
+        restore_started = threading.Event()
+        finish_restore = threading.Event()
+        heartbeat_waiting = threading.Event()
+        original_lock = ctl._lock
+
+        def block_restore():
+            restore_started.set()
+            self.assertTrue(finish_restore.wait(2), 'test did not release blocked restore')
+
+        @contextmanager
+        def observed_lock():
+            if threading.current_thread().name == 'waiting-heartbeat':
+                heartbeat_waiting.set()
+            with original_lock():
+                yield
+
+        self.mixer.before_write = block_restore
+        ctl._lock = observed_lock
+        ended, heartbeated = [], []
+        end_thread = threading.Thread(target=lambda: ended.append(ctl.end()), name='normal-end')
+        heartbeat_thread = threading.Thread(
+            target=lambda: heartbeated.append(ctl.heartbeat()), name='waiting-heartbeat')
+        end_thread.start()
+        self.assertTrue(restore_started.wait(2), 'end did not enter restore while holding the lock')
+        ctl.error = 'stale warning'
+        heartbeat_thread.start()
+        self.assertTrue(heartbeat_waiting.wait(2), 'heartbeat did not observe the old token and wait')
+        finish_restore.set()
+        end_thread.join(2)
+        heartbeat_thread.join(2)
+
+        self.assertFalse(end_thread.is_alive())
+        self.assertFalse(heartbeat_thread.is_alive())
+        self.assertEqual(ended, [True])
+        self.assertEqual(heartbeated, [True])
+        self.assertIsNone(ctl.error)
+        self.assertIsNone(ctl.token)
+        self.assertFalse(self.path.exists())
+        self.assertEqual(self.mixer.value, ((65536, 32768), False))
 
     def test_resumed_owner_reports_lease_loss_after_guard_recovery(self):
         old, guard = self.controller(), self.controller()

@@ -223,14 +223,22 @@ class DuckingController:
         self._save(state)
 
     def heartbeat(self, hold_for=0.0) -> bool:
-        if not self.token:
+        expected_token = self.token
+        if not expected_token:
             return False
+        self.error = None
         try:
             if not math.isfinite(hold_for) or not 0 <= hold_for <= 120:
                 raise ValueError('Invalid buffered playback duration')
             with self._lock():
+                # A heartbeat can pass the pre-lock ownership check and then wait
+                # behind this controller's normal end().  That completed release
+                # is not a lost lease; this stale heartbeat must not touch a newer
+                # generation started while it waited.
+                if self.token != expected_token:
+                    return True
                 state = self._read()
-                if state and state['generation'] == self.token:
+                if state and state['generation'] == expected_token:
                     self._refresh(state, hold_for)
                     return True
                 raise RuntimeError('Spotify ducking lease lost: output phase recovered or replaced')
