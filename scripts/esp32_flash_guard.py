@@ -766,6 +766,52 @@ def issue_flash_confirmation(manifest_dir) -> Confirmation:
     return confirmation
 
 
+def flash_reset_state(
+    manifest_dir, *, confirm_reset: bool = False,
+) -> dict:
+    """Deliberately clear written/build/confirmation state; keep safety anchors.
+
+    Operator escape hatch for legitimate re-flashes (changed firmware or
+    changed Wi-Fi image). It NEVER touches the proven device fingerprint or the
+    verified full-flash backup; the build record and every flash/restore state
+    field are cleared so a fresh register-build/confirmation cycle is possible.
+    Requires the explicit --confirm-reset flag; refuses while the device may
+    hold unknown flash without a recorded restore, so unknown-flash boards stay
+    covered by the restore discipline until explicitly resolved.
+    """
+    store = ManifestStore(Path(manifest_dir))
+    if not store.has_manifest():
+        raise GuardError("no safety manifest found; run `probe` and `backup` first")
+    if not confirm_reset:
+        raise GuardError(
+            "flash-reset-state requires --confirm-reset (explicit operator intent)"
+        )
+    manifest = store.load()
+    if not manifest.get("backup"):
+        raise GuardError(
+            "flash-reset-state requires a verified full-flash backup; run backup first"
+        )
+    if not manifest.get("device"):
+        raise GuardError("manifest has no bound device; run probe first")
+    state = manifest.get("state", {})
+    success = state.get("flash_success") is True
+    restored = state.get("restore_result") in ("success", "failed")
+    if (state.get("flash_may_have_mutated_at") and not success and not restored):
+        raise GuardError(
+            "flash may have mutated the device without verified success and "
+            "without a recorded restore; restore first or accept the risk "
+            "explicitly via the restore path"
+        )
+    cleared = _new_manifest()
+    cleared["schema_version"] = manifest.get("schema_version", 1)
+    cleared["device"] = manifest["device"]
+    cleared["backup"] = manifest["backup"]
+    manifest = cleared
+    _touch(manifest)
+    store.save(manifest)
+    return manifest
+
+
 def _consume_confirmation(manifest: dict, store: ManifestStore, kind: str,
                           confirmation_id) -> None:
     if not isinstance(confirmation_id, str) or not confirmation_id:
@@ -1124,6 +1170,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p_issue_flash = subparsers.add_parser("issue-flash-confirmation", parents=[shared])
     p_issue_flash.set_defaults(func=_cmd_issue_flash_confirmation)
 
+    p_reset = subparsers.add_parser("flash-reset-state", parents=[shared])
+    p_reset.add_argument(
+        "--confirm-reset", action="store_true", default=False,
+        help="explicit operator intent required",
+    )
+    p_reset.set_defaults(func=_cmd_flash_reset_state)
+
     p_flash = subparsers.add_parser("flash", parents=[shared, device])
     p_flash.add_argument("--confirmation", required=True)
     p_flash.set_defaults(func=_cmd_flash)
@@ -1171,6 +1224,12 @@ def _cmd_issue_flash_confirmation(args, runner: Runner) -> None:
     confirmation = issue_flash_confirmation(args.manifest_dir)
     print(f"issue ok: kind={confirmation.kind} id={confirmation.id} "
           f"expires={confirmation.expires_at}")
+
+
+def _cmd_flash_reset_state(args, runner: Runner) -> None:
+    flash_reset_state(args.manifest_dir, confirm_reset=args.confirm_reset)
+    print("reset-state ok: device fingerprint and verified backup kept; "
+          "build and flash/restore state cleared")
 
 
 def _cmd_flash(args, runner: Runner) -> None:

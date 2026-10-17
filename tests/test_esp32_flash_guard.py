@@ -906,5 +906,43 @@ class TestDiagnosticsAndCli(GuardFixture):
         self.assertIn("error", err.lower())
 
 
+class TestFlashResetState(GuardFixture):
+
+    def test_reset_requires_explicit_flag(self):
+        self.prepare_full()
+        with self.assertRaisesRegex(guard.GuardError, "--confirm-reset"):
+            guard.flash_reset_state(self.store.directory)
+
+    def test_reset_refuses_unresolved_mutation(self):
+        self.prepare_full()
+        self.mark_transition()
+        m = self.m()
+        m["state"]["flash_success"] = None
+        self.save_manifest(m)
+        with self.assertRaisesRegex(guard.GuardError, "mutated"):
+            guard.flash_reset_state(self.store.directory, confirm_reset=True)
+
+    def test_reset_keeps_device_and_backup_clears_state_and_build(self):
+        self.prepare_full()
+        result, conf = self.do_flash()
+        self.assertTrue(result.reset_performed)
+        before = self.m()
+        self.assertTrue(before["state"]["flash_success"])
+        self.assertIn("build", before)
+        manifest = guard.flash_reset_state(
+            self.store.directory, confirm_reset=True)
+        self.assertEqual(before["device"], manifest["device"])
+        self.assertEqual(before["backup"], manifest["backup"])
+        self.assertIsNone(manifest["build"])
+        for value in manifest["state"].values():
+            self.assertNotEqual(value, True)
+            self.assertNotEqual(value, "success")
+        self.assertEqual([], manifest["confirmations"]["consumed"])
+        # a fresh cycle works after the reset
+        self.register()
+        conf = guard.issue_flash_confirmation(self.store.directory)
+        self.assertEqual("flash", conf.kind)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
