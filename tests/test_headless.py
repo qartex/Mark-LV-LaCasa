@@ -74,8 +74,17 @@ class HeadlessTests(unittest.IsolatedAsyncioTestCase):
         cfg = live._build_config()
         decls = cfg.tools[0].function_declarations
         self.assertEqual([d.name for d in decls],
-                         ['home_assistant', 'spotify_control'])
-        self.assertNotIn('set', decls[0].parameters.properties['action'].enum)
+                         ['home_assistant', 'spotify_control', 'cannanas'])
+        # The Cannanas action enum is the exact closed Release-1 list.
+        cannanas_decl = decls[2]
+        from core.cannanas_actions import CANNANAS_MODEL_ACTIONS
+        canonical = sorted(cannanas_decl.parameters.properties['action'].enum)
+        self.assertEqual(canonical, sorted([
+            'overview', 'find_zones', 'find_strains', 'find_plants',
+            'find_propagation_material', 'list_recent_batches', 'list_plants',
+            'count_plants_by_room', 'prepare_plant_create', 'prepare_strain_create',
+            'prepare_batch_create', 'prepare_plant_update', 'prepare_batch_update',
+            'prepare_diary_create']))
         self.assertEqual(
             decls[1].parameters.properties['action'].enum,
             ['play', 'pause', 'resume', 'next', 'previous', 'volume', 'current'])

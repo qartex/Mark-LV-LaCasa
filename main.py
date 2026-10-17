@@ -574,6 +574,8 @@ class JarvisLive:
         self._input_capture = None
         # The currently finalized user turn (provenance envelope context, headless).
         self._finalized_turn = None
+        # The Cannanas host (pending confirmations live here, host-only).
+        self._cannanas_host = None
         # Transcript-driven mouth shapes for the avatar. Fed from the receive
         # loop as words arrive, drained by the playback loop against the audio.
         self._visemes              = VisemeStream()
@@ -1649,6 +1651,18 @@ class JarvisLive:
                                 self._last_out_logged = ""   # new exchange
                                 self.ui.write_log(f"You: {full_in}")
                                 self._session_log.append(f"User: {full_in}")
+                                # A pending Cannanas confirmation is decided by
+                                # the host grammar on the finalized transcript;
+                                # STOP/interrupted turns never reach this point.
+                                evaluation = self._handle_pending_confirmation(
+                                    self._finalized_turn, full_in)
+                                handled = self._handle_pending_confirmation_result(
+                                    evaluation)
+                                if handled and evaluation is not None \
+                                        and evaluation.get('decision') == 'affirm':
+                                    in_buf = []
+                                    out_buf = []
+                                    continue
                                 if self._dashboard:
                                     asyncio.create_task(self._dashboard.broadcast({
                                         "type": "log", "speaker": "user",
@@ -2221,6 +2235,36 @@ class JarvisLive:
 
     # ── Phone audio relay ────────────────────────────────────────────────────────
 
+    # ── Cannanas host confirmation (outside the model path) ────────────────
+
+    def _handle_pending_confirmation(self, turn, text) -> 'dict | None':
+        """After a finalized turn: bounded host grammar on a pending preview.
+
+        Returns the host evaluation or None when nothing needs handling. An
+        affirmed confirmation runs synchronously here — before the normal LLM
+        turn handling — and never through Gemini tool calls.
+        """
+        host = self._cannanas_host
+        if host is None or turn is None:
+            return None
+        try:
+            return host.evaluate(turn, text)
+        except Exception:
+            return None
+
+    def _handle_pending_confirmation_result(self, evaluation) -> bool:
+        """Speak the outcome; True when the host consumed the whole turn."""
+        if not evaluation:
+            return False
+        spoken = evaluation.get('spoken')
+        if spoken:
+            self.ui.write_log(f'[Cannanas]: {spoken}')
+            try:
+                self.speak(spoken)
+            except Exception:
+                pass
+        return bool(evaluation.get('handled'))
+
     async def _relay_phone_audio(self) -> None:
         """Forward phone mic PCM chunks from dashboard queue into the Gemini Live session."""
         q = self._dashboard._phone_audio_queue
@@ -2273,6 +2317,13 @@ class JarvisLive:
                             self._finalized_turn = user_turn.finalize_turn(envelope)
                         except (ValueError, TypeError):
                             self._finalized_turn = None
+                    # A pending Cannanas confirmation is handled by the host
+                    # BEFORE the model hears this turn; an affirmed write is
+                    # completed here and the model turn is skipped entirely.
+                    evaluation = self._handle_pending_confirmation(
+                        self._finalized_turn, str(text))
+                    if self._handle_pending_confirmation_result(evaluation):
+                        continue
                     # A remote command is deliberate control and the phone user
                     # has no desktop WAKE button — so it wakes JARVIS if asleep.
                     if self._wake_enabled and not self._awake:
@@ -2350,6 +2401,23 @@ class JarvisLive:
                 raise
             print(f"[Dashboard] Disabled: {e}")
             self._dashboard = None
+
+        # The Cannanas host is created once per JARVIS process. Configuration
+        # failure or adapter trouble degrades Cannanas only — JARVIS, Spotify
+        # and Home Assistant keep running.
+        self._cannanas_host = None
+        if headless.enabled():
+            try:
+                from core.cannanas_host import get_host
+                self._cannanas_host = get_host()
+                if not self._cannanas_host.available():
+                    missing = self._cannanas_host.missing_variables()
+                    reason = (', '.join(missing) if missing
+                              else self._cannanas_host.availability_text())
+                    self.ui.write_log(f'INFO: Cannanas deaktiviert ({reason}).')
+            except Exception as e:
+                self.ui.write_log('INFO: Cannanas deaktiviert (Initialisierung).')
+                self._cannanas_host = None
 
         if headless.enabled():
             async def essential(name, serve):

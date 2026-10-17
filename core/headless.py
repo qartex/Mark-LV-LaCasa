@@ -31,8 +31,8 @@ def tool_allowed(name: str, args: dict) -> bool:
     if name == 'cannanas':
         # Closed action enum only: confirm/cancel host operations, arbitrary
         # MCP tool names, HTTP verbs and everything else are denied here,
-        # before any dispatch.
-        from core.cannanas_actions import CANNANAS_MODEL_ACTIONS
+        # before any dispatch. The enum is pinned to the plugin module.
+        from plugins.cannanas import CANNANAS_MODEL_ACTIONS
         return args.get('action') in CANNANAS_MODEL_ACTIONS
     return False
 
@@ -54,12 +54,13 @@ def output_device(name, hardware):
 
 
 def trusted_headless_registry() -> 'PluginRegistry':
-    # Import exactly the two trusted plugins. Do not discover/import unused
+    # Import exactly the trusted plugins. Do not discover/import unused
     # desktop actions or arbitrary plugins merely to hide their declarations
     # afterward — the headless allowlist is explicit, never permissive.
     from core.plugin_loader import PluginRegistry, PluginRecord
     from plugins import home_assistant
     from plugins import spotify_control
+    from plugins import cannanas
 
     def _runner(module):
         def _invoke(parameters, player=None, session_memory=None):
@@ -67,7 +68,7 @@ def trusted_headless_registry() -> 'PluginRegistry':
         return _invoke
 
     records = []
-    for module in (home_assistant, spotify_control):
+    for module in (home_assistant, spotify_control, cannanas):
         meta = copy.deepcopy(module.PLUGIN)
         if module is home_assistant:
             meta['description'] = 'Read Home Assistant states and temperatures in °C. Read-only.'
