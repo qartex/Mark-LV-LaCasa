@@ -388,7 +388,7 @@ def _touch(manifest: dict) -> None:
 # probe
 # --------------------------------------------------------------------------
 
-_CHIP_RE = re.compile(r"(?im)^\s*chip\s+is\s+([A-Za-z0-9_-]+)")
+_CHIP_RE = re.compile(r"(?im)^\s*chip(?:\s+is|\s+type:)\s+([A-Za-z0-9_-]+)")
 _MAC_RE = re.compile(r"(?im)^\s*mac:\s*([0-9a-f:]{11,17})\s*$")
 _SIZE_MB_RE = re.compile(r"(?im)^\s*detected\s+flash\s+size:\s*(\d+)\s*MB\s*$")
 _SIZE_B_RE = re.compile(r"(?im)^\s*flash\s+size:\s*(\d+)\s*(?:bytes)?\s*$")
@@ -455,10 +455,13 @@ def _run(runner: Runner, argv: list[str], verb: str) -> RunResult:
     return result
 
 
-def _probe_device(port, runner: Runner, esptool: str, baud: int) -> ProbeResult:
-    # esptool 5.x dropped the esptool-4 `default-reset` choice; `hard-reset`
-    # reproduces the classic post-probe reset behavior.
-    argv = _esptool_argv(esptool, port, baud, "hard-reset", "flash-id", [])
+def _probe_device(port, runner: Runner, esptool: str, baud: int,
+                  reset_after: str = "hard-reset") -> ProbeResult:
+    # esptool 5.x dropped the esptool-4 `default-reset` choice. A standalone
+    # probe resets with `hard-reset` (classic post-probe behavior); identity
+    # re-checks inside guard flows use `no-reset` so a mid-flow reset can never
+    # sneak in before a pending write or verify.
+    argv = _esptool_argv(esptool, port, baud, reset_after, "flash-id", [])
     result = _run(runner, argv, "flash-id")
     return parse_flash_id_output(result.stdout, port)
 
@@ -536,7 +539,7 @@ def backup(port, output, manifest_dir, runner: Runner, *,
     if not store.has_manifest():
         raise GuardError("no safety manifest found; run `probe` first")
     manifest = store.load()
-    probed = _probe_device(port, runner, esptool, baud)
+    probed = _probe_device(port, runner, esptool, baud, reset_after="no-reset")
     _require_device_match(manifest, probed)
     argv = _esptool_argv(esptool, port, baud, "no-reset", "read-flash",
                          [WRITE_OFFSET, FLASH_SIZE_BYTES, out])
@@ -847,7 +850,7 @@ def flash(port, confirmation_id, manifest_dir, runner: Runner, *,
         raise GuardError(
             "flash already recorded as successful; refusing to write again"
         )
-    probed = _probe_device(port, runner, esptool, baud)
+    probed = _probe_device(port, runner, esptool, baud, reset_after="no-reset")
     _require_device_match(manifest, probed)
     backup_record = manifest.get("backup")
     if not backup_record:
@@ -993,7 +996,7 @@ def restore(port, confirmation_id, manifest_dir, runner: Runner, *,
     backup_record = manifest.get("backup")
     if not backup_record:
         raise GuardError("manifest has no bound backup to restore")
-    probed = _probe_device(port, runner, esptool, baud)
+    probed = _probe_device(port, runner, esptool, baud, reset_after="no-reset")
     _require_device_match(manifest, probed)
     backup_path, backup_digest = _recheck_image(backup_record, "backup")
     _consume_confirmation(manifest, store, "restore", confirmation_id)
