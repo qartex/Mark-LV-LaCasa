@@ -123,16 +123,18 @@
 - `preflight_from_lacasa_server(bind_port: int) -> bool` verifies `lacasa-server`→Mac Tailscale reachability against a harmless nonce-free health response before device flash.
 - `esp32_api_acceptance.py` reads the encryption key only from a mode-0600 file, connects through the relay, discovers the temporary media-player key, sends the fixed WAV URL, and never logs key material or changes HA.
 
-- [ ] **Step 1: Write failing transport tests**
+- [x] **Step 1: Write failing transport tests**
   - Cover wildcard/public/stale IP rejection, caller-supplied trust-list bypass absence, MAC mismatch, `lacasa-server` preflight, bidirectional relay, disconnect cleanup, payload absence from logs, route-source selection, wrong-private-interface rejection, exact WAV path, traversal/other paths 404, API-key-file mode enforcement, no HA calls, and minimum safe test-wave amplitude.
 
-- [ ] **Step 2: Run tests RED**
+- [x] **Step 2: Run tests RED**
   - Run: `python -m unittest tests.test_esp32_private_transport -v`
 
-- [ ] **Step 3: Implement relay/server, direct API client, and deterministic short low-volume WAV generation**
+- [x] **Step 3: Implement relay/server, direct API client, and deterministic short low-volume WAV generation**
 
-- [ ] **Step 4: Run tests GREEN and commit**
+- [x] **Step 4: Run tests GREEN and commit**
   - Commit: `feat(esp32): add self-validating private speaker transport`
+
+- Verified 2026-10-17: RED run failed at import (`ModuleNotFoundError: No module named 'esp32_private_relay'`); GREEN run 49/49 OK via `python3 -m unittest tests.test_esp32_private_transport -v` (also OK on the pinned venv interpreter) and full repository suite 499 tests OK (skipped=1); loopback real-socket tests prove the Tailscale reader refuses wildcard/public/non-Tailscale/ambiguous state, fresh rebind per call, wildcard-bind refusal with zero listeners (verified via /proc), bidirectional 200 KB relay with disconnect cleanup and bounded concurrency/rate, route-source UDP-connect derivation plus unsafe-interface refusals, exact-path 200 vs every other/traversal path 404 with status+class-only logs, byte-identical low-volume WAV (peak pinned in 512–2048, generator guard-railed), preflight probe/health round-trip with bounded failure modes, strict mode-0600 single-line key-file enforcement, fixed-URL-only acceptance flow that never logs key material, static no-HA scan and lazy aioesphomeapi import (module imports without the dependency) — no physical device, USB, SSH, secret, real MAC, LAN host or HA call involved.
 
 ---
 
