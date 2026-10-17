@@ -456,7 +456,9 @@ def _run(runner: Runner, argv: list[str], verb: str) -> RunResult:
 
 
 def _probe_device(port, runner: Runner, esptool: str, baud: int) -> ProbeResult:
-    argv = _esptool_argv(esptool, port, baud, "default-reset", "flash-id", [])
+    # esptool 5.x dropped the esptool-4 `default-reset` choice; `hard-reset`
+    # reproduces the classic post-probe reset behavior.
+    argv = _esptool_argv(esptool, port, baud, "hard-reset", "flash-id", [])
     result = _run(runner, argv, "flash-id")
     return parse_flash_id_output(result.stdout, port)
 
