@@ -90,17 +90,19 @@
 - `issue-restore-confirmation(...)` is unavailable unless the durable `flash_may_have_mutated` transition exists, including interrupted/partial writes that never reached success. It returns a separate one-use ID bound to device + backup SHA + `offset=0x0`, `length=16,777,216`, `erase_all=true`, and full-range verification with ≤10-minute lifetime.
 - `restore(...)` refuses a flash confirmation, consumes only the restore-specific confirmation, writes only the manifest-bound 16 MB raw image at `0x0`, verifies all 16 MB before reset, and records the restore result.
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
   - Cover safe probe/backup; short read; existing output; symlink/wrong-mode ancestor; atomic manifest; wrong chip/flash size; USB substitution; rejection of non-factory artifacts; changed offset/length/erase/mode/frequency/size; firmware hash drift; stale/replayed/wrong-kind confirmations; pre-transition restore-confirmation rejection; durable write-start transition ordering; interrupted/partial write restore eligibility; missing manifest; secret-free failures; and no-reset full-range verify ordering.
 
-- [ ] **Step 2: Run tests RED**
+- [x] **Step 2: Run tests RED**
   - Run: `python -m unittest tests.test_esp32_flash_guard -v`
 
-- [ ] **Step 3: Implement with argv-list subprocess calls and bounded sanitized diagnostics**
+- [x] **Step 3: Implement with argv-list subprocess calls and bounded sanitized diagnostics**
   - Never shell-expand dynamic values or emit raw esptool output.
 
-- [ ] **Step 4: Run tests GREEN and commit**
+- [x] **Step 4: Run tests GREEN and commit**
   - Commit: `feat(esp32): guard backup build flash and rollback with manifest`
+
+- Verified 2026-10-17: RED run failed at import (`ModuleNotFoundError: No module named 'esp32_flash_guard'`); GREEN run 41/41 OK via `python3 -m unittest tests.test_esp32_flash_guard -v`; a fake esptool runner exercises every Step-1 dimension (probe/backup binding, short read, existing output, symlink/wrong-mode refusal, atomic 0600 manifest, chip/size mismatch, USB substitution, non-factory artifact rejection, write-map tamper binding, hash drift, stale/replayed/wrong-kind confirmations, pre-transition restore refusal, durable transition before any erase/write, interrupted-write restore eligibility, missing-manifest fail-closed, bounded secret-free diagnostics, no-reset verify-then-reset ordering) without touching any physical device.
 
 ---
 
