@@ -9,4 +9,6 @@ uvicorn>=0.34,<1
 websockets>=15,<17
 cryptography>=44
 qrcode[pil]>=8,<9
+# Persistent JARVIS-side MCP client for the pinned local Cannanas adapter child.
+mcp>=1.9,<2
 # Tests additionally use httpx (or httpx2 with newer Starlette) and Node.js.
