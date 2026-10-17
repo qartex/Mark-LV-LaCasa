@@ -113,7 +113,9 @@ PY
   local pip_args=(install --no-deps)
   if [ -n "$constraints" ]; then
     [ -f "$constraints" ] || die "constraints lock not found"
-    pip_args+=(-r "$constraints")
+    # Constraints (-c), not requirements (-r): the lock also pins the adapter
+    # itself, which must come only from the verified wheel argument.
+    pip_args+=(-c "$constraints")
   fi
   pip_args+=("$wheel")
   "$venv/bin/pip" "${pip_args[@]}" >/dev/null 2>&1 || die "pip install failed"

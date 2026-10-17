@@ -108,6 +108,16 @@ class TestUnitStillParses(unittest.TestCase):
                             if section == '[Unit]' else len(text))
 
 
+class TestInstallerUsesConstraintsMode(unittest.TestCase):
+    """The lock pins the adapter itself: it must ride as -c constraints, not -r
+    requirements, otherwise pip tries to fetch the adapter from an index."""
+
+    def test_install_uses_constraints_not_requirements(self):
+        script = SCRIPT.read_text()
+        self.assertIn('-c "$constraints"', script)
+        self.assertNotIn('-r "$constraints"', script)
+
+
 class TestNoNewSockets(unittest.TestCase):
     def test_exec_start_unchanged_no_new_listeners(self):
         text = UNIT.read_text()
