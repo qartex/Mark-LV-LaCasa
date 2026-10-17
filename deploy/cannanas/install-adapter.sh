@@ -117,18 +117,21 @@ PY
     # itself, which must come only from the verified wheel argument.
     pip_args+=(-c "$constraints")
   fi
-  local wheel_dir pinned_spec
+  local wheel_dir pinned_spec reqspec
   wheel_dir="$(cd "$(dirname "$wheel")" && pwd)"
-  pinned_spec="cannanas-mcp-adapter==${PINNED_VERSION}"
-  # --find-links + version pin (not a bare path arg): pip's hash-checking mode
-  # demands the hash on the requirement, and the constraint supplies it. The
-  # local wheel is found and its hash is verified against the locked value.
-  pip_args+=(--find-links "$wheel_dir" --require-hashes "$pinned_spec")
+  pinned_spec="cannanas-mcp-adapter==${PINNED_VERSION} --hash=sha256:${PINNED_SHA256}"
+  reqspec="$(mktemp "$wheel_dir/require-XXXXXX.txt")"
+  printf '%s\n' "$pinned_spec" > "$reqspec"
+  # --no-index + --require-hashes keeps the install fully local and hash-checked;
+  # the constraint lock stays as -c for any future dependency install.
+  pip_args+=(--no-index --find-links "$wheel_dir" --require-hashes -r "$reqspec")
   local install_log
   if ! install_log="$("$venv/bin/pip" "${pip_args[@]}" 2>&1)"; then
     printf '%s\n' "$install_log" | tail -4 >&2
+    rm -f "$reqspec"
     die "pip install failed"
   fi
+  rm -f "$reqspec"
   "$venv/bin/python" -c 'import cannanas_mcp_adapter' >/dev/null 2>&1 \
     || die "installed adapter does not import"
   if [ -n "$sidecar" ]; then
