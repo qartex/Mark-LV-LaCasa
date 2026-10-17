@@ -444,9 +444,10 @@ function messages(){return element('feed').children.map(x=>x.textContent||'').jo
  control.onerror();await grant(request);await pending;status(true);await tick();
  assert.equal(mediaCalls,8,'control WebSocket error must clear pending auto-resume');
 
- pending=vm.runInContext('doMic()',context);await grant(permissions.shift());await pending;
- control.onclose();await tick();status(true);await tick();
- assert.equal(mediaCalls,9,'control WebSocket close must clear active auto-resume');
+ pending=vm.runInContext('doMic()',context);await pending;await tick();
+ assert.equal(mediaCalls,8,'auth recovery must reject a new microphone attempt');
+ control.onclose({code:1006});await tick();status(true);await tick();
+ assert.equal(mediaCalls,8,'control WebSocket close during recovery must stay idle');
  console.log('browser voice lifecycle passed');
 })().catch(e=>{console.error(e);process.exitCode=1;});
 '''

@@ -163,7 +163,33 @@
     }
 
     let _recoveryTimer = null;
+    let _recoveryWaitResolve = null;
     let _recoveryActive = false;
+    let _loginRouted = false;
+    let _leavingPage = false;
+
+    function _cancelRecoveryTimer() {
+      if (_recoveryTimer !== null) {
+        clearTimeout(_recoveryTimer);
+        _recoveryTimer = null;
+      }
+      if (_recoveryWaitResolve) {
+        const resolve = _recoveryWaitResolve;
+        _recoveryWaitResolve = null;
+        resolve(false);
+      }
+    }
+
+    function _waitForRecovery(delay) {
+      return new Promise(resolve => {
+        _recoveryWaitResolve = resolve;
+        _recoveryTimer = setTimeout(() => {
+          _recoveryTimer = null;
+          _recoveryWaitResolve = null;
+          resolve(true);
+        }, delay);
+      });
+    }
 
     function _clearSessionAuth() {
       sessionStorage.removeItem('jarvis_token');
@@ -171,46 +197,52 @@
     }
 
     function _routeToLogin() {
-      if (_recoveryActive) return;
+      if (_loginRouted) return;
+      _loginRouted = true;
+      _leavingPage = true;
+      _cancelRecoveryTimer();
       _clearSessionAuth();
       _recoveryActive = true;
       _stopVoice();
       _captureAllowed = false;
+      document.getElementById('mic-btn').disabled = true;
       location.replace('/login');
     }
 
     async function _authFetch(url, opts = {}) {
-      opts.headers = Object.assign({}, opts.headers, { Authorization: `Bearer ${_authToken}` });
+      opts.headers = Object.assign({}, opts.headers, { Authorization: 'Bearer ' + _authToken });
       const response = await fetch(url, opts);
       if (response.status === 401) _routeToLogin();
       return response;
     }
 
     async function _recoverControlSession() {
-      if (_recoveryActive) return;
+      if (_recoveryActive || _leavingPage) return;
       _recoveryActive = true;
       _stopVoice();
       _captureAllowed = false;
+      document.getElementById('mic-btn').disabled = true;
       let delay = 1000;
       const deadline = Date.now() + 15000;
-      while (Date.now() < deadline) {
+      while (!_leavingPage && Date.now() < deadline) {
         try {
-          const response = await fetch('/api/status', { headers: { Authorization: `Bearer ${_authToken}` } });
+          const response = await fetch('/api/status', { headers: { Authorization: 'Bearer ' + _authToken } });
+          if (_leavingPage) return;
           if (response.status === 200) {
+            _leavingPage = true;
+            _cancelRecoveryTimer();
             location.reload();
             return;
           }
           if (response.status === 401) {
-            _clearSessionAuth();
-            location.replace('/login');
+            _routeToLogin();
             return;
           }
         } catch (_) {}
-        await new Promise(r => setTimeout(r, delay));
+        if (!await _waitForRecovery(delay)) return;
         delay = Math.min(delay * 2, 5000);
       }
-      _clearSessionAuth();
-      location.replace('/login');
+      if (!_leavingPage) _routeToLogin();
     }
 
     // ── AES-256-CBC encryption (CryptoJS) ────────────────────────────────────
@@ -257,7 +289,11 @@
     const ws       = new WebSocket(_wsUrl);
 
     ws.onopen    = () => { sys('Remote session active.'); toast('Connected to JARVIS'); };
-    ws.onclose   = () => { if (_voiceWs) _stopVoice(); if (!_recoveryActive) _recoverControlSession(); };
+    ws.onclose   = (event) => {
+      if (_voiceWs) _stopVoice();
+      if (event && event.code === 4001) _routeToLogin();
+      else _recoverControlSession();
+    };
     ws.onerror   = () => { if (_voiceWs) _stopVoice(); if (!_recoveryActive) _recoverControlSession(); };
     ws.onmessage = (e) => {
       const m = JSON.parse(e.data);
@@ -270,7 +306,7 @@
 
     function setStatus(m) {
       const s = m.state;
-      _captureAllowed = m.audio_allowed === true;
+      _captureAllowed = m.audio_allowed === true && !_recoveryActive;
       micBtn.disabled = !_captureAllowed;
       if (!_captureAllowed) {
         if (_voiceWs || _micStarting) _micAutoResume = true;
@@ -507,6 +543,7 @@
     }
 
     async function doMic(automatic = false) {
+      if (_recoveryActive || _leavingPage) return;
       if (_voiceWs || _micStarting) {
         if (!automatic) _stopVoice(true);
         return;
@@ -675,7 +712,12 @@
         if (!response.ok) sys('Stop failed — reconnect and pair again.');
       } catch (_) { sys('Stop connection failed.'); }
     }
-    window.addEventListener('pagehide', () => _stopVoice());
+    window.addEventListener('pagehide', () => {
+      _leavingPage = true;
+      _recoveryActive = true;
+      _cancelRecoveryTimer();
+      _stopVoice();
+    });
   </script>
 </body>
 </html>

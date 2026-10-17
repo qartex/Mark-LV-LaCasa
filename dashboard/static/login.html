@@ -147,6 +147,8 @@
     </div>
     <div class="err" id="err"></div>
     <button class="btn" onclick="doLogin()">CONNECT</button>
+    <button class="btn" id="retry-device" style="display:none;margin-top:10px"
+            onclick="_retryDurableLogin()">RETRY DEVICE</button>
     <p class="voice-note">
       🎤 <strong style="color:var(--text)">Voice commands:</strong> open the trusted
       private HTTPS link in Safari while connected to the private network/Tailscale.
@@ -158,16 +160,29 @@
 
   <script>
     const DURABLE_KEY = 'jarvis_device_credential';
+    let _pendingDurable = null;
+    let _durableAttemptActive = false;
 
     function _consumeFragment() {
       const hash = location.hash;
-      const match = hash.match(/^#device=([^#\s]+)$/);
+      if (!hash) return { present: false, credential: null };
       history.replaceState(null, '', '/login');
+      const match = hash.match(/^#device=([A-Za-z0-9_-]{22})\.([A-Za-z0-9_-]{43})$/);
+      if (!match) return { present: true, credential: null };
+      return {
+        present: true,
+        credential: {
+          opaque: match[1] + '.' + match[2],
+          device_id: match[1],
+          secret: match[2],
+        },
+      };
+    }
+
+    function _parseStoredCredential(value) {
+      const match = value && value.match(/^([A-Za-z0-9_-]{22})\.([A-Za-z0-9_-]{43})$/);
       if (!match) return null;
-      const value = match[1];
-      const dot = value.indexOf('.');
-      if (dot <= 0) return null;
-      return { device_id: value.slice(0, dot), secret: value.slice(dot + 1) };
+      return { opaque: value, device_id: match[1], secret: match[2] };
     }
 
     function _showReconnecting() {
@@ -178,53 +193,80 @@
       document.getElementById('reconnecting').style.display = 'none';
     }
 
-    async function _exchange(fragment) {
-      const r = await fetch('/api/device-login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(fragment),
-      });
-      if (r.status === 429) return { ok: false, retry: true };
-      const d = await r.json();
-      return { ok: r.ok && d.ok && !!d.token, token: d.token, key: d.key };
+    function _showDurableRetry() {
+      _hideReconnecting();
+      document.getElementById('err').textContent = 'Unable to reconnect. Try again.';
+      document.getElementById('retry-device').style.display = 'block';
+    }
+
+    async function _exchange(credential) {
+      try {
+        const response = await fetch('/api/device-login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            device_id: credential.device_id,
+            secret: credential.secret,
+          }),
+        });
+        if (response.status === 401) return { state: 'revoked' };
+        if (response.status === 429) return { state: 'retry' };
+        if (!response.ok) return { state: 'retry' };
+        const data = await response.json();
+        if (!data.ok || !data.token || !data.key) return { state: 'retry' };
+        return { state: 'success', token: data.token, key: data.key };
+      } catch (_) {
+        return { state: 'retry' };
+      }
+    }
+
+    async function _attemptDurableLogin(credential) {
+      if (!credential || _durableAttemptActive) return;
+      _pendingDurable = credential;
+      _durableAttemptActive = true;
+      document.getElementById('retry-device').style.display = 'none';
+      document.getElementById('err').textContent = '';
+      _showReconnecting();
+      const result = await _exchange(credential);
+      _durableAttemptActive = false;
+      if (result.state === 'success') {
+        sessionStorage.setItem('jarvis_key', result.key);
+        sessionStorage.setItem('jarvis_token', result.token);
+        location.replace('/');
+        return;
+      }
+      if (result.state === 'revoked') {
+        localStorage.removeItem(DURABLE_KEY);
+        _pendingDurable = null;
+        _hideReconnecting();
+        document.getElementById('retry-device').style.display = 'none';
+        document.getElementById('err').textContent = 'Invalid or revoked device';
+        return;
+      }
+      _showDurableRetry();
+    }
+
+    function _retryDurableLogin() {
+      return _attemptDurableLogin(_pendingDurable);
     }
 
     (async function() {
-      const stored = localStorage.getItem(DURABLE_KEY);
-      if (stored) {
-        const dot = stored.indexOf('.');
-        if (dot > 0) {
-          _showReconnecting();
-          const result = await _exchange({
-            device_id: stored.slice(0, dot),
-            secret: stored.slice(dot + 1),
-          });
-          if (result.ok) {
-            sessionStorage.setItem('jarvis_key', result.key);
-            sessionStorage.setItem('jarvis_token', result.token);
-            location.replace('/');
-            return;
-          }
-          if (result.retry) { _hideReconnecting(); return; }
-        }
-        // Durable credential rejected (revoked, expired, malformed, or server restarted).
-        localStorage.removeItem(DURABLE_KEY);
-        _hideReconnecting();
+      const fragment = _consumeFragment();
+      if (fragment.present) {
+        if (!fragment.credential) return;
+        localStorage.setItem(DURABLE_KEY, fragment.credential.opaque);
+        await _attemptDurableLogin(fragment.credential);
         return;
       }
-      const fragment = _consumeFragment();
-      if (fragment) {
-        localStorage.setItem(DURABLE_KEY, fragment.device_id + '.' + fragment.secret);
-        _showReconnecting();
-        const result = await _exchange(fragment);
-        if (result.ok) {
-          sessionStorage.setItem('jarvis_key', result.key);
-          sessionStorage.setItem('jarvis_token', result.token);
-          location.replace('/');
-          return;
-        }
-        if (result.retry) { _hideReconnecting(); return; }
+
+      const stored = localStorage.getItem(DURABLE_KEY);
+      if (!stored) return;
+      const credential = _parseStoredCredential(stored);
+      if (!credential) {
+        localStorage.removeItem(DURABLE_KEY);
+        return;
       }
+      await _attemptDurableLogin(credential);
     })();
 
     const inp = document.getElementById('key');
@@ -252,9 +294,9 @@
         shake(); return;
       }
       if (data.ok && data.token) {
-        sessionStorage.setItem('jarvis_key', key);
+        sessionStorage.setItem('jarvis_key', data.key);
         sessionStorage.setItem('jarvis_token', data.token);
-        location.href = '/';
+        location.replace('/');
       } else {
         inp.value = '';
         inp.focus();
