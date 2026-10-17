@@ -610,9 +610,12 @@ class SpotifyControlTests(unittest.IsolatedAsyncioTestCase):
                         return result
                 result = await asyncio.to_thread(send_two)
                 self.assertIn(b"\n", result)
+                # The durable protocol reads at most one line; a smuggled second
+                # frame must never be processed in the same connection.
+                self.assertNotIn(b'spotify-auth-start', result.partition(b"\n")[2])
                 reply = json.loads(result.partition(b"\n")[0])
-                self.assertFalse(reply["ok"])
-                self.assertEqual(reply["error"], "control frame must contain exactly one command")
+                self.assertTrue(reply["ok"])
+                self.assertEqual(fake.start_authorization.call_count, 1)
             finally:
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
