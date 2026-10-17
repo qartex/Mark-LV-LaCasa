@@ -160,6 +160,59 @@ class DashboardTests(unittest.TestCase):
 
 
 class WebSocketHandshakeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_new_key_from_non_async_thread_closes_transient_sockets_on_dashboard_loop(self):
+        server = DashboardServer()
+        server.set_audio_allowed_callback(lambda: True)
+        transient = server._sessions.issue(None)
+        durable = server._sessions.issue('durable-device')
+        control_route = next(route.endpoint for route in server.app.routes if route.path == '/ws')
+        audio_route = next(route.endpoint for route in server.app.routes
+                           if route.path == '/ws/phone-audio')
+        transient_control = ThreadOwnedSocket()
+        transient_audio = ThreadOwnedSocket()
+        durable_control = ThreadOwnedSocket()
+        tasks = [
+            asyncio.create_task(control_route(transient_control, token=transient.token)),
+            asyncio.create_task(audio_route(transient_audio, token=transient.token)),
+            asyncio.create_task(control_route(durable_control, token=durable.token)),
+        ]
+        try:
+            for _ in range(100):
+                if transient_control.messages and transient_audio.messages and durable_control.messages:
+                    break
+                await asyncio.sleep(.01)
+            else:
+                self.fail('dashboard loop did not accept all test sockets')
+
+            def rotate_from_main_thread():
+                with self.assertRaises(RuntimeError):
+                    asyncio.get_running_loop()
+                return server.new_key()
+
+            await asyncio.to_thread(rotate_from_main_thread)
+            await asyncio.wait_for(asyncio.gather(transient_control.closed.wait(),
+                                                  transient_audio.closed.wait()), .5)
+            self.assertEqual(transient_control.close_codes, [4001])
+            self.assertEqual(transient_audio.close_codes, [4001])
+            self.assertIsNone(server._audio_owner)
+            self.assertNotIn(transient.token, server._token_sockets)
+            self.assertNotIn(transient_control, server._socket_tokens)
+            self.assertNotIn(transient_audio, server._socket_tokens)
+
+            durable_control.command('durable session remains')
+            for _ in range(100):
+                if not server._command_queue.empty():
+                    break
+                await asyncio.sleep(.01)
+            else:
+                self.fail('durable control socket did not remain usable')
+            self.assertEqual(server._command_queue.get_nowait(), 'durable session remains')
+            self.assertEqual(durable_control.close_codes, [])
+        finally:
+            for socket in (transient_control, transient_audio, durable_control):
+                socket.disconnect()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
     async def test_audio_handshake_failure_releases_owner_and_allows_reconnect(self):
         for stage in ('accept', 'send'):
             for failure in (WebSocketDisconnect, RuntimeError, asyncio.CancelledError):
@@ -232,6 +285,41 @@ class HandshakeSocket:
 
     async def close(self, **kwargs):
         pass
+
+
+class ThreadOwnedSocket:
+    """In-memory socket whose route remains owned by this test's dashboard loop."""
+    def __init__(self):
+        self.incoming = asyncio.Queue()
+        self.messages = []
+        self.close_codes = []
+        self.closed = asyncio.Event()
+
+    async def accept(self):
+        pass
+
+    async def send_json(self, message):
+        self.messages.append(message)
+
+    async def receive(self):
+        return await self.incoming.get()
+
+    async def receive_json(self):
+        message = await self.incoming.get()
+        if message['type'] == 'websocket.disconnect':
+            raise WebSocketDisconnect(1000)
+        return message
+
+    async def close(self, *, code):
+        self.close_codes.append(code)
+        self.closed.set()
+        self.disconnect()
+
+    def command(self, text):
+        self.incoming.put_nowait({'type': 'command', 'text': text})
+
+    def disconnect(self):
+        self.incoming.put_nowait({'type': 'websocket.disconnect'})
 
 
 class ControlTests(unittest.IsolatedAsyncioTestCase):

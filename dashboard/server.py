@@ -19,6 +19,7 @@ import time
 import os
 import json
 import contextlib
+import threading
 from pathlib import Path
 from urllib.parse import urlsplit
 from core import headless
@@ -511,7 +512,9 @@ class DashboardServer:
         self._clients: set[WebSocket]     = set()
         self._token_sockets: dict[str, set[WebSocket]] = {}
         self._socket_tokens: dict[WebSocket, str] = {}
-        self._revocation_tasks: list[asyncio.Task] = []
+        self._dashboard_loop: asyncio.AbstractEventLoop | None = None
+        self._revocation_tasks: set = set()
+        self._revocation_lock = threading.Lock()
         self._history: list[dict]         = []
         self._command_queue               = asyncio.Queue()
         self._wake_callback               = None
@@ -529,20 +532,64 @@ class DashboardServer:
         """Rotate only emergency-pairing state; durable devices remain connected."""
         self._pending_keys.clear()
         tokens = self._sessions.revoke_transient()
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
-        self._revocation_tasks = []
-        if loop and tokens:
-            self._revocation_tasks.append(loop.create_task(self._terminate_tokens(tokens)))
+        self._schedule_token_termination(tokens)
         now = self._wall_clock()
         self._pending_keys = {k: v for k, v in self._pending_keys.items() if v > now}
         key = ''.join(secrets.choice(_KEY_CHARS) for _ in range(6))
         self._pending_keys[key] = now + expiry_secs
         return key
 
+    def _remember_dashboard_loop(self) -> None:
+        try:
+            self._dashboard_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+
+    def _track_revocation_task(self, task) -> None:
+        with self._revocation_lock:
+            self._revocation_tasks.add(task)
+
+        def reap(completed) -> None:
+            with self._revocation_lock:
+                self._revocation_tasks.discard(completed)
+            with contextlib.suppress(BaseException):
+                completed.exception()
+
+        task.add_done_callback(reap)
+
+    def _schedule_token_termination(self, tokens: set[str]) -> None:
+        """Schedule WebSocket close work on the loop that owns the transports."""
+        if not tokens:
+            return
+        loop = self._dashboard_loop
+        if loop is None or loop.is_closed():
+            return
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            current_loop = None
+        if current_loop is loop:
+            task = loop.create_task(self._terminate_tokens(tokens))
+        else:
+            coroutine = self._terminate_tokens(tokens)
+            try:
+                task = asyncio.run_coroutine_threadsafe(coroutine, loop)
+            except RuntimeError:
+                coroutine.close()
+                return
+        self._track_revocation_task(task)
+
+    async def _wait_for_revocation_tasks(self) -> None:
+        with self._revocation_lock:
+            tasks = tuple(self._revocation_tasks)
+        if not tasks:
+            return
+        await asyncio.gather(*(task if isinstance(task, asyncio.Future)
+                               else asyncio.wrap_future(task) for task in tasks),
+                             return_exceptions=True)
+
     def _register_socket(self, websocket: WebSocket, token: str) -> None:
+        self._remember_dashboard_loop()
         self._socket_tokens[websocket] = token
         self._token_sockets.setdefault(token, set()).add(websocket)
 
@@ -671,6 +718,7 @@ class DashboardServer:
 
     async def serve_control(self, path=None):
         """Local operator channel, inside a private directory, socket mode 0600."""
+        self._remember_dashboard_loop()
         path = Path(path or headless.control_path())
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         if path.parent.stat().st_uid != os.getuid() or path.parent.stat().st_mode & 0o077:
@@ -693,7 +741,7 @@ class DashboardServer:
                     reply = {'error': 'Set JARVIS_PUBLIC_URL to the trusted external HTTPS origin before pairing'}
                 else:
                     key = self.new_key()
-                    await asyncio.gather(*self._revocation_tasks, return_exceptions=True)
+                    await self._wait_for_revocation_tasks()
                     reply = {'url': f'{self.get_url()}/auto-login?key={key}'}
                 writer.write((json.dumps(reply) + '\n').encode())
                 await writer.drain()
@@ -1180,6 +1228,7 @@ Do not bypass certificate warnings or browser security protections.</p>
         await uvicorn.Server(cfg).serve()
 
     async def serve(self) -> None:
+        self._remember_dashboard_loop()
         if headless.enabled():
             # Trusted private reverse proxy terminates TLS. No firewall changes,
             # self-signed certificates, alias listeners or secret query logging.
