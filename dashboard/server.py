@@ -22,6 +22,8 @@ import contextlib
 from pathlib import Path
 from urllib.parse import urlsplit
 from core import headless
+from core.device_credentials import DeviceCredentialStore
+from dashboard.access import AttemptLimiter, SessionRecord, SessionRegistry
 
 _DEPS_OK = False
 try:
@@ -461,7 +463,9 @@ def _read(name: str) -> str:
 
 class DashboardServer:
 
-    def __init__(self, public_url=None, host=None):
+    def __init__(self, public_url=None, host=None, *, device_store: DeviceCredentialStore | None = None,
+                 qr_output_dir: Path | None = None, bearer_ttl_seconds: float = 3600,
+                 wall_clock=time.time, monotonic_clock=time.monotonic):
         self._host = host or os.environ.get('JARVIS_BIND', '127.0.0.1' if headless.enabled() else '0.0.0.0')
         self._public_url = (public_url or os.environ.get('JARVIS_PUBLIC_URL', '')).rstrip('/')
         if headless.enabled() and self._host not in ('127.0.0.1', '::1', 'localhost'):
@@ -481,10 +485,16 @@ class DashboardServer:
         self._audio_epoch_has_pcm = False
         self._http_ready = asyncio.Event()
         self._control_ready = asyncio.Event()
-        self._pair_attempts = []
         self._ip = '127.0.0.1' if headless.enabled() else _local_ip()
-        self._tokens: set[str]            = set()
-        self._token_keys: dict[str, str]  = {}   # auth_token → session_key
+        self._wall_clock = wall_clock
+        self._sessions = SessionRegistry(ttl_seconds=bearer_ttl_seconds, clock=wall_clock)
+        self._attempt_limiter = AttemptLimiter(clock=monotonic_clock)
+        self._device_store = device_store or DeviceCredentialStore(Path(
+            os.environ.get('JARVIS_DEVICE_CREDENTIALS') or BASE_DIR / 'config' / 'device_credentials.json'
+        ), clock=wall_clock)
+        self._qr_output_dir = qr_output_dir or Path(
+            os.environ.get('JARVIS_DEVICE_QR_DIR') or BASE_DIR / 'config' / 'device_qr'
+        )
         self._aes_cache:  dict[str, bytes]= {}   # session_key → AES bytes
         self._clients: set[WebSocket]     = set()
         self._history: list[dict]         = []
@@ -492,7 +502,6 @@ class DashboardServer:
         self._wake_callback               = None
         self._connect_callback            = None
         self._pending_keys: dict[str, float] = {}
-        self._device_sessions: dict[str, dict] = {}  # device_token → {session_key}
         self._phone_audio_queue: asyncio.Queue    = asyncio.Queue(maxsize=200)
         self._uploads_dir                 = UPLOADS_DIR
         self._login_html                  = _read("login.html")
@@ -502,12 +511,10 @@ class DashboardServer:
     # ── one-time key management ───────────────────────────────────────────
 
     def new_key(self, expiry_secs: int = 600) -> str:
-        # Rotation is explicit and revokes *everything*, including paired devices.
+        # Rotation revokes transient pairing sessions while durable credentials persist.
         self._pending_keys.clear()
-        self._tokens.clear()
-        self._token_keys.clear()
+        self._sessions.revoke_transient()
         self._aes_cache.clear()
-        self._device_sessions.clear()
         self.invalidate_audio()
         self._history.clear()
         try:
@@ -518,7 +525,7 @@ class DashboardServer:
         if loop:
             for ws in list(self._clients | self._audio_clients):
                 self._revocation_tasks.append(loop.create_task(ws.close(code=4001)))
-        now = time.time()
+        now = self._wall_clock()
         self._pending_keys = {k: v for k, v in self._pending_keys.items() if v > now}
         key = ''.join(secrets.choice(_KEY_CHARS) for _ in range(6))
         self._pending_keys[key] = now + expiry_secs
@@ -549,11 +556,11 @@ class DashboardServer:
         return self._aes_cache[session_key]
 
     def _decrypt(self, token: str, enc_b64: str) -> str | None:
-        sk = self._token_keys.get(token)
-        if not sk:
+        session = self._sessions.authenticate(token)
+        if session is None:
             return None
         try:
-            return _decrypt_cbc(self._aes_key(sk), enc_b64)
+            return _decrypt_cbc(self._aes_key(session.session_key), enc_b64)
         except Exception:
             return None
 
@@ -701,17 +708,14 @@ class DashboardServer:
             response.headers['X-Content-Type-Options'] = 'nosniff'
             return response
 
-        def _auth(req: Request) -> bool:
-            tok = req.headers.get("authorization", "").removeprefix("Bearer ").strip()
-            return bool(tok) and tok in self._tokens
+        def _session(req: Request) -> SessionRecord | None:
+            header = req.headers.get("authorization", "")
+            if not header.startswith("Bearer "):
+                return None
+            return self._sessions.authenticate(header.removeprefix("Bearer ").strip())
 
-        def pairing_rate_allowed():
-            now = time.monotonic()
-            self._pair_attempts = [t for t in self._pair_attempts if t > now - 60]
-            if len(self._pair_attempts) >= 10:
-                return False
-            self._pair_attempts.append(now)
-            return True
+        def _auth(req: Request) -> bool:
+            return _session(req) is not None
 
         @app.get('/api/status')
         async def status_ep(req: Request):
@@ -757,33 +761,34 @@ class DashboardServer:
 
         @app.post("/login")
         async def login(req: Request):
-            if not pairing_rate_allowed():
+            if not self._attempt_limiter.allow("transient-login"):
                 return JSONResponse({'error':'Try again later'}, status_code=429)
-            body    = await req.json()
+            try:
+                body = await req.json()
+            except Exception:
+                body = {}
             entered = str(body.get("pin", "")).strip().upper()
-            now     = time.time()
+            now     = self._wall_clock()
             if entered in self._pending_keys and self._pending_keys[entered] > now:
                 del self._pending_keys[entered]          # one-time use
-                tok = secrets.token_urlsafe(32)
-                self._tokens.add(tok)
-                self._token_keys[tok] = entered
-                self._aes_key(entered)                   # pre-derive & cache
+                session = self._sessions.issue(None)
+                self._aes_key(session.session_key)       # pre-derive & cache
                 if self._connect_callback:
                     self._connect_callback()
                 asyncio.create_task(self.broadcast(
                     {"type": "sys", "text": "Remote connection established."}
                 ))
                 # Bearer token in response body — no cookies needed (works on any browser/HTTP)
-                return JSONResponse({"ok": True, "token": tok})
+                return JSONResponse({"ok": True, "token": session.token, "key": session.session_key})
             return JSONResponse({"ok": False, "error": "Invalid or expired key"},
                                 status_code=401)
 
         @app.get("/auto-login")
         async def auto_login(key: str = ""):
             """QR code target — validates one-time key, creates session, redirects phone."""
-            if not pairing_rate_allowed():
+            if not self._attempt_limiter.allow("transient-login"):
                 return JSONResponse({'error':'Try again later'}, status_code=429)
-            now = time.time()
+            now = self._wall_clock()
             if not key or key not in self._pending_keys or self._pending_keys[key] <= now:
                 return HTMLResponse("""<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width">
@@ -801,12 +806,8 @@ Do not bypass certificate warnings or browser security protections.</p>
 </div></body></html>""")
 
             del self._pending_keys[key]
-            tok     = secrets.token_urlsafe(32)
-            dev_tok = secrets.token_urlsafe(32)
-            self._tokens.add(tok)
-            self._token_keys[tok] = key
-            self._aes_key(key)
-            self._device_sessions[dev_tok] = {"session_key": key}
+            session = self._sessions.issue(None)
+            self._aes_key(session.session_key)
 
             if self._connect_callback:
                 self._connect_callback()
@@ -823,9 +824,8 @@ Do not bypass certificate warnings or browser security protections.</p>
 </style></head>
 <body>
 <script>
-  sessionStorage.setItem('jarvis_token','{tok}');
-  sessionStorage.setItem('jarvis_key','{key}');
-  localStorage.setItem('jarvis_device_token','{dev_tok}');
+  sessionStorage.setItem('jarvis_token','{session.token}');
+  sessionStorage.setItem('jarvis_key','{session.session_key}');
   setTimeout(function(){{location.replace('/')}},400);
 </script>
 <p>Connecting to JARVIS…</p>
@@ -833,33 +833,41 @@ Do not bypass certificate warnings or browser security protections.</p>
 
         @app.post("/api/device-login")
         async def device_login_ep(req: Request):
-            """Return a fresh auth token for a previously paired device token."""
+            """Exchange one durable device credential for a fresh in-memory session."""
+            if not self._attempt_limiter.allow("durable-login"):
+                return JSONResponse({"ok": False}, status_code=429)
             try:
                 body = await req.json()
             except Exception:
                 return JSONResponse({"ok": False}, status_code=400)
-            dev_tok = (body.get("device_token") or "").strip()
-            if not dev_tok or dev_tok not in self._device_sessions:
+            if not isinstance(body, dict) or set(body) != {"device_id", "secret"}:
+                return JSONResponse({"ok": False}, status_code=400)
+            device_id, secret = body["device_id"], body["secret"]
+            if not isinstance(device_id, str) or not isinstance(secret, str):
+                return JSONResponse({"ok": False}, status_code=400)
+            summary = self._device_store.verify(device_id, secret)
+            if summary is None:
                 return JSONResponse({"ok": False}, status_code=401)
-            session_key = self._device_sessions[dev_tok]["session_key"]
-            tok = secrets.token_urlsafe(32)
-            self._tokens.add(tok)
-            self._token_keys[tok] = session_key
-            self._aes_key(session_key)
+            session = self._sessions.issue(summary.device_id)
+            self._aes_key(session.session_key)
             if self._connect_callback:
                 self._connect_callback()
             asyncio.create_task(self.broadcast(
                 {"type": "sys", "text": "Known device reconnected automatically."}
             ))
-            return JSONResponse({"ok": True, "token": tok, "key": session_key})
+            return JSONResponse({"ok": True, "token": session.token, "key": session.session_key,
+                                 "expires_in": 3600})
 
         @app.post("/api/revoke-devices")
         async def revoke_devices(req: Request):
-            """Invalidate all persistent device tokens (admin action)."""
+            """Revoke all durable credentials and their active in-memory sessions."""
             if not _auth(req):
                 return JSONResponse({"error": "Unauthorized"}, status_code=401)
-            count = len(self._device_sessions)
-            self._device_sessions.clear()
+            devices = self._device_store.list_devices()
+            for device in devices:
+                self._device_store.revoke(device.device_id)
+                self._sessions.revoke_device(device.device_id)
+            count = len(devices)
             return JSONResponse({"ok": True, "revoked": count})
 
         @app.post("/api/command")
@@ -894,7 +902,7 @@ Do not bypass certificate warnings or browser security protections.</p>
         @app.websocket("/ws/phone-audio")
         async def phone_audio_ws(websocket: WebSocket, token: str = ""):
             tok = token.strip()
-            if not tok or tok not in self._tokens:
+            if not self._sessions.authenticate(tok):
                 await websocket.close(code=4001)
                 return
             if (headless.capture_source() != 'phone' or self._audio_owner is not None
@@ -914,7 +922,7 @@ Do not bypass certificate warnings or browser security protections.</p>
                     message = await websocket.receive()
                     if message['type'] == 'websocket.disconnect':
                         break
-                    if tok not in self._tokens or not self.audio_allowed() or epoch != self._audio_epoch:
+                    if not self._sessions.authenticate(tok) or not self.audio_allowed() or epoch != self._audio_epoch:
                         self.invalidate_audio()
                         await websocket.close(code=4009)
                         break
@@ -1034,7 +1042,7 @@ Do not bypass certificate warnings or browser security protections.</p>
         async def download_file(filename: str, token: str = ""):
             # Auth via query param — browser <a download> can't send custom headers
             tok = token.strip()
-            if not tok or tok not in self._tokens:
+            if not self._sessions.authenticate(tok):
                 return JSONResponse({"error": "Unauthorized"}, status_code=401)
             safe = re.sub(r'[/\\]', '', filename)
             path = self._uploads_dir / safe
@@ -1045,7 +1053,7 @@ Do not bypass certificate warnings or browser security protections.</p>
         @app.websocket("/ws")
         async def ws_ep(websocket: WebSocket, token: str = ""):
             tok = token.strip()
-            if not tok or tok not in self._tokens:
+            if not self._sessions.authenticate(tok):
                 await websocket.close(code=4001)
                 return
             try:
@@ -1059,7 +1067,7 @@ Do not bypass certificate warnings or browser security protections.</p>
                         break
                 while True:
                     data = await websocket.receive_json()
-                    if tok not in self._tokens:
+                    if not self._sessions.authenticate(tok):
                         await websocket.close(code=4001)
                         break
                     if data.get("type") == "command":

@@ -36,13 +36,10 @@ class DashboardTests(unittest.TestCase):
         expired=self.server.new_key(expiry_secs=-1)
         self.assertEqual(self.client.post('/login',json={'pin':expired}).status_code,401)
         key=self.server.new_key()
-        html=self.client.get('/auto-login',params={'key':key}).text
-        import re
-        device=re.search("jarvis_device_token','([^']+)",html).group(1)
-        self.assertEqual(self.client.post('/api/device-login',json={'device_token':device}).status_code,200)
+        transient=self.client.post('/login',json={'pin':key}).json()['token']
         self.server.new_key()
         self.assertEqual(self.client.get('/api/status',headers=self.headers).status_code,401)
-        self.assertEqual(self.client.post('/api/device-login',json={'device_token':device}).status_code,401)
+        self.assertEqual(self.client.get('/api/status',headers={'Authorization':f'Bearer {transient}'}).status_code,401)
         self.assertEqual(self.client.post('/login',json={'pin':key}).status_code,401)
         self.assertEqual(self.server.get_url(),'https://lacasa-server.tail7a9c2.ts.net')
 
@@ -113,7 +110,7 @@ class WebSocketHandshakeTests(unittest.IsolatedAsyncioTestCase):
             for failure in (WebSocketDisconnect, RuntimeError, asyncio.CancelledError):
                 with self.subTest(stage=stage, failure=failure.__name__):
                     server = DashboardServer()
-                    server._tokens.add('test-token')
+                    token = server._sessions.issue(None).token
                     server.set_audio_allowed_callback(lambda: True)
                     route = next(r.endpoint for r in server.app.routes
                                  if r.path == '/ws/phone-audio')
@@ -122,7 +119,7 @@ class WebSocketHandshakeTests(unittest.IsolatedAsyncioTestCase):
                     server._phone_audio_queue.put_nowait(stale)
                     socket = HandshakeSocket(stage, failure)
                     try:
-                        await route(socket, token='test-token')
+                        await route(socket, token=token)
                     except (WebSocketDisconnect, RuntimeError, asyncio.CancelledError):
                         pass
                     self.assertIsNone(server._audio_owner)
@@ -130,7 +127,7 @@ class WebSocketHandshakeTests(unittest.IsolatedAsyncioTestCase):
                     self.assertTrue(server._phone_audio_queue.empty())
                     self.assertFalse(server.audio_message_valid(stale))
                     replacement = HandshakeSocket()
-                    await route(replacement, token='test-token')
+                    await route(replacement, token=token)
                     self.assertEqual(replacement.messages,
                                      [{'type': 'audio_ready'}, {'type': 'audio_ended'}])
                     self.assertIsNone(server._audio_owner)
@@ -141,16 +138,16 @@ class WebSocketHandshakeTests(unittest.IsolatedAsyncioTestCase):
             for failure in (WebSocketDisconnect, RuntimeError, asyncio.CancelledError):
                 with self.subTest(stage=stage, failure=failure.__name__):
                     server = DashboardServer()
-                    server._tokens.add('test-token')
+                    token = server._sessions.issue(None).token
                     route = next(r.endpoint for r in server.app.routes if r.path == '/ws')
                     socket = HandshakeSocket(stage, failure)
                     try:
-                        await route(socket, token='test-token')
+                        await route(socket, token=token)
                     except (WebSocketDisconnect, RuntimeError, asyncio.CancelledError):
                         pass
                     self.assertNotIn(socket, server._clients)
                     replacement = HandshakeSocket()
-                    await route(replacement, token='test-token')
+                    await route(replacement, token=token)
                     self.assertEqual(replacement.messages[0]['type'], 'status')
                     self.assertFalse(server._clients)
 

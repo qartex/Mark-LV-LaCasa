@@ -226,7 +226,7 @@ class PhoneClosureTests(LocalServiceFixture, unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.server = self.live._dashboard = DashboardServer()
         self.server.set_audio_allowed_callback(self.live.audio_allowed)
-        self.server._tokens.add('synthetic')
+        self.token = self.server._sessions.issue(None).token
         self.route = next(r.endpoint for r in self.server.app.routes if r.path == '/ws/phone-audio')
         self.live.out_queue = asyncio.Queue(maxsize=200)
         self.sent = []
@@ -242,7 +242,7 @@ class PhoneClosureTests(LocalServiceFixture, unittest.IsolatedAsyncioTestCase):
 
     async def phone(self):
         phone = Phone()
-        task = asyncio.create_task(self.route(phone, token='synthetic'))
+        task = asyncio.create_task(self.route(phone, token=self.token))
         self.tasks.append(task)
         await eventually(lambda: phone.messages)
         self.assertEqual(phone.messages[0], {'type':'audio_ready'})
