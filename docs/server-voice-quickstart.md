@@ -109,17 +109,19 @@ Status: .venv/bin/python -m core.headless spotify-auth-status
 The authorization URL is opened by the operator over trusted HTTPS. Consent must be repeated after six calendar months/revocation/invalid_grant. The status command never displays tokens. Spotify Premium is required for playback mutating actions; reads (search, playlists, library, get_state) work on Free.
 
 Seven German voice-action examples:
-- play <track/album/artist>
-- pause / resume
-- next / previous
-- volume <0-100>
-- what's playing / current
+- „Spiele Bohemian Rhapsody." (play, track)
+- „Spiele das Album A Night at the Opera." (play, album)
+- „Spiele Queen." (play, artist)
+- „Pause die Wiedergabe." / „Setze die Wiedergabe fort."
+- „Nächster Titel." / „Vorheriger Titel."
+- „Stelle die Lautstärke auf 50 Prozent."
+- „Was läuft gerade?" (current)
 
-Exact receiver: respotify (lacasa-server). All playback is directed exclusively at this receiver; the iPhone or any other device is never controlled.
+Exact receiver: raspotify (lacasa-server). All playback is directed exclusively at this receiver; the iPhone or any other device is never controlled.
 
 Safe troubleshooting:
 - If `spotify-auth-status` returns `authorized: false`, re-run `spotify-auth-start`.
-- If a 401 occurs during playback, JARVIS silently reauthorizes and resumes.
+- If consent is repeated, consent must be re-granted after six calendar months, revocation, or `invalid_grant`; a single 401 during playback is handled by one automatic token refresh and one retry, but an expired reauthorization requires a new manual `spotify-auth-start`.
 - Network errors appear as "Spotify API ist zurzeit nicht erreichbar" in the assistant output.
 
 These steps are explicitly deferred to the separate durable-device plan; current transient `pair` instructions stay valid.
