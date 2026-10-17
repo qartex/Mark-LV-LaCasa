@@ -121,7 +121,7 @@ Exact receiver: raspotify (lacasa-server). All playback is directed exclusively 
 
 Safe troubleshooting:
 - If `spotify-auth-status` returns `authorized: false`, re-run `spotify-auth-start`.
-- If consent is repeated, consent must be re-granted after six calendar months, revocation, or `invalid_grant`; a single 401 during playback is handled by one automatic token refresh and one retry, but an expired reauthorization requires a new manual `spotify-auth-start`.
+- Consent must be re-granted after six calendar months, revocation, or `invalid_grant`; a single 401 during playback is handled by one automatic token refresh and one retry, an expired reauthorization needs a new manual `spotify-auth-start`.
 - Network errors appear as "Spotify API ist zurzeit nicht erreichbar" in the assistant output.
 
 These steps are explicitly deferred to the separate durable-device plan; current transient `pair` instructions stay valid.

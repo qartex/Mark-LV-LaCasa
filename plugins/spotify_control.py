@@ -119,8 +119,8 @@ def run(parameters: dict, player=None, session_memory=None) -> str:
     action = parameters["action"]
     try:
         controller = get_controller()
-    except Exception as exc:  # noqa: BLE001 — never raise into Gemini
-        return f"Spotify-Controller nicht verfügbar: {exc}"
+    except Exception:  # noqa: BLE001 — never raise into Gemini, never leak internals
+        return "Spotify ist zurzeit nicht verbunden. Bitte einmal neu autorisieren."
 
     try:
         return controller.perform(
