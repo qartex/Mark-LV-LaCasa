@@ -468,10 +468,20 @@ class SpotifyOAuth:
         try:
             new_record = self._do_refresh(record.client_id, record.refresh_token, now)
         except SpotifyAuthorizationRequired:
+            # Permanent authorization failure: only SpotifyAuthorizationRequired
+            # escapes _do_refresh, and only for invalid_grant / revocation /
+            # deadline. Transient failures surface as SpotifyAPIError instead.
             self._store.invalidate_tokens()
             raise
         self._store.save(new_record)
         return new_record.access_token or record.access_token or ""
+
+    @staticmethod
+    def _safe_json(response) -> object | None:
+        try:
+            return response.json()
+        except Exception:
+            return None
 
     def _do_refresh(self, client_id: str, refresh_token: str, now: datetime) -> OAuthRecord:
         data = {
@@ -479,23 +489,32 @@ class SpotifyOAuth:
             "refresh_token": refresh_token,
             "client_id": client_id,
         }
-        response = self._request(
-            "POST", TOKEN_ENDPOINT, data=data,
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            timeout=15,
-        )
+        try:
+            response = self._request(
+                "POST", TOKEN_ENDPOINT, data=data,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                timeout=15,
+            )
+        except (requests.ConnectionError, requests.Timeout) as exc:
+            # Transient: never invalidates the stored authorization.
+            raise SpotifyAPIError("network", "spotify token refresh unavailable") from exc
         if response.status_code != 200:
             if response.status_code == 400:
-                body = response.json() if response.text else {}
+                body = self._safe_json(response) or {}
+                if not isinstance(body, dict):
+                    body = {}
                 if body.get("error") == "invalid_grant":
                     raise SpotifyAuthorizationRequired("refresh token invalid")
-            raise SpotifyAuthorizationRequired(f"refresh failed: {response.status_code}")
+                raise SpotifyAPIError("bad_response", "refresh request rejected")
+            if response.status_code == 429:
+                raise SpotifyAPIError("rate_limited", "spotify token refresh rate limited")
+            raise SpotifyAPIError("bad_response", f"refresh failed: {response.status_code}")
         try:
             body = response.json()
         except Exception as exc:
-            raise SpotifyAuthorizationRequired("malformed refresh response") from exc
+            raise SpotifyAPIError("malformed refresh response") from exc
         if not isinstance(body, dict) or "access_token" not in body:
-            raise SpotifyAuthorizationRequired("malformed refresh response")
+            raise SpotifyAPIError("bad_response", "malformed refresh response")
         access_token = body["access_token"]
         expires_in = body.get("expires_in")
         if not isinstance(expires_in, (int, float)) or expires_in < 0:
@@ -517,6 +536,15 @@ class SpotifyOAuth:
         if record is None:
             return AuthorizationStatus(False, True, None, None, None)
         reauth = now >= record.authorization_expires_at
+        if not reauth:
+            # Reflect reality after invalidation: a record without tokens can
+            # no longer authorize requests even though the deadline is open.
+            has_valid_access = record.access_token is not None and (
+                record.access_expires_at is None
+                or now < record.access_expires_at - timedelta(seconds=60)
+            )
+            if not (has_valid_access or record.refresh_token is not None):
+                reauth = True
         return AuthorizationStatus(
             not reauth, reauth,
             record.authorized_at, record.authorization_expires_at, record.access_expires_at,
@@ -636,10 +664,15 @@ class SpotifyHTTP:
             if response.status_code == 200 or response.status_code == 204:
                 return response
 
-            if response.status_code == 401 and not did_auth_retry:
+            if response.status_code == 401:
+                if did_auth_retry:
+                    # Already retried exactly once after a forced refresh: the
+                    # request stays unauthorized (permanent).
+                    raise SpotifyAPIError("unauthorized")
                 did_auth_retry = True
-                self._oauth.invalidate_tokens()
-                raise SpotifyAPIError("unauthorized")
+                token = self._oauth.access_token(force_refresh=True)
+                headers = {"Authorization": f"Bearer {token}"}
+                continue
 
             if response.status_code == 403:
                 reason = self._classify_403(response)
@@ -683,16 +716,6 @@ class SpotifyHTTP:
         return min(value, 5.0)
 
 
-def _access_token_with_lock(oauth: SpotifyOAuth) -> str:
-    with oauth._lock:
-        return oauth._access_token_internal()
-
-
-def _refresh_if_needed(oauth: SpotifyOAuth) -> None:
-    with oauth._lock:
-        oauth._refresh_if_needed_internal()
-
-
 # ── Exact receiver resolution and voice-control actions (Task 4) ──────────────
 
 @dataclass(frozen=True)
@@ -714,6 +737,8 @@ class SpotifyController:
             data = resp.json()
         except Exception as exc:
             raise SpotifyAPIError("bad_response", "malformed devices response") from exc
+        if not isinstance(data, dict):
+            raise SpotifyAPIError("bad_response", "malformed devices response")
         raw_devices = data.get("devices")
         if not isinstance(raw_devices, list):
             raise SpotifyAPIError("bad_response", "malformed devices payload")
@@ -748,6 +773,13 @@ class SpotifyController:
     ) -> str:
         try:
             return self._perform_internal(action, query=query, kind=kind, volume_percent=volume_percent)
+        except SpotifyAuthorizationRequired:
+            # Authorization is genuinely gone (invalidated/expired): the voice
+            # path must request reconnection in German and never leak internals.
+            return (
+                "Spotify muss einmal verbunden werden. "
+                "Bitte im Dashboard einmal neu autorisieren."
+            )
         except SpotifyAPIError as err:
             return self._format_error(err)
     def _perform_internal(
@@ -760,9 +792,9 @@ class SpotifyController:
     ) -> str:
         if action == "play":
             if not query or not isinstance(query, str) or not query.strip():
-                raise SpotifyAPIError("bad_response", "query required for play")
+                raise SpotifyAPIError("query_required")
             if kind not in ("track", "album", "artist"):
-                raise SpotifyAPIError("bad_response", f"invalid kind '{kind}'")
+                raise SpotifyAPIError("kind_invalid")
             search_resp = self._http.request("GET", f"/search", params={"q": query.strip(), "type": kind, "limit": 3})
             try:
                 search_data = search_resp.json()
@@ -802,7 +834,7 @@ class SpotifyController:
             return f"Vorheriger Titel auf {self._target_name}."
         elif action == "volume":
             if volume_percent is None or type(volume_percent) is not int or not (0 <= volume_percent <= 100):
-                raise SpotifyAPIError("bad_response", "volume_percent must be an integer between 0 and 100")
+                raise SpotifyAPIError("volume_invalid")
             device = self.resolve_device(require_volume=True)
             self._http.request("PUT", "/me/player/volume", params={"device_id": device.id, "volume_percent": volume_percent})
             return f"Lautstärke auf {self._target_name} auf {volume_percent}% gesetzt."
@@ -813,8 +845,10 @@ class SpotifyController:
                 return f"Auf {self._target_name} läuft zurzeit nichts."
             try:
                 data = resp.json()
-            except Exception as exc:
-                raise SpotifyAPIError("bad_response", "malformed player response") from exc
+            except Exception:
+                # Fail closed: a malformed player response means "nothing
+                # playing" for the voice path, never a leaked server payload.
+                return f"Auf {self._target_name} läuft zurzeit nichts."
             if not isinstance(data, dict):
                 return f"Auf {self._target_name} läuft zurzeit nichts."
             curr_device = data.get("device", {})
@@ -836,7 +870,7 @@ class SpotifyController:
             artist_str = ", ".join(artist_names) if artist_names else "unbekannter Künstler"
             return f"Auf {self._target_name} läuft gerade '{track_name}' von {artist_str}."
         else:
-            raise SpotifyAPIError("bad_response", f"unknown action '{action}'")
+            raise SpotifyAPIError("action_unknown")
     def _format_error(self, err: SpotifyAPIError) -> str:
         cat = err.category
         if cat == "unauthorized":
@@ -849,8 +883,18 @@ class SpotifyController:
             return "Zu viele Anfragen an Spotify. Bitte kurz warten."
         elif cat == "network":
             return "Spotify API ist zurzeit nicht erreichbar."
+        elif cat == "query_required":
+            return "query (Suchbegriff) ist für 'play' erforderlich."
+        elif cat == "kind_invalid":
+            return "kind (Inhaltstyp) muss track, album oder artist sein."
+        elif cat == "volume_invalid":
+            return "volume_percent muss eine ganze Zahl zwischen 0 und 100 sein."
+        elif cat == "action_unknown":
+            return "Unbekannte Spotify-Aktion."
         else:
-            return f"Spotify-Fehler: {err}"
+            # Never interpolate the internal message: server text could echo
+            # hostile or secret-bearing content into the spoken result.
+            return f"Spotify-Fehler ({cat})."
 _default_controller: SpotifyController | None = None
 _default_controller_lock = threading.Lock()
 def default_controller() -> SpotifyController:
