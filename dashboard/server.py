@@ -21,8 +21,11 @@ import json
 import contextlib
 from pathlib import Path
 from urllib.parse import urlsplit
+import logging
 from core import headless
-from core.spotify import default_oauth
+from core.spotify import default_oauth, SpotifyConfigError
+
+logger = logging.getLogger(__name__)
 
 _DEPS_OK = False
 try:
@@ -498,7 +501,15 @@ class DashboardServer:
         self._uploads_dir                 = UPLOADS_DIR
         self._login_html                  = _read("login.html")
         self._app_html                    = _read("app.html")
-        self._spotify_oauth = spotify_oauth if spotify_oauth is not None else default_oauth()
+        if spotify_oauth is not None:
+            self._spotify_oauth = spotify_oauth
+        else:
+            oauth = default_oauth()
+            # Fail fast: a corrupt or unsafe OAuth store is a permanent
+            # configuration failure. SpotifyConfigError subclasses ValueError,
+            # so headless startup maps it to the existing exit-78 path.
+            oauth.status()
+            self._spotify_oauth = oauth
         self.app                          = self._build_app()
 
     # ── one-time key management ───────────────────────────────────────────
@@ -781,9 +792,16 @@ class DashboardServer:
 
         @app.get("/api/spotify/callback")
         async def spotify_callback(state: str = "", code: str = "", error: str = ""):
-            status = self._spotify_oauth.complete_authorization(
-                state=state or None, code=code or None, error=error or None
-            )
+            try:
+                status = self._spotify_oauth.complete_authorization(
+                    state=state or None, code=code or None, error=error or None
+                )
+            except Exception:
+                # Never a 500: the operator page gets the fixed no-store 400
+                # HTML and the internal reason is never echoed or logged.
+                logger.warning('spotify callback authorization failed: %s',
+                               type(self._spotify_oauth).__name__)
+                return HTMLResponse(_SPOTIFY_ERROR_HTML, status_code=400)
             if status.authorized:
                 return HTMLResponse(_SPOTIFY_CONNECTED_HTML, status_code=200)
             return HTMLResponse(_SPOTIFY_ERROR_HTML, status_code=400)
