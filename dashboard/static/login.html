@@ -293,7 +293,8 @@
         document.getElementById('err').textContent = 'Connection error';
         shake(); return;
       }
-      if (data.ok && data.token) {
+      if (data.ok && typeof data.token === 'string' && data.token &&
+          typeof data.key === 'string' && data.key) {
         sessionStorage.setItem('jarvis_key', data.key);
         sessionStorage.setItem('jarvis_token', data.token);
         location.replace('/');

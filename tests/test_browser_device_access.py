@@ -170,6 +170,7 @@ const settle = async (turns = 8) => {
   const replacements = [];
   const fetches = [];
   const timerDelays = [];
+  const probeTimerDelays = [];
   const responses = (config.responses || []).slice();
   const timers = new Map();
   let nextTimer = 1;
@@ -180,11 +181,14 @@ const settle = async (turns = 8) => {
   const sockets = [];
   const xhrs = [];
   const pendingFetches = [];
+  let fetchAborts = 0;
+  let now = 1000000;
 
   const setTimeout = (fn, delay) => {
     const id = nextTimer++;
     timers.set(id, { fn, delay });
-    timerDelays.push(delay);
+    if (String(fn).includes('_recoveryProbeTimer')) probeTimerDelays.push(delay);
+    else timerDelays.push(delay);
     return id;
   };
   const clearTimeout = id => timers.delete(id);
@@ -193,20 +197,28 @@ const settle = async (turns = 8) => {
     if (entry.done) return false;
     const [id, timer] = entry.value;
     timers.delete(id);
+    now += timer.delay;
     timer.fn();
     await settle();
     return true;
   }
-  const fetch = async (url) => {
+  const fetch = async (url, opts = {}) => {
     fetches.push(url);
     const response = responses.shift() || { status: 500 };
     if (response.network) throw new Error('network unavailable');
     if (response.defer) {
-      return await new Promise(resolve => pendingFetches.push(() => resolve({
-        status: response.status,
-        ok: response.status >= 200 && response.status < 300,
-        json: async () => Object.assign({}, response.body || {}),
-      })));
+      return await new Promise((resolve, reject) => {
+        pendingFetches.push(() => resolve({
+          status: response.status,
+          ok: response.status >= 200 && response.status < 300,
+          json: async () => Object.assign({}, response.body || {}),
+        }));
+        if (opts.signal) {
+          const aborted = () => { fetchAborts += 1; reject(new Error('aborted')); };
+          if (opts.signal.aborted) aborted();
+          else opts.signal.addEventListener('abort', aborted, { once: true });
+        }
+      });
     }
     const status = response.status === undefined ? 200 : response.status;
     return {
@@ -246,6 +258,7 @@ const settle = async (turns = 8) => {
     send() { this.sent = true; }
   }
   class FD { append() {} }
+  class FakeDate extends Date { static now() { return now; } }
   const location = {
     protocol: 'https:', host: 'example.test', origin: 'https://example.test',
     replace(url) { replacements.push(url); },
@@ -263,7 +276,8 @@ const settle = async (turns = 8) => {
   const context = vm.createContext({
     console: { log() {}, warn() {}, error() {} },
     WebSocket: WS, AudioContext: AC, XMLHttpRequest: XHR, FormData: FD,
-    Blob, URL, Float32Array, Int16Array, Uint8Array, Math, JSON, Promise, Date,
+    Blob, URL, Float32Array, Int16Array, Uint8Array, Math, JSON, Promise,
+    Date: FakeDate, AbortController,
     document: { getElementById: element, createElement: () => element(`new-${elements.size}`) },
     sessionStorage: {
       getItem: key => session[key] ?? null,
@@ -305,7 +319,7 @@ const settle = async (turns = 8) => {
   })`, context);
   process.stdout.write(JSON.stringify({
     local, session, removedLocal, removedSession, replacements, reloads,
-    fetches, timerDelays, pendingTimers: timers.size,
+    fetches, fetchAborts, timerDelays, probeTimerDelays, pendingTimers: timers.size,
     socketCount: sockets.length,
     socketPaths: sockets.map(socket => socket.path),
     socketCloseCalls: sockets.map(socket => socket.closeCalls),
@@ -453,6 +467,16 @@ class LoginTests(unittest.TestCase):
         self.assertTrue("jarvis_device_credential" not in result["local"], "manual PIN must never create durable state")
         self.assertTrue(result["replacements"] == ["/"], "manual login must use location.replace")
 
+    def test_manual_pin_rejects_success_without_fresh_session_key(self):
+        result = _login({
+            "responses": [{"status": 200, "body": {"ok": True, "token": "manual-token"}}],
+            "setup": "document.getElementById('key').value = 'ABCDEF'; doLogin()",
+        })
+        self.assertTrue(result["replacements"] == [], "manual login without a session key must stay on the login page")
+        self.assertTrue("jarvis_token" not in result["session"] and "jarvis_key" not in result["session"],
+                        "malformed login success must not store partial session state")
+        self.assertTrue(result["errorText"] == "Invalid or expired key", "malformed login success must fail generically")
+
     def test_login_does_not_render_or_log_credential_material(self):
         result = _login({
             "hash": f"#device={DURABLE_CREDENTIAL}",
@@ -535,6 +559,18 @@ class StaleTabRecoveryTests(unittest.TestCase):
         self.assertTrue(result["fetches"] == ["/api/status"] * 5, "each elapsed delay must produce only one status probe")
         self.assertTrue(result["socketCount"] == 1, "backoff must not create parallel sockets")
 
+    def test_permanently_pending_status_probe_times_out_and_routes_to_login(self):
+        result = _app({
+            "responses": [{"defer": True}] * 4,
+            "setup": "__test.sockets[0].onclose({code:1006})",
+            "runTimers": 8,
+        })
+        self.assertTrue(result["fetchAborts"] >= 1, "a hung status probe must be aborted")
+        self.assertTrue(result["replacements"] == ["/login"], "hung recovery must reach the bounded login fallback")
+        self.assertTrue(result["pendingTimers"] == 0, "bounded recovery must leave no timer behind")
+        self.assertTrue(result["removedSession"] == ["jarvis_token", "jarvis_key"],
+                        "bounded recovery fallback must clear only session authentication")
+
     def test_recovery_stops_microphone_and_blocks_stale_auto_resume(self):
         result = _app({
             "responses": [{"network": True}],
@@ -571,6 +607,16 @@ class StaleTabRecoveryTests(unittest.TestCase):
         self.assertTrue(result["timerDelays"] == [1000], "network recovery must schedule its first bounded delay")
         self.assertTrue(result["pendingTimers"] == 0, "pagehide must cancel the pending recovery timer")
         self.assertTrue(result["fetches"] == ["/api/status"], "pagehide must prevent another status probe")
+
+    def test_pagehide_aborts_a_pending_status_probe(self):
+        result = _app({
+            "responses": [{"defer": True}],
+            "setup": "__test.sockets[0].onclose({code:1006})",
+            "afterSettle": "__test.firePage('pagehide')",
+        })
+        self.assertTrue(result["fetchAborts"] == 1, "pagehide must abort the in-flight status probe")
+        self.assertTrue(result["pendingTimers"] == 0, "pagehide must cancel the probe timeout")
+        self.assertTrue(result["replacements"] == [], "pagehide cancellation must not start a navigation race")
 
 
 if __name__ == "__main__":
