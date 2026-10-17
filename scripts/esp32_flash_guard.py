@@ -35,6 +35,7 @@ import secrets
 import stat as stat_module
 import subprocess
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import NamedTuple, Protocol
@@ -52,6 +53,8 @@ FLASH_SIZE_LABEL = "16MB"
 FACTORY_ARTIFACT_NAME = "firmware.factory.bin"
 CONFIRMATION_TTL_S = 600  # <= 10 minutes
 ESPTOOL_TIMEOUT_S = 900.0
+VERIFY_RETRY_ATTEMPTS = 2
+VERIFY_RETRY_DELAY_S = 3.0
 MAX_MESSAGE_CHARS = 400
 MANIFEST_NAME = "safety-manifest.json"
 MAX_MANIFEST_BYTES = 262144
@@ -444,6 +447,33 @@ def _esptool_argv(esptool: str, port, baud: int, after: str, verb: str, tail: li
         str(esptool), "--chip", CHIP_ARG, "--port", str(port), "--baud", str(baud),
         "--after", str(after), verb,
     ] + [str(item) for item in tail]
+
+
+def _run_verify_with_retry(
+    runner: Runner, argv: list[str], verb: str,
+) -> RunResult:
+    """Retry a post-write verification read once for transient serial errors.
+
+    Immediately after a write, macOS/USB-Serial-JTAG adapters may briefly
+    refuse a fresh esptool connection (re-enumeration); one bounded retry on
+    this purely read-only step makes verification reliable without touching
+    any write/erase behaviour.
+    """
+    for attempt in range(1, VERIFY_RETRY_ATTEMPTS + 1):
+        try:
+            return _run(runner, argv, verb)
+        except GuardError:
+            if attempt >= VERIFY_RETRY_ATTEMPTS:
+                raise
+            time.sleep(VERIFY_RETRY_DELAY_S)
+    raise GuardError(f"esptool {verb} verification exhausted retries")
+
+
+def _verify_argv(
+    esptool: str, port, baud: int, start, length, verify_file,
+) -> list[str]:
+    return _esptool_argv(esptool, port, baud, "no-reset", "read-flash",
+                         [start, length, verify_file])
 
 
 def _run(runner: Runner, argv: list[str], verb: str) -> RunResult:
@@ -882,9 +912,11 @@ def flash(port, confirmation_id, manifest_dir, runner: Runner, *,
             ["--flash-mode", build["flash_mode"], "--flash-freq", build["flash_freq"],
              "--flash-size", build["flash_size"], _hex_offset(build["write_offset"]),
              artifact_path]), "write-flash")
-        _run(runner, _esptool_argv(esptool, port, baud, "no-reset", "read-flash",
-                                   [_hex_offset(build["verify_start"]),
-                                    build["verify_end"], verify_file]), "read-flash")
+        _run_verify_with_retry(
+            runner,
+            _verify_argv(esptool, port, baud, _hex_offset(build["verify_start"]),
+                         build["verify_end"], verify_file),
+            "read-flash")
         if not verify_file.exists():
             raise GuardError(
                 "post-flash verification read produced no image (output suppressed)")
@@ -1013,9 +1045,11 @@ def restore(port, confirmation_id, manifest_dir, runner: Runner, *,
             ["--flash-mode", FLASH_MODE, "--flash-freq", FLASH_FREQ,
              "--flash-size", FLASH_SIZE_LABEL, _hex_offset(WRITE_OFFSET),
              str(backup_path)]), "write-flash")
-        _run(runner, _esptool_argv(esptool, port, baud, "no-reset", "read-flash",
-                                   [_hex_offset(WRITE_OFFSET), FLASH_SIZE_BYTES,
-                                    verify_file]), "read-flash")
+        _run_verify_with_retry(
+            runner,
+            _verify_argv(esptool, port, baud, _hex_offset(WRITE_OFFSET),
+                         FLASH_SIZE_BYTES, verify_file),
+            "read-flash")
         if not verify_file.exists():
             raise GuardError(
                 "post-restore verification read produced no image (output suppressed)")

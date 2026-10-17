@@ -56,13 +56,15 @@ class FakeEsptool:
 
     def __init__(self, *, chip="ESP32-S3", mac=MAC1, flash_mb=16,
                  image_chip=None, fail_verb=None, fail_rc=2, short_read=False,
-                 read_override=None, raw_flash_id=None):
+                 read_override=None, raw_flash_id=None, fail_verb_once=None):
         self.chip = chip
         self.mac = mac
         self.flash_mb = flash_mb
         self.image_chip = image_chip if image_chip is not None else chip
         self.fail_verb = fail_verb
+        self.fail_verb_once = fail_verb_once
         self.fail_rc = fail_rc
+        self._verb_once_failed = set()
         self.short_read = short_read
         self.read_override = read_override
         self.raw_flash_id = raw_flash_id
@@ -79,6 +81,9 @@ class FakeEsptool:
         if verb is None:
             raise AssertionError(f"no esptool verb found in argv {argv[:4]}...")
         if verb == self.fail_verb:
+            return guard.RunResult(self.fail_rc, "partial stdout", FAKE_ESPTOOL_SECRET)
+        if verb == self.fail_verb_once and verb not in self._verb_once_failed:
+            self._verb_once_failed.add(verb)
             return guard.RunResult(self.fail_rc, "partial stdout", FAKE_ESPTOOL_SECRET)
         self._check_verb_args(argv, verb)
         return getattr(self, "_do_" + verb.replace("-", "_"))(argv)
@@ -526,6 +531,19 @@ class TestFlashConfirmations(GuardFixture):
 
 
 class TestFlash(GuardFixture):
+
+    def test_flash_verify_retries_a_transient_read_failure(self):
+        self.prepare_full()
+        fake = FakeEsptool(fail_verb_once="read-flash")
+        saved = (guard.VERIFY_RETRY_DELAY_S, guard.VERIFY_RETRY_ATTEMPTS)
+        guard.VERIFY_RETRY_DELAY_S = 0.0005
+        try:
+            result, conf = self.do_flash(fake)
+        finally:
+            guard.VERIFY_RETRY_DELAY_S, guard.VERIFY_RETRY_ATTEMPTS = saved
+        self.assertEqual(2, sum(1 for v in self.verbs(fake) if v == "read-flash"))
+        m = self.m()
+        self.assertTrue(m["state"]["flash_success"])
 
     def test_flash_requires_valid_one_use_confirmation(self):
         self.prepare_full()
