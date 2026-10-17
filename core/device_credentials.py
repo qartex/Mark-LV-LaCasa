@@ -412,6 +412,15 @@ def _create_private_file(directory_fd: int, name: str) -> int:
     return descriptor
 
 
+def validate_device_artifact_directory(output_dir: Path) -> None:
+    """Create or validate the private QR directory without exposing a path FD."""
+    directory_fd = _open_or_create_qr_directory(Path(output_dir))
+    try:
+        os.close(directory_fd)
+    except OSError as exc:
+        raise DeviceCredentialConfigError("unable to validate QR directory") from exc
+
+
 def write_device_artifacts(created: CreatedDevice, public_url: str, output_dir: Path) -> tuple[Path, Path]:
     """Create private URL and PNG files without returning or logging their payload."""
     if not isinstance(public_url, str) or not public_url.rstrip("/"):

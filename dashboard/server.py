@@ -512,6 +512,7 @@ class DashboardServer:
         self._qr_output_dir = qr_output_dir or Path(
             os.environ.get('JARVIS_DEVICE_QR_DIR') or BASE_DIR / 'config' / 'device_qr'
         )
+        device_credentials.validate_device_artifact_directory(self._qr_output_dir)
         self._control_commands: dict[str, Callable[[dict[str, object]], Awaitable[dict[str, object]]]] = {}
         self._control_server: asyncio.AbstractServer | None = None
         self._control_fatal_error: device_credentials.DeviceCredentialConfigError | None = None
