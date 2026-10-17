@@ -110,12 +110,14 @@ class Esp32SatelliteConfigTests(unittest.TestCase):
             {
                 "wifi_ssid": "REPLACE_WITH_WIFI_SSID",
                 "wifi_password": "REPLACE_WITH_WIFI_PASSWORD",
+                "wifi_bssid": "REPLACE_WITH_HOME_AP_BSSID",
                 "api_encryption_key": "REPLACE_WITH_32_BYTE_BASE64_KEY",
             },
             entries,
         )
-        self.assertRegex(self.core, r"(?m)^  ssid: !secret wifi_ssid$")
-        self.assertRegex(self.core, r"(?m)^  password: !secret wifi_password$")
+        self.assertRegex(self.core, r"(?m)^    - ssid: !secret wifi_ssid$")
+        self.assertRegex(self.core, r"(?m)^      password: !secret wifi_password$")
+        self.assertRegex(self.core, r"(?m)^      bssid: !secret wifi_bssid$")
 
     def test_privacy_lock_mutes_before_the_only_capture_path(self):
         forbidden_actions = (
@@ -202,11 +204,12 @@ class Esp32SatelliteConfigTests(unittest.TestCase):
             for path in (THIN_CONFIG, CORE, SECRETS_EXAMPLE, README)
         )
         self.assertNotIn("Growraum Sprache 1\n", combined)
-        network_values = [
-            line.strip()
-            for line in combined.splitlines()
-            if line.strip().startswith(("ssid:", "password:"))
-        ]
+        network_values = []
+        for line in combined.splitlines():
+            stripped = line.strip()
+            if not stripped.startswith(("ssid:", "password:", "- ssid:")):
+                continue
+            network_values.append(re.sub(r"^-\s+", "", stripped))
         self.assertEqual(
             ["ssid: !secret wifi_ssid", "password: !secret wifi_password"],
             network_values,

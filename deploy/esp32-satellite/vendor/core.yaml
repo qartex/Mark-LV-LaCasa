@@ -175,11 +175,17 @@ psram:
 
 wifi:
   id: wifi_id
-  ssid: !secret wifi_ssid
-  password: !secret wifi_password
   fast_connect: ${hidden_ssid}
   power_save_mode: none     # audio streaming hates Wi-Fi power saving
   reboot_timeout: 10min
+  networks:
+    - ssid: !secret wifi_ssid
+      password: !secret wifi_password
+      # Duplicate-SSID defence: neighbouring networks can broadcast the
+      # identical name. Pinning the home access point's BSSID (radio MAC, read
+      # from secrets.yaml) forces the board onto the AP that serves the
+      # expected LAN.
+      bssid: !secret wifi_bssid
   on_connect:
     - lambda: id(improv_ble_in_progress) = false;
     - script.execute: control_leds
