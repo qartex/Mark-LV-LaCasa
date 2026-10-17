@@ -6,7 +6,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from core.device_credentials import DeviceCredentialStore
+from core.device_credentials import DeviceCredentialConfigError, DeviceCredentialStore
 from dashboard.access import AttemptLimiter, SessionRegistry
 from dashboard.server import DashboardServer
 
@@ -101,9 +101,10 @@ class DurableDeviceLoginTests(unittest.TestCase):
     def test_device_login_rejects_malformed_unknown_wrong_and_revoked_identically(self):
         malformed = self.client.post("/api/device-login", content=b"[")
         wrong_type = self.client.post("/api/device-login", json={"device_id": 1, "secret": 2})
+        wrong_secret = ("A" if self.device.secret[0] != "A" else "B") + self.device.secret[1:]
         wrong = self.client.post("/api/device-login", json={
             "device_id": self.device.summary.device_id,
-            "secret": "not-a-secret",
+            "secret": wrong_secret,
         })
         unknown = self.client.post("/api/device-login", json={
             "device_id": "A" * len(self.device.summary.device_id),
@@ -118,6 +119,45 @@ class DurableDeviceLoginTests(unittest.TestCase):
         self.assertEqual({wrong.status_code, unknown.status_code, revoked.status_code}, {401})
         self.assertEqual(wrong.content, unknown.content)
         self.assertEqual(wrong.content, revoked.content)
+
+    def test_device_login_rejects_malformed_credential_encodings_before_verification(self):
+        class StoreWithoutMalformedVerifier:
+            def __init__(self):
+                self.calls = []
+
+            def list_devices(self):
+                return []
+
+            def verify(self, device_id, secret):
+                self.calls.append((device_id, secret))
+                return None
+
+        store = StoreWithoutMalformedVerifier()
+        client = TestClient(self._server(store).app)
+        valid_id = self.device.summary.device_id
+        valid_secret = self.device.secret
+        malformed = {
+            "invalid base64url device_id": {"device_id": "!" * len(valid_id), "secret": valid_secret},
+            "invalid base64url secret": {"device_id": valid_id, "secret": "!" * len(valid_secret)},
+            "wrong-length device_id": {"device_id": valid_id[:-1], "secret": valid_secret},
+            "wrong-length secret": {"device_id": valid_id, "secret": valid_secret[:-1]},
+            "non-ASCII device_id": {"device_id": "é" * len(valid_id), "secret": valid_secret},
+            "non-ASCII secret": {"device_id": valid_id, "secret": "é" * len(valid_secret)},
+        }
+
+        for description, body in malformed.items():
+            with self.subTest(description=description):
+                response = client.post("/api/device-login", json=body)
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(response.json(), {"ok": False})
+                self.assertEqual(store.calls, [])
+
+    def test_corrupt_credential_store_is_rejected_at_dashboard_construction(self):
+        self.path.write_text("{not valid json", encoding="utf-8")
+        self.path.chmod(0o600)
+
+        with self.assertRaises(DeviceCredentialConfigError):
+            self._server(DeviceCredentialStore(self.path, clock=lambda: self.now[0]))
 
     def test_device_login_returns_fresh_session_material_without_secret_disclosure(self):
         first = self._login()

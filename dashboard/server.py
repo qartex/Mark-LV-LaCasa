@@ -86,6 +86,17 @@ def _derive_key(session_key: str) -> bytes:
     return hashlib.sha256(session_key.encode('utf-8') + _AES_SALT).digest()
 
 
+def _valid_credential_encoding(value: str, expected_bytes: int) -> bool:
+    """Accept only canonical unpadded base64url credentials of the expected size."""
+    if not value or "=" in value:
+        return False
+    try:
+        raw = base64.urlsafe_b64decode(value.encode("ascii") + b"=" * (-len(value) % 4))
+    except (UnicodeEncodeError, ValueError):
+        return False
+    return len(raw) == expected_bytes and base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii") == value
+
+
 def _decrypt_cbc(aes_key: bytes, enc_b64: str) -> str:
     """Decrypt base64(IV[16] ‖ ciphertext) with AES-256-CBC + PKCS7."""
     from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -492,6 +503,7 @@ class DashboardServer:
         self._device_store = device_store or DeviceCredentialStore(Path(
             os.environ.get('JARVIS_DEVICE_CREDENTIALS') or BASE_DIR / 'config' / 'device_credentials.json'
         ), clock=wall_clock)
+        self._device_store.list_devices()
         self._qr_output_dir = qr_output_dir or Path(
             os.environ.get('JARVIS_DEVICE_QR_DIR') or BASE_DIR / 'config' / 'device_qr'
         )
@@ -834,8 +846,6 @@ Do not bypass certificate warnings or browser security protections.</p>
         @app.post("/api/device-login")
         async def device_login_ep(req: Request):
             """Exchange one durable device credential for a fresh in-memory session."""
-            if not self._attempt_limiter.allow("durable-login"):
-                return JSONResponse({"ok": False}, status_code=429)
             try:
                 body = await req.json()
             except Exception:
@@ -845,6 +855,11 @@ Do not bypass certificate warnings or browser security protections.</p>
             device_id, secret = body["device_id"], body["secret"]
             if not isinstance(device_id, str) or not isinstance(secret, str):
                 return JSONResponse({"ok": False}, status_code=400)
+            if not (_valid_credential_encoding(device_id, 16)
+                    and _valid_credential_encoding(secret, 32)):
+                return JSONResponse({"ok": False}, status_code=400)
+            if not self._attempt_limiter.allow("durable-login"):
+                return JSONResponse({"ok": False}, status_code=429)
             summary = self._device_store.verify(device_id, secret)
             if summary is None:
                 return JSONResponse({"ok": False}, status_code=401)

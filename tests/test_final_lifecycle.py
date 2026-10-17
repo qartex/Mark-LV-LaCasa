@@ -207,6 +207,25 @@ class EssentialServerTests(LocalServiceFixture, unittest.IsolatedAsyncioTestCase
                     await self.live.run()
         self.assertEqual(caught.exception.code, 78)
 
+    async def test_corrupt_device_credentials_exit_config_before_model_connection(self):
+        credentials = self.root / 'device_credentials.json'
+        credentials.write_text('{not valid json', encoding='utf-8')
+        credentials.chmod(0o600)
+
+        caught: SystemExit | None = None
+        with patch.dict(os.environ, {'JARVIS_DEVICE_CREDENTIALS': str(credentials)}):
+            try:
+                await asyncio.wait_for(self.live.run(), .5)
+            except SystemExit as exc:
+                caught = exc
+            except TimeoutError:
+                pass
+        if caught is None:
+            self.fail('corrupt device credentials did not exit as configuration error')
+        self.assertEqual(caught.code, 78)
+        self.assertFalse(self.connecting.is_set(), 'model started before credential-store validation')
+        self.assertFalse(self.control.exists())
+
 
 class Phone:
     def __init__(self):
