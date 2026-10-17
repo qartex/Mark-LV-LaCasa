@@ -1,0 +1,8 @@
+# Thin, local-only Phase-1 configuration. The reviewed vendor core is committed
+# beside this file; no branch or remote package is resolved during a build.
+substitutions:
+  name: growraum-sprache-1-home-test
+  friendly_name: "Growraum Sprache 1 Home Test"
+
+packages:
+  core: !include vendor/core.yaml

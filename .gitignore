@@ -59,3 +59,7 @@ screenshots/
 
 .worktrees/
 deploy/cannanas/*.credentials
+
+# Waveshare ESP32-S3 Phase-1 secrets and private local artifacts
+/deploy/esp32-satellite/secrets.yaml
+/deploy/esp32-satellite/local-output/

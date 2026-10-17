@@ -50,24 +50,26 @@
 - `provenance.json` contains the exact three source commits and SHA-256 values for the unmodified upstream core and vendored Phase-1 core.
 - Local secrets schema is exactly `wifi_ssid`, `wifi_password`, `api_encryption_key`; real values never exist in Git.
 
-- [ ] **Step 1: Write failing static contract tests**
+- [x] **Step 1: Write failing static contract tests**
   - Assert exact identity/version/tool pins and provenance hashes; no `raw/main`, `raw/dev`, branch ref, OTA, plaintext Wi-Fi value or production identity.
   - Assert the API encryption key is required.
   - Assert every `voice_assistant.start`, `micro_wake_word.start` and `microphone.unmute` path is absent/disabled and that every boot path executes `microphone.mute` before `microphone.capture`; mere presence of both actions is insufficient.
   - Assert secrets/backups/builds/manifests are ignored only under the feature's local-output paths.
 
-- [ ] **Step 2: Run tests RED**
+- [x] **Step 2: Run tests RED**
   - Run: `python -m unittest tests.test_esp32_satellite_config -v`
   - Expected: missing deployment files.
 
-- [ ] **Step 3: Vendor and patch the pinned core**
+- [x] **Step 3: Vendor and patch the pinned core**
   - Keep I²S hardware/pins/media player unchanged; set the muted state and execute `microphone.mute` before starting clock-only `microphone.capture`, remove all start/unmute actions, disable boot/wake sounds, require API encryption, remove OTA, and pin every external asset URL.
 
-- [ ] **Step 4: Run `esphome config` with synthetic secrets**
+- [x] **Step 4: Run `esphome config` with synthetic secrets**
   - Use Mac-tool pins in an isolated throwaway venv; output must show temporary identity, encrypted API, no OTA and no configuration error.
 
-- [ ] **Step 5: Run tests GREEN and commit**
+- [x] **Step 5: Run tests GREEN and commit**
   - Commit: `feat(esp32): add reproducible privacy-locked speaker firmware`
+
+- Verified 2026-10-17: RED run showed 11 failures without the deployment files; GREEN run 11/11 OK; `esphome 2026.9.0 config` on a throwaway scratch copy with synthetic secrets returned `Configuration is valid!` with the exact temporary identity, encrypted API and zero `ota:` entries; full repository suite `409 tests OK (skipped=1)`.
 
 ---
 
