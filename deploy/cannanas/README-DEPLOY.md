@@ -13,11 +13,11 @@ no new sockets: the child inherits the JARVIS service's private stdio.
 
 ## Placement
 
-- Dedicated venv: `/opt/cannanas/adapter/venv`
+- Dedicated venv: `%h/cannanas-adapter/venv` (`/home/lacasa/cannanas-adapter/venv`; service-user owned, no sudo needed)
 - Entry point (absolute path, run by the JARVIS process):
-  `/opt/cannanas/adapter/venv/bin/cannanas-mcp-adapter`
+  `cannanas-adapter/venv/bin/cannanas-mcp-adapter`
 - The `release_info.json` sidecar sits next to the entry point in
-  `.../venv/bin/release_info.json` (mode 0600); JARVIS refuses writes against
+  `cannanas-adapter/venv/bin/release_info.json` (mode 0600); JARVIS refuses writes against
   an unpinned artifact.
 
 ## Install
@@ -25,7 +25,8 @@ no new sockets: the child inherits the JARVIS service's private stdio.
 ```sh
 deploy/cannanas/install-adapter.sh --verify <wheel>
 deploy/cannanas/install-adapter.sh --install <wheel> \
-    /opt/cannanas/adapter/venv <constraints-lock.txt> <release/release_info.json>
+    %h/cannanas-adapter/venv <constraints-lock.txt> <release/release_info.json>
+# (run as user lacasa; %h = /home/lacasa)
 ```
 
 `--install` never starts anything (the JARVIS unit starts the child).
