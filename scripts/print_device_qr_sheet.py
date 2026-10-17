@@ -56,12 +56,18 @@ def build_sheet(store_path: Path, qr_dir: Path, labels, out_dir: Path,
     draw = ImageDraw.Draw(sheet)
     try:
         from PIL import ImageFont
-        font = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', 96)
-        small = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', 56)
+        font = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', 110)
+        small = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', 52)
     except OSError:                          # fall back wherever fonts differ
         font = small = ImageFont.load_default()
 
-    card_h = height // 4
+    # 2x2 grid: every quadrant must fully hold label + QR + caption.
+    margin, gap = 100, 80
+    quad_w = (width - margin * 2 - gap) // 2
+    quad_h = (height - margin * 2 - gap) // 2
+    label_h, caption_gap = 150, 90
+    qr_size = quad_h - label_h - caption_gap - 40
+    qr_size = min(qr_size, quad_w - 120)     # never wider than its quadrant
     for index, label in enumerate(labels):
         matches = [item for item in store.list_devices()
                    if item.label == label and item.revoked_at is None]
@@ -72,7 +78,7 @@ def build_sheet(store_path: Path, qr_dir: Path, labels, out_dir: Path,
         if not url_path.is_file():
             raise SystemExit(f'QR artifact missing for {label}; re-create with device-create')
         import qrcode
-        qr = qrcode.QRCode(border=3, box_size=22)
+        qr = qrcode.QRCode(border=2, box_size=max(10, qr_size // 60))
         qr.add_data(url_path.read_text(encoding='utf-8'))
         qr.make(fit=True)
         image = qr.make_image(fill_color='black', back_color='white')
@@ -83,18 +89,22 @@ def build_sheet(store_path: Path, qr_dir: Path, labels, out_dir: Path,
             image.save(buffer, format='PNG')
             import PIL.Image
             image = PIL.Image.open(buffer)
-        qr_image = image.convert('RGB')
-        size = 1100
-        qr_image = qr_image.resize((size, size))
-        top = index * card_h
-        left = (width - size) // 2
-        sheet.paste(qr_image, (left, top + 120))
-        text = label
-        draw.text(((width - draw.textlength(text, font=font)) // 2, top),
-                  text, fill='black', font=font)
+        qr_image = image.convert('RGB').resize((qr_size, qr_size))
+        col, row = index % 2, index // 2
+        left = margin + col * (quad_w + gap) + (quad_w - qr_size) // 2
+        top = margin + row * (quad_h + gap)
+        label_text = label
+        draw.text(((left + (quad_w - qr_size) // 2) +
+                   (qr_size - draw.textlength(label_text, font=font)) // 2, top + 10),
+                  label_text, fill='black', font=font)
+        sheet.paste(qr_image, (left, top + label_h))
         caption = 'Scan in Safari — Zugang entsteht, ohne dass etwas auf dem Papier lesbar ist.'
-        draw.text(((width - draw.textlength(caption, font=small)) // 2, top + size + 160),
+        caption_x = left + max(0, (qr_size - draw.textlength(caption, font=small)) // 2)
+        draw.text((caption_x, top + label_h + qr_size + 30),
                   caption, fill='#444444', font=small)
+        # guard: the caption must stay inside the quadrant (no clipping on A4)
+        bottom = top + label_h + qr_size + 30 + 60
+        assert bottom <= margin + (row + 1) * (quad_h + gap) - 20, 'layout overflow'
     out_path = _open_private_new_file(
         out_dir / f'device-qrs-{datetime.now(timezone.utc).strftime("%Y%m%d")}.png')
     sheet.save(out_path, format='PNG')
