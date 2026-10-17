@@ -23,6 +23,7 @@ from core.cannanas_client import (
     PINNED_ADAPTER_VERSION,
     PINNED_WHEEL_SHA256,
     CannanasClient,
+    CannanasPreSendRefusal,
     CannanasUnavailable,
     child_environment,
 )
@@ -180,13 +181,15 @@ def build_read_summary(prefix, records, exact, truncated) -> str:
     if not names:
         return f'{prefix}: keine Einträge.'
     spoken = f'{prefix}: {names}.'
+    extra = ''
     if len(records) > SPOKEN_RECORD_LIMIT:
-        spoken += (f' (Erste {SPOKEN_RECORD_LIMIT} von {len(records)} — '
-                   'weitere auf Anfrage.)')
+        extra += (f' (Erste {SPOKEN_RECORD_LIMIT} von {len(records)} — '
+                  'weitere auf Anfrage.)')
     if truncated:
-        spoken += ' (Liste gekürzt.)'
+        extra += ' (Liste gekürzt.)'
     if not exact:
         spoken = f'{prefix} (mindestens {len(records)}): {names}.'
+    spoken += extra
     return spoken
 
 
@@ -614,6 +617,14 @@ class CannanasHost:
                     result = self.require_client().call(
                         tool, {'confirmation_token': executing.opaque_mcp_token.get(),
                                'binding': binding})
+                except CannanasPreSendRefusal:
+                    # Refused before the transport: provably no bytes were sent.
+                    finish('failed', '')
+                    self.coordinator.mark_consumed(session_id)
+                    return {'decision': 'affirm',
+                            'spoken': ('Cannanas ist derzeit nicht verfügbar. '
+                                       'Kein Eintrag vorgenommen. Bitte erneut vorbereiten.'),
+                            'handled': True, 'classification': 'failed'}
                 except Exception:
                     # Bytes may have been sent: never retried, stays unknown.
                     finish('unknown', '')

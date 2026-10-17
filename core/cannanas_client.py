@@ -84,6 +84,14 @@ class CannanasUnavailable(RuntimeError):
     """Cannanas is degraded/unavailable; JARVIS keeps running without it."""
 
 
+class CannanasPreSendRefusal(CannanasUnavailable):
+    """Refused before the transport could send anything (no bytes were sent).
+
+    Distinguishable so the host can classify a refused confirm as 'failed'
+    while every post-send timeout stays honestly 'unknown'.
+    """
+
+
 def child_environment(adapter_env: dict) -> dict:
     """Exactly a bare PATH plus the four adapter variables — nothing else."""
     env = {'PATH': os.environ.get('PATH', '/usr/bin:/bin')}
@@ -190,14 +198,14 @@ class CannanasClient:
 
     def call(self, tool: str, arguments: dict, budget: float | None = None) -> dict:
         if self.degraded:
-            raise CannanasUnavailable(f'Cannanas unavailable: {self.degraded_reason}')
+            raise CannanasPreSendRefusal(f'Cannanas unavailable: {self.degraded_reason}')
         if self.read_only_degraded and (tool in MCP_PREPARE_TOOLS
                                         or tool in MCP_CONFIRM_TOOLS):
-            raise CannanasUnavailable(
+            raise CannanasPreSendRefusal(
                 'Cannanas release verification failed: writes refused')
         loop, queue_obj = self._loop, self._queue
         if loop is None or not loop.is_running():
-            raise CannanasUnavailable('Cannanas client not started')
+            raise CannanasPreSendRefusal('Cannanas client not started')
         request = _Request(tool, dict(arguments or {}),
                            budget or self._tool_budget, Future())
         loop.call_soon_threadsafe(queue_obj.put_nowait, request)
