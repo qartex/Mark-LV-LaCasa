@@ -58,3 +58,4 @@ downloads/
 screenshots/
 
 .worktrees/
+deploy/cannanas/*.credentials
