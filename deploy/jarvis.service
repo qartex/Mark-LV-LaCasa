@@ -13,6 +13,8 @@ Environment=JARVIS_HEADLESS=true
 Environment=JARVIS_CAPTURE_SOURCE=phone
 Environment=JARVIS_BIND=127.0.0.1
 Environment=JARVIS_PUBLIC_URL=https://lacasa-server.tail7a9c2.ts.net
+Environment=JARVIS_DEVICE_CREDENTIALS=%h/Mark-LV-LaCasa/config/device_credentials.json
+Environment=JARVIS_DEVICE_QR_DIR=%h/Mark-LV-LaCasa/config/device_qr
 Environment=PYTHONUNBUFFERED=1
 Environment=PULSE_SERVER=unix:%t/pulse/native
 RuntimeDirectory=jarvis

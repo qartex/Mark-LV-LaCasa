@@ -7,6 +7,10 @@ import socket
 from pathlib import Path
 
 
+CONTROL_MAX_LINE_BYTES = 4096
+CONTROL_MAX_RESPONSE_BYTES = 65536
+
+
 def enabled() -> bool:
     return os.environ.get('JARVIS_HEADLESS', 'true').lower() not in ('0', 'false', 'no', 'off')
 
@@ -64,33 +68,88 @@ def control_path() -> Path:
     return Path(os.environ.get('JARVIS_CONTROL_SOCKET', str(base / 'jarvis' / 'control.sock')))
 
 
-def request_pair(path=None) -> str:
-    """Ask the running assistant, never create a disconnected dashboard."""
+def _request_line(payload: bytes, path: Path | None = None) -> dict:
+    """Use the one-line private control protocol without exposing server errors."""
+    if len(payload) > CONTROL_MAX_LINE_BYTES or not payload.endswith(b'\n'):
+        raise RuntimeError('Control request failed')
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
-        sock.settimeout(5)
-        sock.connect(str(path or control_path()))
-        sock.sendall(b'pair\n')
+        sock.settimeout(2)
+        try:
+            sock.connect(str(path or control_path()))
+            sock.sendall(payload)
+        except OSError as exc:
+            raise RuntimeError('Control request failed') from None
         result = b''
-        while b'\n' not in result and len(result) < 4096:
-            chunk = sock.recv(4096)
-            if not chunk:
-                break
-            result += chunk
-    reply = json.loads(result)
-    if 'url' not in reply:
+        try:
+            while b'\n' not in result and len(result) <= CONTROL_MAX_RESPONSE_BYTES:
+                chunk = sock.recv(min(4096, CONTROL_MAX_RESPONSE_BYTES + 1 - len(result)))
+                if not chunk:
+                    break
+                result += chunk
+        except OSError:
+            raise RuntimeError('Control request failed') from None
+    if (b'\n' not in result or len(result) > CONTROL_MAX_RESPONSE_BYTES
+            or result.index(b'\n') + 1 != len(result)):
+        raise RuntimeError('Control request failed')
+    try:
+        reply = json.loads(result)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise RuntimeError('Control request failed') from None
+    if not isinstance(reply, dict):
+        raise RuntimeError('Control request failed')
+    return reply
+
+
+def request_pair(path: Path | None = None) -> str:
+    """Ask the running assistant, never create a disconnected dashboard."""
+    reply = _request_line(b'pair\n', path)
+    if not isinstance(reply.get('url'), str):
         raise RuntimeError(reply.get('error', 'Pairing failed'))
     return reply['url']
 
 
+def request_control(request: dict, path: Path | None = None) -> dict:
+    """Send one bounded JSON control request and return its bounded JSON response."""
+    if not isinstance(request, dict):
+        raise RuntimeError('Control request failed')
+    try:
+        payload = json.dumps(request, separators=(',', ':'), ensure_ascii=False).encode('utf-8') + b'\n'
+    except (TypeError, ValueError, UnicodeEncodeError):
+        raise RuntimeError('Control request failed') from None
+    return _request_line(payload, path)
+
+
 def main():
     parser = argparse.ArgumentParser(description='Private control of the running JARVIS instance')
-    parser.add_argument('command', choices=['pair'])
-    parser.add_argument('--socket', type=Path, default=control_path())
+    commands = parser.add_subparsers(dest='command', required=True)
+    pair = commands.add_parser('pair')
+    pair.add_argument('--socket', type=Path, default=control_path())
+    create = commands.add_parser('device-create')
+    create.add_argument('--label', required=True)
+    create.add_argument('--socket', type=Path, default=control_path())
+    listing = commands.add_parser('device-list')
+    listing.add_argument('--socket', type=Path, default=control_path())
+    revoke = commands.add_parser('device-revoke')
+    revoke.add_argument('device_id')
+    revoke.add_argument('--socket', type=Path, default=control_path())
     args = parser.parse_args()
     try:
-        print(request_pair(args.socket))  # explicit operator output, not a service log
+        if args.command == 'pair':
+            print(request_pair(args.socket))  # explicit operator output, not a service log
+            return
+        request = {'command': args.command}
+        if args.command == 'device-create':
+            request['label'] = args.label
+        elif args.command == 'device-revoke':
+            request['device_id'] = args.device_id
+        reply = request_control(request, args.socket)
+        if not reply.get('ok'):
+            raise RuntimeError('Control request failed')
+        print(json.dumps(reply, separators=(',', ':'), ensure_ascii=False))
     except (OSError, ValueError, RuntimeError) as exc:
-        parser.exit(1, f'JARVIS pairing unavailable: {exc}\n')
+        if args.command == 'pair':
+            parser.exit(1, f'JARVIS pairing unavailable: {exc}\n')
+        parser.exit(1, 'JARVIS control unavailable\n')
 
 
 if __name__ == '__main__':

@@ -1,15 +1,182 @@
 """One-hour in-memory bearer sessions and durable dashboard login tests."""
 import asyncio
+import contextlib
+import io
 import json
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 from fastapi.testclient import TestClient
 
 from core.device_credentials import DeviceCredentialConfigError, DeviceCredentialStore
 from dashboard.access import AttemptLimiter, SessionRegistry
 from dashboard.server import DashboardServer
+
+
+async def _control_request(path: Path, payload: bytes) -> dict:
+    reader, writer = await asyncio.open_unix_connection(str(path))
+    try:
+        writer.write(payload)
+        await writer.drain()
+        reply = await asyncio.wait_for(reader.readline(), 2)
+        return json.loads(reply)
+    finally:
+        writer.close()
+        await writer.wait_closed()
+
+
+class DeviceControlTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addAsyncCleanup(self._cleanup)
+        self.root = Path(self.temp.name)
+        self.root.chmod(0o700)
+        self.store = DeviceCredentialStore(self.root / "devices.json")
+        self.server = DashboardServer(
+            public_url="https://example.test",
+            host="127.0.0.1",
+            device_store=self.store,
+            qr_output_dir=self.root / "qr",
+        )
+        self.path = self.root / "control" / "control.sock"
+        self.task = asyncio.create_task(self.server.serve_control(self.path))
+        await asyncio.wait_for(self.server._control_ready.wait(), 2)
+
+    async def _cleanup(self):
+        self.task.cancel()
+        await asyncio.gather(self.task, return_exceptions=True)
+        self.temp.cleanup()
+
+    async def test_json_control_create_list_revoke_round_trip_is_secret_free(self):
+        printed = Mock()
+        with patch("builtins.print", printed):
+            created = await _control_request(self.path, json.dumps({
+                "command": "device-create", "label": "LaCasa iPhone 1",
+            }).encode() + b"\n")
+            device_id = created["device"]["device_id"]
+
+            async def cli(*args):
+                return await asyncio.to_thread(
+                    subprocess.run,
+                    [sys.executable, "-m", "core.headless", *args, "--socket", str(self.path)],
+                    cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, check=False,
+                )
+
+            list_cli = await cli("device-list")
+            revoke_cli = await cli("device-revoke", device_id)
+            listed = json.loads(list_cli.stdout)
+            revoked = json.loads(revoke_cli.stdout)
+
+        url_payload = Path(created["url_path"]).read_text(encoding="utf-8")
+        secret = url_payload.rsplit(".", 1)[1]
+        observed = "\n".join((json.dumps(created), json.dumps(listed), json.dumps(revoked),
+                                list_cli.stdout, list_cli.stderr, revoke_cli.stdout, revoke_cli.stderr,
+                                " ".join(str(call) for call in printed.call_args_list),
+                                Path(created["url_path"]).name, Path(created["qr_path"]).name))
+        self.assertEqual(set(created), {"ok", "device", "url_path", "qr_path"})
+        self.assertTrue(created["ok"])
+        self.assertEqual(set(created["device"]), {"device_id", "label", "created_at", "revoked_at"})
+        self.assertEqual(listed["devices"], [created["device"]])
+        self.assertEqual(revoked["device"]["device_id"], device_id)
+        self.assertIsNotNone(revoked["device"]["revoked_at"])
+        self.assertEqual(list_cli.returncode, 0)
+        self.assertEqual(revoke_cli.returncode, 0)
+        self.assertFalse(secret in observed, "durable secret leaked outside its private artifact")
+        self.assertFalse(url_payload in observed, "durable URL leaked outside its private artifact")
+
+    async def test_control_rejects_oversize_bad_utf8_bad_json_and_unknown_command(self):
+        payloads = (
+            b"x" * 4096 + b"\n",
+            b'{"command":"device-list","label":"\xff"}\n',
+            b"not json\n",
+            b'{"command":"not-registered"}\n',
+        )
+        for payload in payloads:
+            with self.subTest(payload_kind=len(payload)):
+                reply = await _control_request(self.path, payload)
+                self.assertFalse(reply["ok"])
+                self.assertLessEqual(len(json.dumps(reply).encode() + b"\n"), 65536)
+                self.assertNotIn(payload.decode("utf-8", "replace"), json.dumps(reply))
+
+    async def test_registered_extension_command_uses_same_bounded_protocol(self):
+        async def status_handler(request):
+            self.assertEqual(request, {"command": "synthetic-status"})
+            return {"ok": True, "state": "ready"}
+
+        self.server.register_control_command("synthetic-status", status_handler)
+        reply = await _control_request(self.path, b'{"command":"synthetic-status"}\n')
+
+        self.assertEqual(reply, {"ok": True, "state": "ready"})
+        with self.assertRaises(ValueError):
+            self.server.register_control_command("pair", status_handler)
+        with self.assertRaises(ValueError):
+            self.server.register_control_command("device-list", status_handler)
+
+    async def test_device_create_artifact_failure_revokes_new_record_and_cleans_partial_files(self):
+        def fail_after_partial(created, public_url, output_dir):
+            output_dir.mkdir(mode=0o700)
+            partial = output_dir / f"{created.summary.device_id}.url"
+            partial.write_text("partial", encoding="utf-8")
+            partial.chmod(0o600)
+            raise RuntimeError("synthetic artifact failure")
+
+        with patch("core.device_credentials.write_device_artifacts", side_effect=fail_after_partial):
+            reply = await _control_request(self.path, b'{"command":"device-create","label":"Broken QR"}\n')
+
+        devices = self.store.list_devices()
+        self.assertFalse(reply["ok"])
+        self.assertEqual(len(devices), 1)
+        self.assertIsNotNone(devices[0].revoked_at)
+        self.assertFalse(any((self.root / "qr").iterdir()), "artifact failure left partial output")
+
+
+class DeviceCliTests(unittest.TestCase):
+    def _run_main(self, argv, *, pair_url=None, reply=None):
+        from core import headless
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with patch.object(sys, "argv", ["headless", *argv]), \
+                patch.object(headless, "request_pair", return_value=pair_url), \
+                patch.object(headless, "request_control", return_value=reply), \
+                contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            headless.main()
+        return stdout.getvalue(), stderr.getvalue()
+
+    def test_device_cli_commands_emit_safe_json_and_preserve_pair_cli(self):
+        safe = {"ok": True, "device": {"device_id": "id", "label": "phone", "created_at": "now", "revoked_at": None}}
+        for argv, reply in ((["device-create", "--label", "phone"], safe),
+                            (["device-list"], {"ok": True, "devices": [safe["device"]]}),
+                            (["device-revoke", "id"], safe)):
+            with self.subTest(argv=argv):
+                stdout, stderr = self._run_main(argv, reply=reply)
+                self.assertEqual(json.loads(stdout), reply)
+                self.assertEqual(stderr, "")
+        pair_url = "https://example.test/auto-login?key=PAIRING"
+        stdout, stderr = self._run_main(["pair"], pair_url=pair_url)
+        self.assertEqual(stdout, pair_url + "\n")
+        self.assertEqual(stderr, "")
+
+    def test_phone_bearer_has_no_device_admin_http_route(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            root.chmod(0o700)
+            store = DeviceCredentialStore(root / "devices.json")
+            device = store.create("phone")
+            server = DashboardServer(public_url="https://example.test", host="127.0.0.1", device_store=store)
+            client = TestClient(server.app)
+            token = client.post("/api/device-login", json={
+                "device_id": device.summary.device_id, "secret": device.secret,
+            }).json()["token"]
+            routes = {route.path for route in server.app.routes}
+            headers = {"Authorization": f"Bearer {token}"}
+            for path in ("/api/revoke-devices", "/api/devices", "/api/device-create",
+                         "/api/device-list", "/api/device-revoke"):
+                with self.subTest(path=path):
+                    self.assertNotIn(path, routes)
+                    self.assertEqual(client.post(path, headers=headers).status_code, 404)
 
 
 class SessionRegistryTests(unittest.TestCase):

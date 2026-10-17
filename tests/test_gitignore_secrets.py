@@ -15,6 +15,9 @@ class SecretIgnoreTests(unittest.TestCase):
             "plugins/token-test.json",
             "plugins/client_secret-test.json",
             ".env",
+            "config/device_credentials.json",
+            "config/device_qr/example.url",
+            "config/device_qr/example.png",
         ]
         for path in paths:
             with self.subTest(path=path):

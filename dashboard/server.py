@@ -20,9 +20,11 @@ import os
 import json
 import contextlib
 import threading
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from urllib.parse import urlsplit
 from core import headless
+from core import device_credentials
 from core.device_credentials import DeviceCredentialStore, DeviceSummary
 from dashboard.access import AttemptLimiter, SessionRecord, SessionRegistry
 
@@ -48,6 +50,8 @@ BASE_DIR    = Path(__file__).resolve().parent.parent
 STATIC_DIR  = Path(__file__).parent / "static"
 PORT        = 8000
 MAX_UPLOAD_MB = 500
+CONTROL_MAX_LINE_BYTES = 4096
+CONTROL_MAX_RESPONSE_BYTES = 65536
 
 
 def _make_uploads_dir() -> Path:
@@ -508,6 +512,7 @@ class DashboardServer:
         self._qr_output_dir = qr_output_dir or Path(
             os.environ.get('JARVIS_DEVICE_QR_DIR') or BASE_DIR / 'config' / 'device_qr'
         )
+        self._control_commands: dict[str, Callable[[dict[str, object]], Awaitable[dict[str, object]]]] = {}
         self._aes_cache:  dict[str, bytes]= {}   # session_key → AES bytes
         self._clients: set[WebSocket]     = set()
         self._token_sockets: dict[str, set[WebSocket]] = {}
@@ -628,6 +633,82 @@ class DashboardServer:
         await self._terminate_tokens(tokens)
         return summary
 
+    @staticmethod
+    def _device_summary(summary: DeviceSummary) -> dict[str, str | None]:
+        return {'device_id': summary.device_id, 'label': summary.label,
+                'created_at': summary.created_at, 'revoked_at': summary.revoked_at}
+
+    def register_control_command(self, name: str,
+                                 handler: Callable[[dict[str, object]], Awaitable[dict[str, object]]]) -> None:
+        """Register a future private-socket command without overriding administration."""
+        reserved = {'pair', 'device-create', 'device-list', 'device-revoke'}
+        if not isinstance(name, str) or not name or name in reserved or name in self._control_commands:
+            raise ValueError('invalid control command')
+        if not callable(handler):
+            raise ValueError('invalid control handler')
+        self._control_commands[name] = handler
+
+    async def _control_device_create(self, request: dict[str, object]) -> dict[str, object]:
+        if set(request) != {'command', 'label'} or not self._public_url:
+            return {'ok': False, 'error': 'Control request failed'}
+        label = request['label']
+        if not isinstance(label, str):
+            return {'ok': False, 'error': 'Control request failed'}
+        try:
+            created = await asyncio.to_thread(self._device_store.create, label)
+        except (ValueError, device_credentials.DeviceCredentialConfigError):
+            return {'ok': False, 'error': 'Control request failed'}
+        try:
+            url_path, qr_path = await asyncio.to_thread(
+                device_credentials.write_device_artifacts,
+                created, self._public_url, self._qr_output_dir,
+            )
+        except Exception:
+            # Creation must not leave a usable credential or partial private artifact.
+            with contextlib.suppress(Exception):
+                for suffix in ('url', 'png'):
+                    (self._qr_output_dir / f'{created.summary.device_id}.{suffix}').unlink(missing_ok=True)
+            with contextlib.suppress(Exception):
+                await self.revoke_device(created.summary.device_id)
+            return {'ok': False, 'error': 'Control request failed'}
+        return {'ok': True, 'device': self._device_summary(created.summary),
+                'url_path': str(url_path), 'qr_path': str(qr_path)}
+
+    async def _dispatch_control(self, request: dict[str, object]) -> dict[str, object]:
+        command = request.get('command')
+        if not isinstance(command, str):
+            return {'ok': False, 'error': 'Control request failed'}
+        if command == 'device-create':
+            return await self._control_device_create(request)
+        if command == 'device-list':
+            if set(request) != {'command'}:
+                return {'ok': False, 'error': 'Control request failed'}
+            try:
+                devices = [self._device_summary(item) for item in self._device_store.list_devices()]
+            except device_credentials.DeviceCredentialConfigError:
+                return {'ok': False, 'error': 'Control request failed'}
+            return {'ok': True, 'devices': devices}
+        if command == 'device-revoke':
+            if set(request) != {'command', 'device_id'} or not isinstance(request.get('device_id'), str):
+                return {'ok': False, 'error': 'Control request failed'}
+            try:
+                device_id = request['device_id']
+                assert isinstance(device_id, str)
+                summary = await self.revoke_device(device_id)
+            except device_credentials.DeviceCredentialConfigError:
+                return {'ok': False, 'error': 'Control request failed'}
+            if summary is None:
+                return {'ok': False, 'error': 'Control request failed'}
+            return {'ok': True, 'device': self._device_summary(summary)}
+        handler = self._control_commands.get(command)
+        if handler is None:
+            return {'ok': False, 'error': 'Control request failed'}
+        try:
+            reply = await handler(request)
+        except Exception:
+            return {'ok': False, 'error': 'Control request failed'}
+        return reply if isinstance(reply, dict) else {'ok': False, 'error': 'Control request failed'}
+
     async def _receive_until_expiry(self, websocket: WebSocket, token: str, receive):
         record = self._sessions.authenticate(token)
         if record is None:
@@ -736,16 +817,35 @@ class DashboardServer:
 
         async def handle(reader, writer):
             try:
-                command = await asyncio.wait_for(reader.readline(), 2)
-                if command != b'pair\n' or not self._public_url:
-                    reply = {'error': 'Set JARVIS_PUBLIC_URL to the trusted external HTTPS origin before pairing'}
+                try:
+                    command = await asyncio.wait_for(reader.readuntil(b'\n'), 2)
+                except (asyncio.IncompleteReadError, asyncio.LimitOverrunError, TimeoutError):
+                    command = b''
+                if len(command) > CONTROL_MAX_LINE_BYTES:
+                    command = b''
+                if command == b'pair\n':
+                    if not self._public_url:
+                        reply = {'error': 'Set JARVIS_PUBLIC_URL to the trusted external HTTPS origin before pairing'}
+                    else:
+                        key = self.new_key()
+                        await self._wait_for_revocation_tasks()
+                        reply = {'url': f'{self.get_url()}/auto-login?key={key}'}
                 else:
-                    key = self.new_key()
-                    await self._wait_for_revocation_tasks()
-                    reply = {'url': f'{self.get_url()}/auto-login?key={key}'}
-                writer.write((json.dumps(reply) + '\n').encode())
+                    try:
+                        request = json.loads(command.decode('utf-8'))
+                    except (UnicodeDecodeError, json.JSONDecodeError):
+                        request = None
+                    reply = (await self._dispatch_control(request)
+                             if isinstance(request, dict) else {'ok': False, 'error': 'Control request failed'})
+                try:
+                    encoded = json.dumps(reply, separators=(',', ':'), ensure_ascii=False).encode('utf-8') + b'\n'
+                except (TypeError, ValueError, UnicodeEncodeError):
+                    encoded = b''
+                if len(encoded) > CONTROL_MAX_RESPONSE_BYTES or not encoded:
+                    encoded = b'{"ok":false,"error":"Control request failed"}\n'
+                writer.write(encoded)
                 await writer.drain()
-            except (TimeoutError, ConnectionError, ValueError):
+            except (ConnectionError, ValueError):
                 pass
             finally:
                 writer.close()
@@ -753,7 +853,7 @@ class DashboardServer:
 
         # Cancellation may race the bind's completion. Shield and reap it so a
         # sibling HTTP startup failure cannot leak a bound, unowned socket.
-        binding = asyncio.create_task(asyncio.start_unix_server(handle, str(path), limit=256))
+        binding = asyncio.create_task(asyncio.start_unix_server(handle, str(path), limit=CONTROL_MAX_LINE_BYTES))
         server = None
         try:
             server = self._control_server = await asyncio.shield(binding)
@@ -971,15 +1071,6 @@ Do not bypass certificate warnings or browser security protections.</p>
             return JSONResponse({"ok": True, "token": session.token, "key": session.session_key,
                                  "expires_in": 3600})
 
-        @app.post("/api/revoke-devices")
-        async def revoke_devices(req: Request):
-            """Revoke all durable credentials and their active in-memory sessions."""
-            if not _auth(req):
-                return JSONResponse({"error": "Unauthorized"}, status_code=401)
-            devices = self._device_store.list_devices()
-            revoked = await asyncio.gather(*(self.revoke_device(device.device_id) for device in devices))
-            count = sum(summary is not None for summary in revoked)
-            return JSONResponse({"ok": True, "revoked": count})
 
         @app.post("/api/command")
         async def command(req: Request):

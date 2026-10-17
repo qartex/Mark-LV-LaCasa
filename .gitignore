@@ -15,6 +15,8 @@ config/whatsapp_web/
 **/token*.json
 **/client_secret*.json
 *credentials*.json
+config/device_credentials.json
+config/device_qr/
 .env
 .env.*
 
