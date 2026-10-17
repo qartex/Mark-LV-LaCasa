@@ -95,8 +95,7 @@ class TestUnitStillParses(unittest.TestCase):
     def test_unit_pins_adapter_command_and_host_audit_paths(self):
         text = UNIT.read_text()
         self.assertIn(
-            'Environment=JARVIS_CANNANAS_ADAPTER_COMMAND='
-            '/opt/cannanas/adapter/venv/bin/cannanas-mcp-adapter',
+            'Environment=JARVIS_CANNANAS_ADAPTER_COMMAND=%h/cannanas-adapter/venv/bin/cannanas-mcp-adapter',
             text,
         )
         self.assertIn('Environment=JARVIS_CANNANAS_AUDIT_FILE=%h/cannanas-adapter/audit/jarvis-write-audit.jsonl',

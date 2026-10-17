@@ -16,7 +16,7 @@ ExecStart=%h/Mark-LV-LaCasa/.venv/bin/python main.py
 EnvironmentFile=%h/Mark-LV-LaCasa/deploy/cannanas/cannanas-adapter.credentials
 # Adapter child paths (not secrets; the credentials file keeps only the four
 # adapter variables because the installer refuses extra variables there).
-Environment=JARVIS_CANNANAS_ADAPTER_COMMAND=/opt/cannanas/adapter/venv/bin/cannanas-mcp-adapter
+Environment=JARVIS_CANNANAS_ADAPTER_COMMAND=%h/cannanas-adapter/venv/bin/cannanas-mcp-adapter
 Environment=JARVIS_CANNANAS_AUDIT_FILE=%h/cannanas-adapter/audit/jarvis-write-audit.jsonl
 Environment=JARVIS_HEADLESS=true
 Environment=JARVIS_CAPTURE_SOURCE=phone
