@@ -228,6 +228,42 @@ class TailscaleDiscoveryTests(unittest.TestCase):
         sig = inspect.signature(relay.current_tailscale_ipv4)
         self.assertEqual(list(sig.parameters), [])
 
+    def test_falls_back_to_macos_app_cli_when_standard_cli_missing(self):
+        with unittest.mock.patch.object(
+            relay,
+            "_tailscale_cli_output",
+            side_effect=[
+                relay.TailscaleStateError("tailscale state unavailable"),
+                "100.64.101.103\n",
+            ],
+        ) as cli:
+            self.assertEqual(relay.current_tailscale_ipv4(), ipv4("100.64.101.103"))
+        self.assertEqual(2, cli.call_count)
+        self.assertIn("/Applications/Tailscale.app", cli.call_args.args[0][0])
+
+    def test_fails_closed_when_every_candidate_is_unavailable(self):
+        with unittest.mock.patch.object(
+            relay,
+            "_tailscale_cli_output",
+            side_effect=relay.TailscaleStateError("tailscale state unavailable"),
+        ) as cli:
+            with self.assertRaises(relay.TailscaleStateError):
+                relay.current_tailscale_ipv4()
+        self.assertEqual(len(relay._TAILSCALE_CANDIDATES), cli.call_count)
+
+    def test_default_preflight_runner_sends_dialer_on_stdin(self):
+        runner_args = inspect.signature(relay._default_preflight_runner).parameters
+        self.assertEqual(list(runner_args), ["tailscale_ip", "bind_port"])
+        with unittest.mock.patch.object(
+            relay.subprocess, "run", return_value=unittest.mock.Mock(returncode=0)
+        ) as run:
+            self.assertTrue(relay._default_preflight_runner("100.64.101.104", 16053))
+        argv = run.call_args.args[0]
+        self.assertIn("python3", argv)
+        self.assertEqual("-", argv[argv.index("python3") + 1])
+        self.assertNotIn("-c", argv)
+        self.assertTrue(run.call_args.kwargs.get("input", b""))
+
     def test_refuses_wildcard_output(self):
         with unittest.mock.patch.object(relay, "_tailscale_cli_output", return_value="0.0.0.0\n"):
             with self.assertRaises(relay.TailscaleStateError):

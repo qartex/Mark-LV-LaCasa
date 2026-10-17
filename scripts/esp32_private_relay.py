@@ -72,7 +72,7 @@ ROUTE_PROBE_PORT = 9
 
 PROBE_TOKEN = b"PREFLIGHT-PROBE\n"
 HEALTH_RESPONSE = b"preflight-ok\n"
-DEFAULT_PREFLIGHT_HOST = "lacasa-server"
+DEFAULT_PREFLIGHT_HOST = "lacasa@lacasa-server"
 PREFLIGHT_LISTEN_TIMEOUT_S = 0.25
 PREFLIGHT_EXCHANGE_TIMEOUT_S = 3.0
 PREFLIGHT_RUNNER_TIMEOUT_S = 30.0
@@ -123,6 +123,14 @@ def _tailscale_cli_output(argv: list[str] | None = None) -> str:
     return proc.stdout.decode("utf-8", "replace")
 
 
+_TAILSCALE_CANDIDATES = (
+    ("tailscale", "ip", "-4"),
+    # The macOS App Store build ships its CLI inside the app bundle and it is
+    # not on the non-interactive SSH PATH.
+    ("/Applications/Tailscale.app/Contents/MacOS/Tailscale", "ip", "-4"),
+)
+
+
 def current_tailscale_ipv4() -> ipaddress.IPv4Address:
     """Derive the Mac's current Tailscale IPv4 from local state.
 
@@ -131,13 +139,17 @@ def current_tailscale_ipv4() -> ipaddress.IPv4Address:
     caller; tests monkeypatch this module-level reader or
     ``_tailscale_cli_output``.
     """
-    try:
-        raw = _tailscale_cli_output(["tailscale", "ip", "-4"])
-    except TailscaleStateError:
-        raise
-    except Exception:
-        # Fail closed with a bounded message; underlying reader errors (and any
-        # secret-bearing exception text) never escape here.
+    raw: str | None = None
+    for argv in _TAILSCALE_CANDIDATES:
+        try:
+            raw = _tailscale_cli_output(list(argv))
+            break
+        except Exception:
+            # A missing or broken CLI on one candidate only moves the derived
+            # lookup to the next documented location; underlying error text
+            # (and any secret-bearing text) never escapes here.
+            continue
+    if raw is None:
         raise TailscaleStateError("tailscale state unavailable") from None
     addresses: list[ipaddress.IPv4Address] = []
     for line in raw.splitlines():
@@ -527,7 +539,12 @@ _PREFLIGHT_DIALER = (
 
 
 def _default_preflight_runner(tailscale_ip: str, bind_port: int) -> bool:
-    """Dial from lacasa-server via key-only SSH; reply stays in the pipe."""
+    """Dial from lacasa-server via key-only SSH; reply stays in the pipe.
+
+    The dialer source travels on stdin (``python3 -``) so the remote login
+    shell never word-splits or interprets the multi-line Python source; only
+    simple numeric argv tokens cross the shell.
+    """
     argv = [
         "ssh",
         "-o",
@@ -536,14 +553,14 @@ def _default_preflight_runner(tailscale_ip: str, bind_port: int) -> bool:
         "ConnectTimeout=8",
         DEFAULT_PREFLIGHT_HOST,
         "python3",
-        "-c",
-        _PREFLIGHT_DIALER,
+        "-",
         str(tailscale_ip),
         str(int(bind_port)),
     ]
     try:
         proc = subprocess.run(
             argv,
+            input=_PREFLIGHT_DIALER.encode("ascii"),
             timeout=PREFLIGHT_RUNNER_TIMEOUT_S,
             capture_output=True,
             check=False,
