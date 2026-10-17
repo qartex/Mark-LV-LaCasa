@@ -157,28 +157,74 @@
   </div>
 
   <script>
-    // Try auto-reconnect with stored device token (set on first QR login)
-    (async function() {
-      const devTok = localStorage.getItem('jarvis_device_token');
-      if (!devTok) return;
+    const DURABLE_KEY = 'jarvis_device_credential';
+
+    function _consumeFragment() {
+      const hash = location.hash;
+      const match = hash.match(/^#device=([^#\s]+)$/);
+      history.replaceState(null, '', '/login');
+      if (!match) return null;
+      const value = match[1];
+      const dot = value.indexOf('.');
+      if (dot <= 0) return null;
+      return { device_id: value.slice(0, dot), secret: value.slice(dot + 1) };
+    }
+
+    function _showReconnecting() {
       document.getElementById('reconnecting').style.display = 'block';
-      try {
-        const r = await fetch('/api/device-login', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ device_token: devTok }),
-        });
-        const d = await r.json();
-        if (d.ok && d.token) {
-          sessionStorage.setItem('jarvis_key', d.key);
-          sessionStorage.setItem('jarvis_token', d.token);
+    }
+
+    function _hideReconnecting() {
+      document.getElementById('reconnecting').style.display = 'none';
+    }
+
+    async function _exchange(fragment) {
+      const r = await fetch('/api/device-login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(fragment),
+      });
+      if (r.status === 429) return { ok: false, retry: true };
+      const d = await r.json();
+      return { ok: r.ok && d.ok && !!d.token, token: d.token, key: d.key };
+    }
+
+    (async function() {
+      const stored = localStorage.getItem(DURABLE_KEY);
+      if (stored) {
+        const dot = stored.indexOf('.');
+        if (dot > 0) {
+          _showReconnecting();
+          const result = await _exchange({
+            device_id: stored.slice(0, dot),
+            secret: stored.slice(dot + 1),
+          });
+          if (result.ok) {
+            sessionStorage.setItem('jarvis_key', result.key);
+            sessionStorage.setItem('jarvis_token', result.token);
+            location.replace('/');
+            return;
+          }
+          if (result.retry) { _hideReconnecting(); return; }
+        }
+        // Durable credential rejected (revoked, expired, malformed, or server restarted).
+        localStorage.removeItem(DURABLE_KEY);
+        _hideReconnecting();
+        return;
+      }
+      const fragment = _consumeFragment();
+      if (fragment) {
+        localStorage.setItem(DURABLE_KEY, fragment.device_id + '.' + fragment.secret);
+        _showReconnecting();
+        const result = await _exchange(fragment);
+        if (result.ok) {
+          sessionStorage.setItem('jarvis_key', result.key);
+          sessionStorage.setItem('jarvis_token', result.token);
           location.replace('/');
           return;
         }
-      } catch (_) {}
-      // Device token rejected (server restarted) — clear it and show normal form
-      localStorage.removeItem('jarvis_device_token');
-      document.getElementById('reconnecting').style.display = 'none';
+        if (result.retry) { _hideReconnecting(); return; }
+      }
     })();
 
     const inp = document.getElementById('key');
