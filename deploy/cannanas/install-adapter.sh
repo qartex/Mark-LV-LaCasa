@@ -11,12 +11,12 @@
 #       Refuse everything but a mode-0600 file with exactly the four adapter
 #       variables and non-empty values.
 #   --install WHEEL VENV [CONSTRAINTS] [RELEASE_INFO]
-#       verify → create the venv in $CANNANAS_VENV_DIR (default /opt/cannanas/adapter/venv),
+#       verify → create the venv in $CANNANAS_VENV_DIR (default %h/cannanas-adapter/venv),
 #       pip install from the hashed constraints plus the wheel, copy the
 #       release_info.json sidecar next to the entry point. Starts nothing.
 set -euo pipefail
 
-PINNED_SHA256='8349fbd2fc6a3761334e035c06077e4e2f3eff3ee7da2b7bf001de7c709e113c'
+PINNED_SHA256='7085943afc149d3f2356fca66d8a9d0bac9c2576166e99e36093a56b87153f5f'
 PINNED_VERSION='1.0.0'
 ADAPTER_VARS=('CANNANAS_API_KEY' 'CANNANAS_CLUB_ID' 'CANNANAS_STATE_DIR' 'CANNANAS_AUDIT_FILE')
 
