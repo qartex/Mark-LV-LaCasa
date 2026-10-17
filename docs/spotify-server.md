@@ -20,7 +20,17 @@
 4. **raspotify (lacasa-server)** wählen und leise starten.
 5. Boxen am analogen Ausgang müssen angeschlossen, eingeschaltet und passend eingestellt sein.
 
-Tailscale transportiert gewöhnlich keine mDNS-Gerätesuche. Ein iPhone nur über Tailscale in einem anderen Netz entdeckt den noch nicht gekoppelten Empfänger daher nicht automatisch. Fernsteuerung nach erfolgreicher Konto-Kopplung separat prüfen; sie wurde noch nicht getestet. Keine Spotify-Passwörter in den Chat oder ins Repository schreiben.
+Der JARVIS-Headless-Stack betreibt Spotify ausschließlich über Raspotify/librespot mit dem exakten Gerätenamen `raspotify (lacasa-server)`. Alle Wiedergabe erfolgt direkt über den konfigurierten ALSA-Ausgang; es erfolgt keine Geräteübertragung auf andere Endgeräte.
+
+Das Spotify-Konto ist persönlich und darf nicht für öffentliche oder gewerbliche Musikbeschallung ohne klare Rechte genutzt werden.
+
+Die Konfiguration beschränkt sich auf die Datei `deploy/spotify/raspotify.conf` (nur `LIBRESPOT_NAME` wurde angepasst auf `raspotify (lacasa-server)`); alle weiteren Einstellungen bleiben unverändert.
+
+JARVIS und Spotify laufen parallel über die analogen Lautsprecher des Servers. Während tatsächlicher JARVIS-Ausgabe wird der Musikzweig um 18 dB abgesenkt und nach exakter Wiederherstellung des vorherigen Pegels genau. Kein Track wird pausiert oder neu gestartet.
+
+Nach Authorization via `spotify-auth-start` und erfolgreichem Konsent zeigt `spotify-auth-status` `authorized: true` mit den festen Ablaufdaten (sechs Monate ab erstem Consent). Refresh verlängert diese Frist nicht. `invalid_grant`, Widerruf oder Ablauf der Autorisierung invalidieren Tokens atomar und fordern einen neuen Autorisierungsvorgang.
+
+Die Web API Zielgeräteauswahl ist exakt: nur `raspotify (lacasa-server)` wird gesteuert. Kein Tracking, kein Zwischenspeichern von Token-Werten, keine Weiterleitung an andere Geräte.
 
 Spotify-Konten sind für persönliche/private Nutzung vorgesehen. Für öffentliche oder gewerbliche Musikbeschallung separat die Nutzungsrechte klären.
 

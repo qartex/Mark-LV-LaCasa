@@ -12,18 +12,38 @@ JARVIS läuft ohne Desktop auf **lacasa-server**, getrennt von Home Assistant un
 
 Es gibt in diesem Modus kein dauerhaftes Mithören und kein notwendiges lokales Servermikrofon. „Hey Jarvis“ ist kein nötiger Aktivierungsschritt. Das iPhone nicht unmittelbar vor die Serverlautsprecher legen.
 
-## Kopplungslink und QR-Code erneuern
+## Dauerhafte iPhone-Zugänge
 
-Ein Link ist **zehn Minuten und genau einmal** verwendbar. Der konkrete Schlüssel gehört nicht in diese öffentliche Dokumentation. Nach erfolgreicher Kopplung speichert der Browser seinen Gerätezugang, solange diese Serverinstanz ihn kennt. Nach Dienstneustart oder Widerruf kann eine erneute Kopplung nötig sein.
+Für die vier iPhones gibt es vier getrennte, dauerhaft gespeicherte Gerätezugänge. Der QR-Code öffnet eine private HTTPS-Adresse, deren Zugangsdaten ausschließlich im URL-Fragment stehen. Safari entfernt das Fragment vor dem ersten Netzwerkzugriff aus der sichtbaren URL und bewahrt den Gerätezugang lokal auf. Der Server tauscht ihn gegen einen frischen Bearer und Sitzungsschlüssel mit fester Laufzeit von **einer Stunde**. Nach Ablauf oder Dienstneustart meldet sich das iPhone mit seinem bestehenden Gerätezugang erneut an; ein einzelner Widerruf betrifft nur dieses Gerät.
 
-Als Benutzer `lacasa` auf dem richtigen Server:
+Die Erstbereitstellung erfolgt als Benutzer `lacasa` auf **lacasa-server** über den privaten Unix-Socket:
 
 ```sh
 cd /home/lacasa/Mark-LV-LaCasa
+.venv/bin/python -m core.headless device-create --label 'LaCasa iPhone 1' --socket /run/user/1000/jarvis/control.sock
+.venv/bin/python -m core.headless device-create --label 'LaCasa iPhone 2' --socket /run/user/1000/jarvis/control.sock
+.venv/bin/python -m core.headless device-create --label 'LaCasa iPhone 3' --socket /run/user/1000/jarvis/control.sock
+.venv/bin/python -m core.headless device-create --label 'LaCasa iPhone 4' --socket /run/user/1000/jarvis/control.sock
+```
+
+Die Befehle geben nur sichere Metadaten und die Pfade zu den privaten `.png`- und `.url`-Artefakten aus. **Die Artefakte enthalten Zugangsdaten:** nur lokal aufbewahren, weder in Git noch in Chat, Logs oder Dokumentation kopieren. Der Credential-Store liegt in `config/device_credentials.json` (Modus `0600`), die Artefakte in `config/device_qr/` (Verzeichnis `0700`, Dateien `0600`).
+
+Geräte lassen sich ausschließlich lokal verwalten:
+
+```sh
+.venv/bin/python -m core.headless device-list --socket /run/user/1000/jarvis/control.sock
+.venv/bin/python -m core.headless device-revoke DEVICE_ID --socket /run/user/1000/jarvis/control.sock
+```
+
+Bei Verlust zuerst die sichere Geräte-ID mit `device-revoke` widerrufen und danach mit `device-create` unter demselben Label einen neuen Zugang erzeugen. Es gibt keine Geräteverwaltung über HTTP oder die Telefonoberfläche.
+
+Für Notfälle bleibt ein separater, **zehn Minuten gültiger** temporärer Kopplungslink verfügbar:
+
+```sh
 .venv/bin/python -m core.headless pair --socket /run/user/1000/jarvis/control.sock
 ```
 
-Der Befehl fragt die **laufende JARVIS-Instanz** ab. Seine Ausgabe ist der Kopplungslink; diesen direkt auf dem iPhone öffnen oder privat als QR-Code darstellen. **Jede neue Linkerzeugung widerruft alle vorherigen Kopplungen und laufenden Remote-Sitzungen.** Einen funktionierenden Zugang nicht routinemäßig durch erneutes Pairing ungültig machen.
+Dieser Operatorbefehl darf den temporären Link ausgeben. Er rotiert nur frühere temporäre Kopplungen und lässt alle dauerhaften Gerätezugänge und deren Sitzungen unberührt.
 
 Nicht `uvicorn dashboard.server:app` starten: Es gibt dort keine solche Modulvariable, und ein isoliertes Dashboard würde weder Gemini noch Audio betreiben. Keine GUI-Schaltfläche, Chrome-Flags oder selbstsignierten Zertifikate nötig.
 
@@ -66,7 +86,7 @@ tailscale serve status
 
 ### Startfehler und lokale Reparatur
 
-Die aktualisierte Unit verhindert automatische Neustarts nur bei **Exit 78 (`EX_CONFIG`)**: fehlende/ungültige lokale Gemini-Zugangsdaten oder ungültige Headless-Konfiguration zuerst lokal reparieren, danach `systemctl --user restart jarvis`. Ein HTTP-Bindefehler oder fehlgeschlagener Unix-Kontrollkanal beendet den Dienst dagegen mit einem normalen Fehlerstatus; `Restart=on-failure` darf ihn erneut starten. Modellverbindungen beginnen erst, wenn beide lokalen Eingänge bereit sind. Der unabhängige Spotify-Ducking-Guard bleibt davon unberührt. Nach einem Unit-Update ist vor dem nächsten geplanten JARVIS-Start ein `systemctl --user daemon-reload` erforderlich; Spotify oder die gemeinsame Audiositzung dafür nicht neu starten.
+Die aktualisierte Unit verhindert automatische Neustarts nur bei **Exit 78 (`EX_CONFIG`)**: fehlende/ungültige lokale Gemini-Zugangsdaten, ein beschädigter oder unsicher berechtigter `config/device_credentials.json` oder ein unsicherer QR-Pfad müssen zuerst lokal repariert werden; danach `systemctl --user restart jarvis`. Niemals den Store durch eine leere Datei ersetzen oder Berechtigungsfehler durch Lockerung der Dateimodi umgehen. Ein HTTP-Bindefehler oder fehlgeschlagener Unix-Kontrollkanal beendet den Dienst dagegen mit einem normalen Fehlerstatus; `Restart=on-failure` darf ihn erneut starten. Modellverbindungen beginnen erst, wenn beide lokalen Eingänge bereit sind. Der unabhängige Spotify-Ducking-Guard bleibt davon unberührt. Nach einem Unit-Update ist vor dem nächsten geplanten JARVIS-Start ein `systemctl --user daemon-reload` erforderlich; Spotify oder die gemeinsame Audiositzung dafür nicht neu starten.
 
 ### Zugriff prüfen
 
@@ -95,3 +115,33 @@ Das sind **keine** Nachweise für Safari-Mikrofonrechte auf deinem konkreten iPh
 ## Rollback-Hinweis
 
 Vor der einmaligen System-zu-Benutzerdienst-Migration wurden Paketkonfiguration und Spotify-Zustand privat unter `~/.local/state/lacasa-audio-backup/` gesichert. Die Datei `latest` verweist auf die betreffende Sicherung. Kein automatisches Rollback ausführen, während der neue Empfänger funktioniert; sonst entsteht eine konkurrierende Audio-/Connect-Instanz oder laufende Musik wird unterbrochen.
+
+## Spotify voice control (Task 5)
+
+App name: any personal name
+Website: blank
+Redirect URI: https://lacasa-server.tail7a9c2.ts.net/api/spotify/callback
+API/SDK: Web API
+Credential requested from user: Client ID only (never client secret/password)
+Start: .venv/bin/python -m core.headless spotify-auth-start --client-id '<CLIENT_ID>'
+Status: .venv/bin/python -m core.headless spotify-auth-status
+
+The authorization URL is opened by the operator over trusted HTTPS. Consent must be repeated after six calendar months/revocation/invalid_grant. The status command never displays tokens. Spotify Premium is required for playback mutating actions; reads (search, playlists, library, get_state) work on Free.
+
+Seven German voice-action examples:
+- „Spiele Bohemian Rhapsody." (play, track)
+- „Spiele das Album A Night at the Opera." (play, album)
+- „Spiele Queen." (play, artist)
+- „Pause die Wiedergabe." / „Setze die Wiedergabe fort."
+- „Nächster Titel." / „Vorheriger Titel."
+- „Stelle die Lautstärke auf 50 Prozent."
+- „Was läuft gerade?" (current)
+
+Exact receiver: raspotify (lacasa-server). All playback is directed exclusively at this receiver; the iPhone or any other device is never controlled.
+
+Safe troubleshooting:
+- If `spotify-auth-status` returns `authorized: false`, re-run `spotify-auth-start`.
+- Consent must be re-granted after six calendar months, revocation, or `invalid_grant`; a single 401 during playback is handled by one automatic token refresh and one retry, an expired reauthorization needs a new manual `spotify-auth-start`.
+- Network errors appear as "Spotify API ist zurzeit nicht erreichbar" in the assistant output.
+
+These steps are explicitly deferred to the separate durable-device plan; current transient `pair` instructions stay valid.

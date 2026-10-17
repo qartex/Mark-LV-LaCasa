@@ -15,6 +15,10 @@ class SecretIgnoreTests(unittest.TestCase):
             "plugins/token-test.json",
             "plugins/client_secret-test.json",
             ".env",
+            "config/spotify_oauth.json",
+            "config/device_credentials.json",
+            "config/device_qr/example.url",
+            "config/device_qr/example.png",
         ]
         for path in paths:
             with self.subTest(path=path):
@@ -24,7 +28,9 @@ class SecretIgnoreTests(unittest.TestCase):
                     capture_output=True,
                     text=True,
                 )
-                self.assertEqual(result.returncode, 0, f"Not ignored: {path}")
+                self.assertEqual(
+                    result.returncode, 0, f"Not ignored: {path}"
+                )
 
     def test_local_config_is_not_tracked(self):
         result = subprocess.run(
@@ -36,6 +42,22 @@ class SecretIgnoreTests(unittest.TestCase):
         )
         self.assertEqual(result.stdout, "")
 
-
-if __name__ == "__main__":
-    unittest.main()
+    def test_spotify_oauth_is_ignored_and_untracked(self):
+        # Explicit ignore check
+        result = subprocess.run(
+            ["git", "check-ignore", "--no-index", "--quiet", "config/spotify_oauth.json"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(
+            result.returncode, 0, "config/spotify_oauth.json should be ignored"
+        )
+        # Untracked check
+        result = subprocess.run(
+            ["git", "ls-files", "--", "config/spotify_oauth.json"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.stdout, "")

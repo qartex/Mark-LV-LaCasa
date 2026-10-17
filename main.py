@@ -642,7 +642,7 @@ class JarvisLive:
         if headless.enabled():
             from core.action_loader import ActionRegistry
             self._action_registry = ActionRegistry({}, print)
-            self._plugin_registry = headless.read_only_registry()
+            self._plugin_registry = headless.trusted_headless_registry()
         else:
             self._discover_desktop_tools(_base_dir, _inline_names)
         self.ui.get_plugins = self._plugin_registry.list_for_ui
