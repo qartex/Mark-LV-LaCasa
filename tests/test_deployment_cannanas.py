@@ -116,6 +116,11 @@ class TestInstallerUsesConstraintsMode(unittest.TestCase):
         script = SCRIPT.read_text()
         self.assertIn('-c "$constraints"', script)
         self.assertNotIn('-r "$constraints"', script)
+        # Bare wheel path args break pip require-hashes; the pinned spec with
+        # --find-links verifies the local wheel against the locked hash instead.
+        self.assertIn('--find-links "$wheel_dir"', script)
+        self.assertIn('cannanas-mcp-adapter==${PINNED_VERSION}', script)
+        self.assertIn('"$venv/bin/pip" "${pip_args[@]}"', script)
 
 
 class TestNoNewSockets(unittest.TestCase):
