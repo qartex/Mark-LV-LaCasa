@@ -23,6 +23,12 @@ import threading
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from urllib.parse import urlsplit
+from core.turn_provenance import (
+    ProvenanceText,
+    auth_session_id_of,
+    create_stable,
+    final_variant,
+)
 from core import headless
 from core import device_credentials
 from core.device_credentials import DeviceCredentialStore, DeviceSummary
@@ -839,6 +845,18 @@ class DashboardServer:
         return {**self._status, 'audio_allowed': self.audio_allowed(),
                 'audio_busy': self._audio_owner is not None}
 
+    def _envelope(self, session: SessionRecord, channel: str, *,
+                  capture_id: str | None = None, final: bool = False):
+        """Immutable provenance envelope for one accepted ingress input.
+        Never carries bearer secrets: the auth-session id is a digest."""
+        return create_stable(
+            channel,
+            stable_device_id=session.device_id,
+            auth_session_id=auth_session_id_of(session.session_key),
+            capture_id=capture_id,
+            final=final,
+        )
+
     def invalidate_audio(self):
         old_epoch = self._audio_epoch
         self._audio_epoch += 1
@@ -1174,7 +1192,8 @@ Do not bypass certificate warnings or browser security protections.</p>
 
         @app.post("/api/command")
         async def command(req: Request):
-            if not _auth(req):
+            session = _session(req)
+            if session is None:
                 return JSONResponse({"error": "Unauthorized"}, status_code=401)
             body  = await req.json()
             token = req.headers.get("authorization", "").removeprefix("Bearer ").strip()
@@ -1186,7 +1205,8 @@ Do not bypass certificate warnings or browser security protections.</p>
             else:
                 text = (body.get("text") or "").strip()
             if text:
-                await self._command_queue.put(text)
+                envelope = self._envelope(session, 'http_text', final=True)
+                await self._command_queue.put(ProvenanceText(text, envelope))
                 if self._wake_callback:
                     self._wake_callback()
             return JSONResponse({"ok": True})
@@ -1211,11 +1231,17 @@ Do not bypass certificate warnings or browser security protections.</p>
                     or not self.audio_allowed()):
                 await websocket.close(code=4009)
                 return
+            session = self._sessions.authenticate(tok)
+            if session is None:  # expired between the initial accept check and now
+                await websocket.close(code=4001)
+                return
             self._audio_owner = websocket
             self._audio_clients.add(websocket)
             epoch = self._audio_epoch
             self._capture_serial += 1
             capture = self._capture_serial
+            envelope = self._envelope(session, 'phone_pcm',
+                                      capture_id=f'{epoch}:{capture}')
             ended = False
             try:
                 await websocket.accept()
@@ -1250,7 +1276,8 @@ Do not bypass certificate warnings or browser security protections.</p>
                             break
                         await self._phone_audio_queue.put({'audio_stream_end':True,
                                                           'epoch':epoch, 'capture':capture,
-                                                          'at':time.monotonic()})
+                                                          'at':time.monotonic(),
+                                                          'envelope': final_variant(envelope)})
                         ended = True
                         await websocket.send_json({'type':'audio_ended'})
                         await websocket.close(code=1000)
@@ -1261,7 +1288,8 @@ Do not bypass certificate warnings or browser security protections.</p>
                     try:
                         self._phone_audio_queue.put_nowait(
                             {'data':data, 'mime_type':'audio/pcm;rate=16000',
-                             'epoch':epoch, 'capture':capture, 'at':time.monotonic()}
+                             'epoch':epoch, 'capture':capture, 'at':time.monotonic(),
+                             'envelope':envelope}
                         )
                         self._audio_epoch_has_pcm = True
                     except asyncio.QueueFull:
@@ -1391,7 +1419,10 @@ Do not bypass certificate warnings or browser security protections.</p>
                         enc = data.get("enc", "")
                         t   = self._decrypt(tok, enc) if enc else (data.get("text") or "").strip()
                         if t:
-                            await self._command_queue.put(t)
+                            session = self._sessions.authenticate(tok)
+                            if session is not None:
+                                envelope = self._envelope(session, 'control_ws_text', final=True)
+                                await self._command_queue.put(ProvenanceText(t, envelope))
                             if self._wake_callback:
                                 self._wake_callback()
             except WebSocketDisconnect:
