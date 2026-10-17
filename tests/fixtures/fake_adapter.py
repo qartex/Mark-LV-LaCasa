@@ -73,8 +73,7 @@ server = Server('cannanas-fake-adapter')
 _request_count = 0
 
 
-@server.list_tools()
-async def _list_tools() -> list:
+def _build_tool_list() -> list:
     names = list(EXPECTED_TOOLS)
     if MODE == 'extra-tool':
         names.append('rogue_delete_everything')
@@ -82,8 +81,7 @@ async def _list_tools() -> list:
             for name in names]
 
 
-@server.call_tool()
-async def _call_tool(name: str, arguments: dict | None) -> dict:
+async def _tool_payload(name: str, arguments: dict | None) -> dict:
     global _request_count
     if MODE == 'one-shot':
         _request_count += 1
@@ -107,6 +105,44 @@ async def _call_tool(name: str, arguments: dict | None) -> dict:
         return {'ok': True, 'pid': PID, 'preview': 'Vorschau des Eintrags',
                 'payload_hash': 'payload-hash-1', 'confirmation_token': 'opaque-token-1'}
     return {'ok': True, 'pid': PID, 'items': []}
+
+
+# MCP SDK 1.x exposes low-level request decorators; 2.0 removed them in favour
+# of add_request_handler. The fixture must run under both so the suite works in
+# the pinned production environment (1.x) and in newer runner environments (2.x)
+# without weakening what is exercised over the wire.
+if hasattr(server, 'list_tools') and hasattr(server, 'call_tool'):
+
+    @server.list_tools()
+    async def _list_tools() -> list:
+        return _build_tool_list()
+
+    @server.call_tool()
+    async def _call_tool(name: str, arguments: dict | None) -> dict:
+        return await _tool_payload(name, arguments)
+
+else:
+    from mcp.types import (CallToolRequestParams, CallToolResult,
+                           ListToolsResult, PaginatedRequestParams,
+                           TextContent)
+
+    async def _handle_list_tools(
+        _ctx, _params: PaginatedRequestParams | None
+    ) -> ListToolsResult:
+        return ListToolsResult(tools=_build_tool_list())
+
+    async def _handle_call_tool(
+        _ctx, params: CallToolRequestParams
+    ) -> CallToolResult:
+        payload = await _tool_payload(params.name, params.arguments or {})
+        return CallToolResult(content=[
+            TextContent(type='text', text=json.dumps(payload)),
+        ])
+
+    server.add_request_handler('tools/list', PaginatedRequestParams,
+                               _handle_list_tools)
+    server.add_request_handler('tools/call', CallToolRequestParams,
+                               _handle_call_tool)
 
 
 async def main() -> None:
