@@ -6,13 +6,13 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 from core.device_credentials import DeviceCredentialStore
 from dashboard.server import DashboardServer
 from core.headless import request_control, request_pair, control_path
-from core.spotify import AuthorizationStart, AuthorizationStatus
+from core.spotify import AuthorizationStart, AuthorizationStatus, SpotifyConfigError
 from datetime import datetime, timezone
 
 
@@ -623,3 +623,72 @@ class SpotifyControlTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SpotifyCallbackRobustnessTests(unittest.TestCase):
+    """complete_authorization failures must yield the fixed 400 HTML, never a 500."""
+
+    def _server(self, fake):
+        return DashboardServer(
+            public_url="https://lacasa-server.tail7a9c2.ts.net", host="127.0.0.1", spotify_oauth=fake
+        )
+
+    def test_complete_authorization_exception_returns_400_no_store_html(self):
+        fake = Mock()
+        fake.complete_authorization.side_effect = RuntimeError("boom SECRET_TOKEN")
+        server = self._server(fake)
+        client = TestClient(server.app)
+        response = client.get("/api/spotify/callback", params={"state": "s", "code": "c"})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        self.assertNotIn("SECRET_TOKEN", response.text)
+        self.assertNotIn("boom", response.text)
+
+    def test_complete_authorization_config_error_returns_400_html(self):
+        fake = Mock()
+        fake.complete_authorization.side_effect = SpotifyConfigError("Spotify OAuth store is not an object")
+        server = self._server(fake)
+        client = TestClient(server.app)
+        response = client.get("/api/spotify/callback", params={"state": "s", "code": "c"})
+        self.assertEqual(response.status_code, 400)
+        self.assertNotIn("store is not an object", response.text)
+
+
+class SpotifyOAuthStartupValidationTests(unittest.TestCase):
+    """A corrupt OAuth store must fail DashboardServer startup (exit 78 path)."""
+
+    def _patch_default_oauth(self, oauth):
+        return patch("dashboard.server.default_oauth", return_value=oauth)
+
+    def test_corrupt_store_fails_dashboard_init(self):
+        oauth = Mock()
+        oauth.status.side_effect = SpotifyConfigError("malformed Spotify OAuth store")
+        with self._patch_default_oauth(oauth):
+            with self.assertRaises(SpotifyConfigError):
+                DashboardServer(
+                    public_url="https://lacasa-server.tail7a9c2.ts.net", host="127.0.0.1"
+                )
+        oauth.status.assert_called_once()
+
+    def test_missing_store_is_not_an_error(self):
+        oauth = Mock()
+        oauth.status.return_value = AuthorizationStatus(
+            False, True, None, None, None
+        )
+        with self._patch_default_oauth(oauth):
+            server = DashboardServer(
+                public_url="https://lacasa-server.tail7a9c2.ts.net", host="127.0.0.1"
+            )
+        self.assertIs(server._spotify_oauth, oauth)
+
+    def test_injected_oauth_bypasses_default_factory_and_validation(self):
+        injected = Mock()
+        with patch("dashboard.server.default_oauth") as fake_factory:
+            server = DashboardServer(
+                public_url="https://lacasa-server.tail7a9c2.ts.net",
+                host="127.0.0.1",
+                spotify_oauth=injected,
+            )
+        fake_factory.assert_not_called()
+        injected.status.assert_not_called()
+        self.assertIs(server._spotify_oauth, injected)

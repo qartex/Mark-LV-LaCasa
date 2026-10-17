@@ -5,6 +5,8 @@ import sys
 import unittest
 from unittest.mock import patch
 
+from core.spotify import SpotifyAuthorizationRequired
+
 PLUGIN_MODULE = "plugins.spotify_control"
 
 
@@ -163,3 +165,23 @@ class PluginSecretSanitizationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class PluginAuthorizationRequiredTests(unittest.TestCase):
+    def test_perform_authorization_required_becomes_german_reauth_text(self):
+        plugin = _load_plugin()
+        fake = _FakeController()
+        secret = "SECRET_INTERNAL_REASON"
+
+        def perform_raises(action, **kwargs):
+            fake.calls.append((action,))
+            raise SpotifyAuthorizationRequired(secret)
+
+        fake.perform = perform_raises
+        captured = io.StringIO()
+        with patch.object(plugin, "get_controller", return_value=fake):
+            with patch("sys.stdout", captured), patch("sys.stderr", captured):
+                result = plugin.run({"action": "pause"})
+        self.assertIn("Spotify muss einmal verbunden werden", result)
+        self.assertNotIn(secret, result)
+        self.assertNotIn(secret, captured.getvalue())
+        self.assertNotIn("unerwarteter Fehler", result)

@@ -12,7 +12,7 @@ from __future__ import annotations
 import threading
 from typing import Callable
 
-from core.spotify import SpotifyController
+from core.spotify import SpotifyAuthorizationRequired, SpotifyController
 
 
 # ---- Plugin metadata -------------------------------------------------------
@@ -129,6 +129,11 @@ def run(parameters: dict, player=None, session_memory=None) -> str:
             kind=parameters.get("kind", "track"),
             volume_percent=parameters.get("volume_percent"),
         )
+    except SpotifyAuthorizationRequired:
+        return (
+            "Spotify muss einmal verbunden werden. "
+            "Bitte im Dashboard einmal neu autorisieren."
+        )
     except Exception as exc:  # noqa: BLE001 — last-resort guard, controller already
         # returns strings, but an unexpected error must not propagate.
-        return f"Ein unerwarteter Fehler ist aufgetreten: {exc}"
+        return f"Ein unerwarteter Fehler ist aufgetreten: {type(exc).__name__}"
