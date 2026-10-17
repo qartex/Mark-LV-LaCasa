@@ -22,7 +22,7 @@ import contextlib
 from pathlib import Path
 from urllib.parse import urlsplit
 from core import headless
-from core.device_credentials import DeviceCredentialStore
+from core.device_credentials import DeviceCredentialStore, DeviceSummary
 from dashboard.access import AttemptLimiter, SessionRecord, SessionRegistry
 
 _DEPS_OK = False
@@ -509,6 +509,9 @@ class DashboardServer:
         )
         self._aes_cache:  dict[str, bytes]= {}   # session_key → AES bytes
         self._clients: set[WebSocket]     = set()
+        self._token_sockets: dict[str, set[WebSocket]] = {}
+        self._socket_tokens: dict[WebSocket, str] = {}
+        self._revocation_tasks: list[asyncio.Task] = []
         self._history: list[dict]         = []
         self._command_queue               = asyncio.Queue()
         self._wake_callback               = None
@@ -523,25 +526,72 @@ class DashboardServer:
     # ── one-time key management ───────────────────────────────────────────
 
     def new_key(self, expiry_secs: int = 600) -> str:
-        # Rotation revokes transient pairing sessions while durable credentials persist.
+        """Rotate only emergency-pairing state; durable devices remain connected."""
         self._pending_keys.clear()
-        self._sessions.revoke_transient()
-        self._aes_cache.clear()
-        self.invalidate_audio()
-        self._history.clear()
+        tokens = self._sessions.revoke_transient()
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             loop = None
         self._revocation_tasks = []
-        if loop:
-            for ws in list(self._clients | self._audio_clients):
-                self._revocation_tasks.append(loop.create_task(ws.close(code=4001)))
+        if loop and tokens:
+            self._revocation_tasks.append(loop.create_task(self._terminate_tokens(tokens)))
         now = self._wall_clock()
         self._pending_keys = {k: v for k, v in self._pending_keys.items() if v > now}
         key = ''.join(secrets.choice(_KEY_CHARS) for _ in range(6))
         self._pending_keys[key] = now + expiry_secs
         return key
+
+    def _register_socket(self, websocket: WebSocket, token: str) -> None:
+        self._socket_tokens[websocket] = token
+        self._token_sockets.setdefault(token, set()).add(websocket)
+
+    def _unregister_socket(self, websocket: WebSocket) -> None:
+        token = self._socket_tokens.pop(websocket, None)
+        if token is None:
+            return
+        sockets = self._token_sockets.get(token)
+        if sockets is None:
+            return
+        sockets.discard(websocket)
+        if not sockets:
+            self._token_sockets.pop(token, None)
+
+    async def _terminate_tokens(self, tokens: set[str], *, code: int = 4001) -> None:
+        """Close only sockets bound to invalidated in-memory sessions."""
+        sockets = {
+            websocket
+            for token in tokens
+            for websocket in self._token_sockets.get(token, set())
+        }
+        if self._audio_owner in sockets:
+            self.invalidate_audio()
+        for websocket in sockets:
+            try:
+                await websocket.close(code=code)
+            except BaseException:
+                pass
+
+    async def revoke_device(self, device_id: str) -> DeviceSummary | None:
+        """Persist revocation before fencing the device's in-memory sessions."""
+        summary = self._device_store.revoke(device_id)
+        if summary is None:
+            return None
+        tokens = self._sessions.revoke_device(summary.device_id)
+        await self._terminate_tokens(tokens)
+        return summary
+
+    async def _receive_until_expiry(self, websocket: WebSocket, token: str, receive):
+        record = self._sessions.authenticate(token)
+        if record is None:
+            await websocket.close(code=4001)
+            return None
+        try:
+            return await asyncio.wait_for(receive(), max(0, record.expires_at - self._wall_clock()))
+        except TimeoutError:
+            self._sessions.discard(token)
+            await websocket.close(code=4001)
+            return None
 
     @staticmethod
     def _ssl_enabled() -> bool:
@@ -879,10 +929,8 @@ Do not bypass certificate warnings or browser security protections.</p>
             if not _auth(req):
                 return JSONResponse({"error": "Unauthorized"}, status_code=401)
             devices = self._device_store.list_devices()
-            for device in devices:
-                self._device_store.revoke(device.device_id)
-                self._sessions.revoke_device(device.device_id)
-            count = len(devices)
+            revoked = await asyncio.gather(*(self.revoke_device(device.device_id) for device in devices))
+            count = sum(summary is not None for summary in revoked)
             return JSONResponse({"ok": True, "revoked": count})
 
         @app.post("/api/command")
@@ -932,13 +980,24 @@ Do not bypass certificate warnings or browser security protections.</p>
             ended = False
             try:
                 await websocket.accept()
+                self._register_socket(websocket, tok)
                 await websocket.send_json({'type':'audio_ready'})
                 while True:
-                    message = await websocket.receive()
+                    message = await self._receive_until_expiry(websocket, tok, websocket.receive)
+                    if message is None:
+                        if self._audio_owner is websocket:
+                            self.invalidate_audio()
+                        break
                     if message['type'] == 'websocket.disconnect':
                         break
-                    if not self._sessions.authenticate(tok) or not self.audio_allowed() or epoch != self._audio_epoch:
-                        self.invalidate_audio()
+                    if not self._sessions.authenticate(tok):
+                        if self._audio_owner is websocket:
+                            self.invalidate_audio()
+                        await websocket.close(code=4001)
+                        break
+                    if not self.audio_allowed() or epoch != self._audio_epoch:
+                        if self._audio_owner is websocket:
+                            self.invalidate_audio()
                         await websocket.close(code=4009)
                         break
                     data = message.get('bytes')
@@ -971,6 +1030,7 @@ Do not bypass certificate warnings or browser security protections.</p>
             except WebSocketDisconnect:
                 pass
             finally:
+                self._unregister_socket(websocket)
                 self._audio_clients.discard(websocket)
                 if self._audio_owner is websocket:
                     self._audio_owner = None
@@ -1074,6 +1134,7 @@ Do not bypass certificate warnings or browser security protections.</p>
             try:
                 await websocket.accept()
                 self._clients.add(websocket)
+                self._register_socket(websocket, tok)
                 await websocket.send_json(self.current_status())
                 for entry in self._history[-50:]:
                     try:
@@ -1081,7 +1142,9 @@ Do not bypass certificate warnings or browser security protections.</p>
                     except Exception:
                         break
                 while True:
-                    data = await websocket.receive_json()
+                    data = await self._receive_until_expiry(websocket, tok, websocket.receive_json)
+                    if data is None:
+                        break
                     if not self._sessions.authenticate(tok):
                         await websocket.close(code=4001)
                         break
@@ -1095,6 +1158,7 @@ Do not bypass certificate warnings or browser security protections.</p>
             except WebSocketDisconnect:
                 pass
             finally:
+                self._unregister_socket(websocket)
                 self._clients.discard(websocket)
 
         return app

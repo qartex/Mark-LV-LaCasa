@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import Mock
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
+from core.device_credentials import DeviceCredentialStore
 from dashboard.server import DashboardServer
 
 
@@ -31,7 +32,7 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(self.client.post('/api/command',headers=self.headers,json={'text':'hello'}).status_code,200)
         self.assertEqual(self.server._command_queue.get_nowait(),'hello')
 
-    def test_invalid_expired_and_rotation_revokes_every_credential(self):
+    def test_invalid_expired_and_transient_rotation_revokes_only_transient_credentials(self):
         self.assertEqual(self.client.post('/login',json={'pin':'WRONG'}).status_code,401)
         expired=self.server.new_key(expiry_secs=-1)
         self.assertEqual(self.client.post('/login',json={'pin':expired}).status_code,401)
@@ -87,14 +88,67 @@ class DashboardTests(unittest.TestCase):
                 ws.receive_json()
         self.assertTrue(self.server._phone_audio_queue.empty())
 
-    def test_rotation_closes_real_control_and_audio_websockets(self):
+    def test_revoke_one_device_closes_only_its_control_and_audio_sockets_4001(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            root.chmod(0o700)
+            store = DeviceCredentialStore(root / 'devices.json')
+            first_device = store.create('First device')
+            second_device = store.create('Second device')
+            server = DashboardServer(public_url='https://example.test', host='127.0.0.1',
+                                     device_store=store)
+            server.set_audio_allowed_callback(lambda:True)
+            first = server._sessions.issue(first_device.summary.device_id)
+            second = server._sessions.issue(second_device.summary.device_id)
+            with TestClient(server.app) as client:
+                with client.websocket_connect(f'/ws?token={first.token}') as first_control:
+                    first_control.receive_json()
+                    with client.websocket_connect(f'/ws/phone-audio?token={first.token}') as first_audio:
+                        first_audio.receive_json()
+                        with client.websocket_connect(f'/ws?token={second.token}') as second_control:
+                            second_control.receive_json()
+                            client.portal.call(server.revoke_device, first_device.summary.device_id)
+                            with self.assertRaises(WebSocketDisconnect) as closed_control:
+                                first_control.receive_json()
+                            with self.assertRaises(WebSocketDisconnect) as closed_audio:
+                                first_audio.receive_json()
+                            self.assertEqual(closed_control.exception.code,4001)
+                            self.assertEqual(closed_audio.exception.code,4001)
+                            second_control.send_json({'type':'command','text':'still connected'})
+            self.assertEqual(server._command_queue.get_nowait(),'still connected')
+
+    def test_idle_control_and_audio_websockets_close_4001_at_absolute_expiry(self):
+        server = DashboardServer(public_url='https://example.test', host='127.0.0.1',
+                                 bearer_ttl_seconds=.04)
+        server.set_audio_allowed_callback(lambda:True)
+        record = server._sessions.issue(None)
+        with TestClient(server.app) as client:
+            with client.websocket_connect(f'/ws?token={record.token}') as control:
+                control.receive_json()
+                with client.websocket_connect(f'/ws/phone-audio?token={record.token}') as audio:
+                    audio.receive_json()
+                    time.sleep(.01)
+                    control.send_json({'type':'command','text':'active before expiry'})
+                    time.sleep(.05)
+                    with self.assertRaises(WebSocketDisconnect) as control_closed:
+                        control.receive_json()
+                    with self.assertRaises(WebSocketDisconnect) as audio_closed:
+                        audio.receive_json()
+        self.assertEqual(control_closed.exception.code,4001)
+        self.assertEqual(audio_closed.exception.code,4001)
+
+    def test_new_emergency_pair_rotates_only_transient_sessions(self):
         self.server.set_audio_allowed_callback(lambda:True)
+        durable = self.server._sessions.issue('durable-device')
         with TestClient(self.server.app) as client:
             with client.websocket_connect(f'/ws?token={self.token}') as control:
                 control.receive_json()
                 with client.websocket_connect(f'/ws/phone-audio?token={self.token}') as audio:
                     audio.receive_json()
-                    client.portal.call(self.server.new_key)
+                    with client.websocket_connect(f'/ws?token={durable.token}') as durable_control:
+                        durable_control.receive_json()
+                        client.portal.call(self.server.new_key)
+                        durable_control.send_json({'type':'command','text':'durable session remains'})
                     # Already-sent history may precede the close control frame.
                     with self.assertRaises(WebSocketDisconnect):
                         for _ in range(4):
@@ -102,6 +156,7 @@ class DashboardTests(unittest.TestCase):
                     with self.assertRaises(WebSocketDisconnect):
                         audio.receive_json()
         self.assertEqual(self.client.get('/api/status',headers=self.headers).status_code,401)
+        self.assertEqual(self.server._command_queue.get_nowait(),'durable session remains')
 
 
 class WebSocketHandshakeTests(unittest.IsolatedAsyncioTestCase):
@@ -189,6 +244,8 @@ class ControlTests(unittest.IsolatedAsyncioTestCase):
             async def close(**kwargs):pass
             ws.close=Mock(side_effect=close)
             server._clients.add(ws)
+            transient = server._sessions.issue(None)
+            server._register_socket(ws, transient.token)
             task=asyncio.create_task(server.serve_control(path))
             try:
                 for _ in range(100):

@@ -1,4 +1,5 @@
 """One-hour in-memory bearer sessions and durable dashboard login tests."""
+import asyncio
 import json
 import tempfile
 import unittest
@@ -215,6 +216,33 @@ class DurableDeviceLoginTests(unittest.TestCase):
         self.assertNotIn(response.json()["key"].encode(), after)
         self.assertNotIn(b"session_key", after)
         self.assertEqual(json.loads(after)["version"], 1)
+
+    def test_transient_pair_does_not_change_store_or_durable_bearers(self):
+        durable = self._login().json()
+        before = self.path.read_bytes()
+        key = self.server.new_key()
+        transient = self.client.post("/login", json={"pin": key}).json()
+
+        self.server.new_key()
+
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(self.client.get(
+            "/api/status", headers={"Authorization": f"Bearer {durable['token']}"}
+        ).status_code, 200)
+        self.assertEqual(self.client.get(
+            "/api/status", headers={"Authorization": f"Bearer {transient['token']}"}
+        ).status_code, 401)
+
+    def test_revocation_wins_a_concurrent_relogin_and_cannot_resurrect_device(self):
+        active = self._login().json()
+
+        summary = asyncio.run(self.server.revoke_device(self.device.summary.device_id))
+        relogin = self._login()
+
+        self.assertEqual(summary.device_id, self.device.summary.device_id)
+        self.assertIsNone(self.server._sessions.authenticate(active["token"]))
+        self.assertIsNone(self.store.verify(self.device.summary.device_id, self.device.secret))
+        self.assertEqual(relogin.status_code, 401)
 
 
 if __name__ == "__main__":

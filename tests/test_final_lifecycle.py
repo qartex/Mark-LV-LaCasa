@@ -14,6 +14,7 @@ from types import SimpleNamespace as NS
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
+from core.device_credentials import DeviceCredentialStore
 from dashboard.server import DashboardServer
 from ui_headless import JarvisUI
 
@@ -284,16 +285,27 @@ class PhoneClosureTests(LocalServiceFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.sent, [b'\x01\x00', 'end', b'\x02\x00', 'end'])
         self.assertFalse(self.live._input_stream_open)
 
-    async def test_revocation_closes_forwarded_input_even_before_route_finally(self):
+    async def test_revoked_audio_owner_emits_upstream_end_and_replacement_device_can_capture(self):
+        store = DeviceCredentialStore(self.root / 'devices.json')
+        first = store.create('First device')
+        replacement = store.create('Replacement device')
+        self.server._device_store = store
+        self.token = self.server._sessions.issue(first.summary.device_id).token
+        self.route = next(r.endpoint for r in self.server.app.routes if r.path == '/ws/phone-audio')
         phone, task = await self.phone()
         phone.pcm(b'\x01\x00')
         await eventually(lambda: self.sent)
-        self.server.new_key()
-        await asyncio.gather(*self.server._revocation_tasks)
+        await self.server.revoke_device(first.summary.device_id)
         await task
         await eventually(lambda: 'end' in self.sent)
         self.assertEqual(self.sent, [b'\x01\x00', 'end'])
         self.assertFalse(self.live._input_stream_open)
+        self.token = self.server._sessions.issue(replacement.summary.device_id).token
+        second, task = await self.phone()
+        second.pcm(b'\x02\x00')
+        second.end()
+        await task
+        await eventually(lambda: self.sent == [b'\x01\x00', 'end', b'\x02\x00', 'end'])
 
     async def test_abrupt_disconnect_discards_queued_pcm_but_preserves_closure(self):
         phone, task = await self.phone()
