@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import socket
+import stat
 import tempfile
 import time
 import unittest
@@ -14,6 +15,7 @@ from types import SimpleNamespace as NS
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
+from core.device_credentials import DeviceCredentialStore
 from dashboard.server import DashboardServer
 from ui_headless import JarvisUI
 
@@ -40,7 +42,9 @@ class LocalServiceFixture:
         self.patches = [
             patch.dict(os.environ, {'JARVIS_HEADLESS': 'true', 'JARVIS_CAPTURE_SOURCE': 'phone',
                 'JARVIS_BIND': '127.0.0.1', 'JARVIS_PUBLIC_URL': 'https://example.test',
-                'JARVIS_CONTROL_SOCKET': str(self.control)}),
+                'JARVIS_CONTROL_SOCKET': str(self.control),
+                'JARVIS_DEVICE_CREDENTIALS': str(self.root / 'device_credentials.json'),
+                'JARVIS_DEVICE_QR_DIR': str(self.root / 'device_qr')}),
             patch('dashboard.server.PORT', self.port),
             patch.object(main, 'API_CONFIG_PATH', cfg),
             patch('memory.config_manager.CONFIG_FILE', cfg),
@@ -150,6 +154,12 @@ class EssentialServerTests(LocalServiceFixture, unittest.IsolatedAsyncioTestCase
 
     async def test_model_starts_only_after_real_http_and_control_readiness_then_cleans_up(self):
         task = await self.start_ready()
+        self.assertEqual(stat.S_IMODE(self.control.stat().st_mode), 0o600)
+        dashboard = self.live._dashboard
+        self.assertIsNotNone(dashboard)
+        assert dashboard is not None
+        self.assertEqual(dashboard._device_store.path, self.root / 'device_credentials.json')
+        self.assertEqual(dashboard._qr_output_dir, self.root / 'device_qr')
         await self.stop_task(task)
         self.assertTrue(self.disconnected.is_set())
         self.assertFalse(self.control.exists())
@@ -207,6 +217,38 @@ class EssentialServerTests(LocalServiceFixture, unittest.IsolatedAsyncioTestCase
                     await self.live.run()
         self.assertEqual(caught.exception.code, 78)
 
+    async def test_corrupt_device_credentials_exit_config_before_model_connection(self):
+        credentials = self.root / 'device_credentials.json'
+        credentials.write_text('{not valid json', encoding='utf-8')
+        credentials.chmod(0o600)
+
+        caught: SystemExit | None = None
+        with patch.dict(os.environ, {'JARVIS_DEVICE_CREDENTIALS': str(credentials)}):
+            try:
+                await asyncio.wait_for(self.live.run(), .5)
+            except SystemExit as exc:
+                caught = exc
+            except TimeoutError:
+                pass
+        if caught is None:
+            self.fail('corrupt device credentials did not exit as configuration error')
+        self.assertEqual(caught.code, 78)
+        self.assertFalse(self.connecting.is_set(), 'model started before credential-store validation')
+        self.assertFalse(self.control.exists())
+
+    async def test_unsafe_qr_directory_exits_config_before_model_connection(self):
+        target = self.root / 'qr-target'
+        target.mkdir(mode=0o700)
+        unsafe = self.root / 'device_qr_link'
+        unsafe.symlink_to(target, target_is_directory=True)
+
+        with patch.dict(os.environ, {'JARVIS_DEVICE_QR_DIR': str(unsafe)}):
+            with self.assertRaises(SystemExit) as caught:
+                await asyncio.wait_for(self.live.run(), .5)
+        self.assertEqual(caught.exception.code, 78)
+        self.assertFalse(self.connecting.is_set(), 'model started before QR-path validation')
+        self.assertFalse(self.control.exists())
+
 
 class Phone:
     def __init__(self):
@@ -226,7 +268,7 @@ class PhoneClosureTests(LocalServiceFixture, unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.server = self.live._dashboard = DashboardServer()
         self.server.set_audio_allowed_callback(self.live.audio_allowed)
-        self.server._tokens.add('synthetic')
+        self.token = self.server._sessions.issue(None).token
         self.route = next(r.endpoint for r in self.server.app.routes if r.path == '/ws/phone-audio')
         self.live.out_queue = asyncio.Queue(maxsize=200)
         self.sent = []
@@ -242,7 +284,7 @@ class PhoneClosureTests(LocalServiceFixture, unittest.IsolatedAsyncioTestCase):
 
     async def phone(self):
         phone = Phone()
-        task = asyncio.create_task(self.route(phone, token='synthetic'))
+        task = asyncio.create_task(self.route(phone, token=self.token))
         self.tasks.append(task)
         await eventually(lambda: phone.messages)
         self.assertEqual(phone.messages[0], {'type':'audio_ready'})
@@ -265,16 +307,27 @@ class PhoneClosureTests(LocalServiceFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.sent, [b'\x01\x00', 'end', b'\x02\x00', 'end'])
         self.assertFalse(self.live._input_stream_open)
 
-    async def test_revocation_closes_forwarded_input_even_before_route_finally(self):
+    async def test_revoked_audio_owner_emits_upstream_end_and_replacement_device_can_capture(self):
+        store = DeviceCredentialStore(self.root / 'devices.json')
+        first = store.create('First device')
+        replacement = store.create('Replacement device')
+        self.server._device_store = store
+        self.token = self.server._sessions.issue(first.summary.device_id).token
+        self.route = next(r.endpoint for r in self.server.app.routes if r.path == '/ws/phone-audio')
         phone, task = await self.phone()
         phone.pcm(b'\x01\x00')
         await eventually(lambda: self.sent)
-        self.server.new_key()
-        await asyncio.gather(*self.server._revocation_tasks)
+        await self.server.revoke_device(first.summary.device_id)
         await task
         await eventually(lambda: 'end' in self.sent)
         self.assertEqual(self.sent, [b'\x01\x00', 'end'])
         self.assertFalse(self.live._input_stream_open)
+        self.token = self.server._sessions.issue(replacement.summary.device_id).token
+        second, task = await self.phone()
+        second.pcm(b'\x02\x00')
+        second.end()
+        await task
+        await eventually(lambda: self.sent == [b'\x01\x00', 'end', b'\x02\x00', 'end'])
 
     async def test_abrupt_disconnect_discards_queued_pcm_but_preserves_closure(self):
         phone, task = await self.phone()
@@ -387,11 +440,22 @@ main.main()
 
     def test_real_process_listener_failures_are_retryable_by_unit_policy(self):
         import configparser
+        unit_path = Path(__file__).resolve().parents[1] / 'deploy' / 'jarvis.service'
         unit = configparser.ConfigParser(interpolation=None, strict=False)
-        unit.read(Path(__file__).resolve().parents[1]/'deploy/jarvis.service')
+        unit.read(unit_path)
+        unit_text = unit_path.read_text(encoding='utf-8')
         self.assertEqual(unit['Service']['Restart'], 'on-failure')
+        self.assertEqual(unit['Service']['UMask'], '0077')
         prevented = set(unit['Service']['RestartPreventExitStatus'].split())
         self.assertIn('78', prevented)
+        self.assertIn(
+            'Environment=JARVIS_DEVICE_CREDENTIALS=%h/Mark-LV-LaCasa/config/device_credentials.json',
+            unit_text,
+        )
+        self.assertIn(
+            'Environment=JARVIS_DEVICE_QR_DIR=%h/Mark-LV-LaCasa/config/device_qr',
+            unit_text,
+        )
         with socket.socket() as occupied:
             occupied.bind(('127.0.0.1', self.port))
             occupied.listen()
@@ -403,6 +467,43 @@ main.main()
         failed = self.child()
         self.assertEqual(failed.returncode, 1, failed.stderr)
         self.assertNotIn(str(failed.returncode), prevented)
+
+
+class DurableDeploymentWiringTests(unittest.TestCase):
+    def test_restart_reauthenticates_same_store_and_exposes_no_admin_http_routes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            root.chmod(0o700)
+            store_path = root / 'device_credentials.json'
+            qr_path = root / 'device_qr'
+            first_store = DeviceCredentialStore(store_path)
+            created = first_store.create('LaCasa iPhone 1')
+
+            first = DashboardServer(
+                public_url='https://example.test', host='127.0.0.1',
+                device_store=first_store, qr_output_dir=qr_path,
+            )
+            first_response = TestClient(first.app).post('/api/device-login', json={
+                'device_id': created.summary.device_id, 'secret': created.secret,
+            })
+            self.assertEqual(first_response.status_code, 200)
+
+            restarted = DashboardServer(
+                public_url='https://example.test', host='127.0.0.1',
+                device_store=DeviceCredentialStore(store_path), qr_output_dir=qr_path,
+            )
+            second_response = TestClient(restarted.app).post('/api/device-login', json={
+                'device_id': created.summary.device_id, 'secret': created.secret,
+            })
+            self.assertEqual(second_response.status_code, 200)
+            self.assertNotEqual(
+                first_response.json()['token'], second_response.json()['token'],
+                'restart re-exchange reused an old in-memory bearer',
+            )
+            routes = {getattr(route, 'path', None) for route in restarted.app.routes}
+            for path in ('/api/revoke-devices', '/api/devices', '/api/device-create',
+                         '/api/device-list', '/api/device-revoke'):
+                self.assertNotIn(path, routes)
 
 
 class ServedHelpTests(unittest.TestCase):

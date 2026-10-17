@@ -7,6 +7,10 @@ import socket
 from pathlib import Path
 
 
+CONTROL_MAX_LINE_BYTES = 4096
+CONTROL_MAX_RESPONSE_BYTES = 65536
+
+
 def enabled() -> bool:
     return os.environ.get('JARVIS_HEADLESS', 'true').lower() not in ('0', 'false', 'no', 'off')
 
@@ -85,76 +89,100 @@ def control_path() -> Path:
     return Path(os.environ.get('JARVIS_CONTROL_SOCKET', str(base / 'jarvis' / 'control.sock')))
 
 
-def request_pair(path=None) -> str:
-    """Ask the running assistant, never create a disconnected dashboard."""
+def _request_line(payload: bytes, path: Path | None = None) -> dict:
+    """Use the one-line private control protocol without exposing server errors."""
+    if len(payload) > CONTROL_MAX_LINE_BYTES or not payload.endswith(b'\n'):
+        raise RuntimeError('Control request failed')
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
-        sock.settimeout(5)
-        sock.connect(str(path or control_path()))
-        sock.sendall(b'pair\n')
+        sock.settimeout(2)
+        try:
+            sock.connect(str(path or control_path()))
+            sock.sendall(payload)
+        except OSError as exc:
+            raise RuntimeError('Control request failed') from None
         result = b''
-        while b'\n' not in result and len(result) < 4096:
-            chunk = sock.recv(4096)
-            if not chunk:
-                break
-            result += chunk
-    reply = json.loads(result)
-    if 'url' not in reply:
+        try:
+            while b'\n' not in result and len(result) <= CONTROL_MAX_RESPONSE_BYTES:
+                chunk = sock.recv(min(4096, CONTROL_MAX_RESPONSE_BYTES + 1 - len(result)))
+                if not chunk:
+                    break
+                result += chunk
+        except OSError:
+            raise RuntimeError('Control request failed') from None
+    if (b'\n' not in result or len(result) > CONTROL_MAX_RESPONSE_BYTES
+            or result.index(b'\n') + 1 != len(result)):
+        raise RuntimeError('Control request failed')
+    try:
+        reply = json.loads(result)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise RuntimeError('Control request failed') from None
+    if not isinstance(reply, dict):
+        raise RuntimeError('Control request failed')
+    return reply
+
+
+def request_pair(path: Path | None = None) -> str:
+    """Ask the running assistant, never create a disconnected dashboard."""
+    reply = _request_line(b'pair\n', path)
+    if not isinstance(reply.get('url'), str):
         raise RuntimeError(reply.get('error', 'Pairing failed'))
     return reply['url']
 
 
-CONTROL_MAX_PAYLOAD = 4096
-CONTROL_TIMEOUT = 2
-
-
-def request_control(payload: dict, path: Path | None = None) -> dict:
-    data = json.dumps(payload).encode("utf-8")
-    if len(data) > CONTROL_MAX_PAYLOAD:
-        raise ValueError("control payload exceeds 4096 bytes")
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
-        sock.settimeout(CONTROL_TIMEOUT)
-        sock.connect(str(path or control_path()))
-        sock.sendall(data + b"\n")
-        result = b""
-        while b"\n" not in result and len(result) <= CONTROL_MAX_PAYLOAD:
-            chunk = sock.recv(4096)
-            if not chunk:
-                break
-            result += chunk
-        if not result:
-            raise RuntimeError("control socket closed before response")
-        idx = result.find(b"\n")
-        if idx == -1:
-            raise RuntimeError("control socket returned malformed response")
-        line = result[:idx]
-        if len(line) > CONTROL_MAX_PAYLOAD:
-            raise RuntimeError("control response exceeded 4096 bytes")
-    return json.loads(line.decode("utf-8"))
+def request_control(request: dict, path: Path | None = None) -> dict:
+    """Send one bounded JSON control request and return its bounded JSON response."""
+    if not isinstance(request, dict):
+        raise RuntimeError('Control request failed')
+    try:
+        payload = json.dumps(request, separators=(',', ':'), ensure_ascii=False).encode('utf-8') + b'\n'
+    except (TypeError, ValueError, UnicodeEncodeError):
+        raise RuntimeError('Control request failed') from None
+    return _request_line(payload, path)
 
 
 def main():
     parser = argparse.ArgumentParser(description='Private control of the running JARVIS instance')
-    parser.add_argument('command', choices=['pair', 'spotify-auth-start', 'spotify-auth-status'])
-    parser.add_argument('--socket', type=Path, default=control_path())
-    parser.add_argument('--client-id', dest='client_id', default=None)
+    commands = parser.add_subparsers(dest='command', required=True)
+    pair = commands.add_parser('pair')
+    pair.add_argument('--socket', type=Path, default=control_path())
+    create = commands.add_parser('device-create')
+    create.add_argument('--label', required=True)
+    create.add_argument('--socket', type=Path, default=control_path())
+    listing = commands.add_parser('device-list')
+    listing.add_argument('--socket', type=Path, default=control_path())
+    revoke = commands.add_parser('device-revoke')
+    revoke.add_argument('device_id')
+    revoke.add_argument('--socket', type=Path, default=control_path())
+    auth_start = commands.add_parser('spotify-auth-start')
+    auth_start.add_argument('--client-id', required=True)
+    auth_start.add_argument('--socket', type=Path, default=control_path())
+    auth_status = commands.add_parser('spotify-auth-status')
+    auth_status.add_argument('--socket', type=Path, default=control_path())
     args = parser.parse_args()
     try:
         if args.command == 'pair':
-            print(request_pair(args.socket))
+            print(request_pair(args.socket))  # explicit operator output, not a service log
+            return
+        request = {'command': args.command}
+        if args.command == 'device-create':
+            request['label'] = args.label
+        elif args.command == 'device-revoke':
+            request['device_id'] = args.device_id
         elif args.command == 'spotify-auth-start':
-            if not args.client_id:
-                parser.exit(1, 'spotify-auth-start requires --client-id\n')
-            reply = request_control({'command': 'spotify-auth-start', 'client_id': args.client_id}, args.socket)
-            if not reply.get('ok'):
-                parser.exit(1, f'Spotify authorization failed: {reply.get("error")}\n')
+            request['client_id'] = args.client_id
+        reply = request_control(request, args.socket)
+        if not reply.get('ok'):
+            raise RuntimeError('Control request failed')
+        if args.command == 'spotify-auth-start':
             print(reply['authorization_url'])
-        elif args.command == 'spotify-auth-status':
-            reply = request_control({'command': 'spotify-auth-status'}, args.socket)
-            if not reply.get('ok'):
-                parser.exit(1, f'Spotify status failed: {reply.get("error")}\n')
-            print(json.dumps(reply))
+            return
+        print(json.dumps(reply, separators=(',', ':'), ensure_ascii=False))
     except (OSError, ValueError, RuntimeError) as exc:
-        parser.exit(1, f'JARVIS control unavailable: {exc}\n')
+        if args.command == 'pair':
+            parser.exit(1, f'JARVIS pairing unavailable: {exc}\n')
+        if args.command.startswith('spotify-auth'):
+            parser.exit(1, f'JARVIS control unavailable: {exc}\n')
+        parser.exit(1, 'JARVIS control unavailable\n')
 
 
 if __name__ == '__main__':

@@ -18,6 +18,8 @@ config/spotify_oauth.json
 **/token*.json
 **/client_secret*.json
 *credentials*.json
+config/device_credentials.json
+config/device_qr/
 .env
 .env.*
 
