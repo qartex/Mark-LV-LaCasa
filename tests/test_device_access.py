@@ -117,21 +117,71 @@ class DeviceControlTests(unittest.IsolatedAsyncioTestCase):
             self.server.register_control_command("device-list", status_handler)
 
     async def test_device_create_artifact_failure_revokes_new_record_and_cleans_partial_files(self):
-        def fail_after_partial(created, public_url, output_dir):
-            output_dir.mkdir(mode=0o700)
-            partial = output_dir / f"{created.summary.device_id}.url"
-            partial.write_text("partial", encoding="utf-8")
-            partial.chmod(0o600)
-            raise RuntimeError("synthetic artifact failure")
-
-        with patch("core.device_credentials.write_device_artifacts", side_effect=fail_after_partial):
-            reply = await _control_request(self.path, b'{"command":"device-create","label":"Broken QR"}\n')
+        with patch("qrcode.QRCode.make_image", side_effect=RuntimeError("synthetic artifact failure")):
+            reply = await _control_request(
+                self.path,
+                b'{"command":"device-create","label":"Broken QR"}\n',
+            )
 
         devices = self.store.list_devices()
         self.assertFalse(reply["ok"])
         self.assertEqual(len(devices), 1)
         self.assertIsNotNone(devices[0].revoked_at)
         self.assertFalse(any((self.root / "qr").iterdir()), "artifact failure left partial output")
+
+    async def test_device_create_does_not_delete_preexisting_artifact(self):
+        created = self.store.create("Existing device")
+        output = self.root / "qr"
+        output.mkdir(mode=0o700, exist_ok=True)
+        preexisting = output / f"{created.summary.device_id}.url"
+        preexisting.write_text("operator-owned sentinel", encoding="utf-8")
+        preexisting.chmod(0o600)
+
+        with patch.object(self.store, "create", return_value=created):
+            reply = await _control_request(
+                self.path,
+                b'{"command":"device-create","label":"Replacement"}\n',
+            )
+
+        self.assertFalse(reply["ok"])
+        self.assertEqual(preexisting.read_text(encoding="utf-8"), "operator-owned sentinel")
+        self.assertIsNotNone(self.store.list_devices()[0].revoked_at)
+
+    async def _assert_rollback_failure_stops_control_service(self, rollback_error):
+        created = self.store.create("Rollback failure")
+        output = self.root / "qr"
+        output.mkdir(mode=0o700, exist_ok=True)
+        preexisting = output / f"{created.summary.device_id}.url"
+        preexisting.write_text("operator-owned sentinel", encoding="utf-8")
+        preexisting.chmod(0o600)
+
+        with patch.object(self.store, "create", return_value=created), \
+                patch.object(self.server, "revoke_device", side_effect=rollback_error):
+            with self.assertRaises(json.JSONDecodeError):
+                await _control_request(
+                    self.path,
+                    b'{"command":"device-create","label":"Broken rollback"}\n',
+                )
+            with self.assertRaises(DeviceCredentialConfigError):
+                await asyncio.wait_for(self.task, 2)
+
+        self.assertIsNone(self.store.list_devices()[0].revoked_at)
+        self.assertEqual(preexisting.read_text(encoding="utf-8"), "operator-owned sentinel")
+
+    async def test_device_create_config_rollback_failure_stops_control_service(self):
+        await self._assert_rollback_failure_stops_control_service(
+            DeviceCredentialConfigError("synthetic rollback failure")
+        )
+
+    async def test_device_create_runtime_rollback_failure_stops_control_service(self):
+        await self._assert_rollback_failure_stops_control_service(
+            RuntimeError("synthetic rollback failure")
+        )
+
+    async def test_device_create_value_rollback_failure_stops_control_service(self):
+        await self._assert_rollback_failure_stops_control_service(
+            ValueError("synthetic rollback failure")
+        )
 
 
 class DeviceCliTests(unittest.TestCase):

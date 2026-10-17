@@ -513,6 +513,8 @@ class DashboardServer:
             os.environ.get('JARVIS_DEVICE_QR_DIR') or BASE_DIR / 'config' / 'device_qr'
         )
         self._control_commands: dict[str, Callable[[dict[str, object]], Awaitable[dict[str, object]]]] = {}
+        self._control_server: asyncio.AbstractServer | None = None
+        self._control_fatal_error: device_credentials.DeviceCredentialConfigError | None = None
         self._aes_cache:  dict[str, bytes]= {}   # session_key → AES bytes
         self._clients: set[WebSocket]     = set()
         self._token_sockets: dict[str, set[WebSocket]] = {}
@@ -664,12 +666,23 @@ class DashboardServer:
                 created, self._public_url, self._qr_output_dir,
             )
         except Exception:
-            # Creation must not leave a usable credential or partial private artifact.
-            with contextlib.suppress(Exception):
-                for suffix in ('url', 'png'):
-                    (self._qr_output_dir / f'{created.summary.device_id}.{suffix}').unlink(missing_ok=True)
-            with contextlib.suppress(Exception):
-                await self.revoke_device(created.summary.device_id)
+            # write_device_artifacts owns descriptor-relative cleanup for files it
+            # created.  Never guess paths here: an exclusive-create failure may
+            # mean an operator-owned artifact already existed.
+            try:
+                revoked = await self.revoke_device(created.summary.device_id)
+            except Exception:
+                exc = device_credentials.DeviceCredentialConfigError(
+                    'unable to revoke incomplete device credential'
+                )
+                self._fail_control_configuration(exc)
+                raise exc from None
+            if revoked is None or revoked.revoked_at is None:
+                exc = device_credentials.DeviceCredentialConfigError(
+                    'unable to revoke incomplete device credential'
+                )
+                self._fail_control_configuration(exc)
+                raise exc
             return {'ok': False, 'error': 'Control request failed'}
         return {'ok': True, 'device': self._device_summary(created.summary),
                 'url_path': str(url_path), 'qr_path': str(qr_path)}
@@ -708,6 +721,14 @@ class DashboardServer:
         except Exception:
             return {'ok': False, 'error': 'Control request failed'}
         return reply if isinstance(reply, dict) else {'ok': False, 'error': 'Control request failed'}
+
+    def _fail_control_configuration(
+            self, exc: device_credentials.DeviceCredentialConfigError) -> None:
+        """Make a credential rollback failure fatal to the owning service."""
+        if self._control_fatal_error is None:
+            self._control_fatal_error = exc
+        if self._control_server is not None:
+            self._control_server.close()
 
     async def _receive_until_expiry(self, websocket: WebSocket, token: str, receive):
         record = self._sessions.authenticate(token)
@@ -856,11 +877,19 @@ class DashboardServer:
         binding = asyncio.create_task(asyncio.start_unix_server(handle, str(path), limit=CONTROL_MAX_LINE_BYTES))
         server = None
         try:
-            server = self._control_server = await asyncio.shield(binding)
+            server = await asyncio.shield(binding)
+            self._control_server = server
             async with server:
                 os.chmod(path, 0o600)
                 self._control_ready.set()
-                await server.serve_forever()
+                try:
+                    await server.serve_forever()
+                except asyncio.CancelledError:
+                    if self._control_fatal_error is not None:
+                        raise self._control_fatal_error
+                    raise
+                if self._control_fatal_error is not None:
+                    raise self._control_fatal_error
         finally:
             self._control_ready.clear()
             if server is None:
