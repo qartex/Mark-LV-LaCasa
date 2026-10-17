@@ -591,7 +591,8 @@ def _remove_unlink(path: Path) -> None:
 # --------------------------------------------------------------------------
 
 def _image_info_is_s3(stdout: str) -> bool:
-    return re.search(r"(?im)^\s*chip:\s*esp32-s3\b", stdout or "") is not None
+    # esptool 4 prints "chip: esp32-s3"; esptool 5 prints "Chip ID: 9 (ESP32-S3)".
+    return re.search(r"(?im)^\s*chip(?:\s+id)?:.*\besp32-s3\b", stdout or "") is not None
 
 
 def register_build(artifact, manifest_dir, runner: Runner, *,
