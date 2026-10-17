@@ -13,6 +13,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import core.device_credentials as credentials
 from core.device_credentials import DeviceCredentialConfigError, DeviceCredentialStore
 
 
@@ -164,18 +165,48 @@ class DeviceCredentialStoreTests(unittest.TestCase):
             self.store.list_devices()
         self.assertFalse(created.secret in self.path.read_text(errors="ignore"), "secret leaked into corrupt store")
 
+    def test_store_write_accepts_exact_limit_and_rejects_one_byte_over_without_replacement(self):
+        exact = b"x" * 1_048_576
+        with patch.object(credentials.json, "dumps", return_value=exact.decode("ascii")):
+            self.store._write([])
+        self.assertEqual(self.path.read_bytes(), exact)
+
+        with patch.object(credentials.json, "dumps", return_value="x" * (1_048_576 + 1)):
+            with self.assertRaises(DeviceCredentialConfigError):
+                self.store._write([])
+
+        self.assertEqual(self.path.read_bytes(), exact)
+
+    def test_store_rejects_symlinked_ancestor_without_writing_target_directory(self):
+        target = self.root / "target"
+        target.mkdir(mode=0o700)
+        nested = target / "nested"
+        nested.mkdir(mode=0o700)
+        ancestor = self.root / "ancestor"
+        ancestor.symlink_to(target, target_is_directory=True)
+        store = DeviceCredentialStore(ancestor / "nested" / "devices.json")
+
+        with self.assertRaises(DeviceCredentialConfigError):
+            store.create("LaCasa iPhone 1")
+
+        self.assertFalse((nested / "devices.json").exists())
+
     def test_atomic_write_never_exposes_partial_json(self):
         failures = []
+        observed_update = threading.Event()
         stop = threading.Event()
+
+        self.store.create("LaCasa iPhone 0")
 
         def read_while_writing():
             while not stop.is_set():
-                if self.path.exists():
-                    try:
-                        json.loads(self.path.read_bytes())
-                    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
-                        failures.append(type(exc).__name__)
-                        return
+                try:
+                    document = json.loads(self.path.read_bytes())
+                    if len(document["devices"]) > 1:
+                        observed_update.set()
+                except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+                    failures.append(type(exc).__name__)
+                    return
 
         reader = threading.Thread(target=read_while_writing)
         reader.start()
@@ -186,7 +217,8 @@ class DeviceCredentialStoreTests(unittest.TestCase):
             stop.set()
             reader.join()
         self.assertEqual(failures, [], "reader observed a partial credential store")
-        self.assertEqual(len(json.loads(self.path.read_bytes())["devices"]), 32)
+        self.assertTrue(observed_update.is_set(), "reader did not observe any atomic replacement")
+        self.assertEqual(len(json.loads(self.path.read_bytes())["devices"]), 33)
 
     def test_concurrent_creates_and_revoke_preserve_every_record(self):
         start = threading.Barrier(9)
@@ -280,3 +312,26 @@ class DeviceCredentialStoreTests(unittest.TestCase):
         observed = str(caught.exception) + log_stream.getvalue() + stdout.getvalue() + stderr.getvalue()
         self.assertFalse(created.secret in observed, "secret leaked through an artifact failure")
         self.assertFalse(any(output_dir.glob("*")), "artifact failure left a partial secret artifact")
+
+    def test_private_artifact_post_open_check_failure_removes_untracked_file(self):
+        directory_fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            with patch("core.device_credentials._checked_regular", side_effect=RuntimeError("synthetic check failure")):
+                with self.assertRaises(RuntimeError):
+                    credentials._create_private_file(directory_fd, "untracked.url")
+        finally:
+            os.close(directory_fd)
+
+        self.assertFalse((self.root / "untracked.url").exists())
+
+    def test_artifact_cleanup_failure_is_not_suppressed(self):
+        from core.device_credentials import write_device_artifacts
+        import qrcode
+
+        created = self.store.create("LaCasa iPhone 1")
+        output_dir = self.root / "qr"
+        with patch.object(qrcode.QRCode, "make", side_effect=RuntimeError("synthetic QR failure")), patch(
+            "core.device_credentials.os.unlink", side_effect=OSError("synthetic cleanup failure")
+        ):
+            with self.assertRaises(DeviceCredentialConfigError):
+                write_device_artifacts(created, "https://example.test", output_dir)

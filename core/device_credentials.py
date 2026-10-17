@@ -110,19 +110,44 @@ def _is_private(mode: int, required: int | None = None) -> bool:
 
 
 def _open_real_directory(path: Path, *, exact_mode: int | None = None) -> int:
-    """Open a checked directory without following its final path component."""
+    """Open a checked directory without following any path component."""
+    descriptor: int | None = None
     try:
-        before = os.lstat(path)
-        if not stat.S_ISDIR(before.st_mode) or stat.S_ISLNK(before.st_mode):
+        raw_path = os.fspath(path)
+        if not os.path.isabs(raw_path):
+            raw_path = os.path.join(os.getcwd(), raw_path)
+        parts = Path(raw_path).parts
+        if ".." in parts:
             raise DeviceCredentialConfigError("unsafe directory")
-        descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        descriptor = os.open(os.sep, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        before: os.stat_result | None = None
+        for name in parts[1:]:
+            before = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+            if not stat.S_ISDIR(before.st_mode) or stat.S_ISLNK(before.st_mode):
+                raise DeviceCredentialConfigError("unsafe directory")
+            next_descriptor = os.open(
+                name,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=descriptor,
+            )
+            opened = os.fstat(next_descriptor)
+            if (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino):
+                os.close(next_descriptor)
+                raise DeviceCredentialConfigError("unsafe directory")
+            os.close(descriptor)
+            descriptor = next_descriptor
         after = os.fstat(descriptor)
     except DeviceCredentialConfigError:
+        if descriptor is not None:
+            os.close(descriptor)
         raise
     except OSError as exc:
+        if descriptor is not None:
+            os.close(descriptor)
         raise DeviceCredentialConfigError("unsafe directory") from exc
     if (
-        not stat.S_ISDIR(after.st_mode)
+        before is None
+        or not stat.S_ISDIR(after.st_mode)
         or after.st_uid != _service_uid()
         or not _is_private(after.st_mode, exact_mode)
         or (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
@@ -157,6 +182,20 @@ def _write_all(descriptor: int, value: bytes) -> None:
         offset += os.write(descriptor, value[offset:])
 
 
+def _cleanup_private_files(directory_fd: int, names: list[str]) -> None:
+    cleanup_error: OSError | None = None
+    for name in names:
+        try:
+            # unlink removes a symlink itself and never follows it to its target.
+            os.unlink(name, dir_fd=directory_fd)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            cleanup_error = cleanup_error or exc
+    if cleanup_error is not None:
+        raise DeviceCredentialConfigError("unable to clean up device artifact") from cleanup_error
+
+
 class DeviceCredentialStore:
     """A process-local serialized registry of individually revocable credentials."""
 
@@ -171,6 +210,7 @@ class DeviceCredentialStore:
             if before is None:
                 return []
             _checked_regular(before, size_limit=_MAX_STORE_BYTES)
+            source_fd: int | None = None
             try:
                 source_fd = os.open(self.path.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
             except OSError as exc:
@@ -181,13 +221,11 @@ class DeviceCredentialStore:
                 if (before.st_dev, before.st_ino, before.st_size) != (opened.st_dev, opened.st_ino, opened.st_size):
                     raise DeviceCredentialConfigError("credential store changed during read")
                 with os.fdopen(source_fd, "rb", closefd=True) as source:
+                    source_fd = None
                     raw = source.read(_MAX_STORE_BYTES + 1)
             finally:
-                # fdopen owns source_fd only after it succeeds.
-                try:
+                if source_fd is not None:
                     os.close(source_fd)
-                except OSError:
-                    pass
             after = _entry_stat(directory_fd, self.path.name)
             if after is None or (opened.st_dev, opened.st_ino, opened.st_size) != (after.st_dev, after.st_ino, after.st_size):
                 raise DeviceCredentialConfigError("credential store changed during read")
@@ -232,6 +270,8 @@ class DeviceCredentialStore:
 
     def _write(self, records: list[dict[str, object]]) -> None:
         data = json.dumps({"version": _VERSION, "devices": records}, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        if len(data) > _MAX_STORE_BYTES:
+            raise DeviceCredentialConfigError("credential store exceeds size limit")
         directory_fd = _open_real_directory(self.path.parent)
         temporary_name = f".device-credentials-{secrets.token_hex(16)}"
         temporary_fd: int | None = None
@@ -356,8 +396,18 @@ def _create_private_file(directory_fd: int, name: str) -> int:
         raise DeviceCredentialConfigError("unable to create device artifact") from exc
     try:
         _checked_regular(os.fstat(descriptor))
-    except Exception:
-        os.close(descriptor)
+    except BaseException:
+        close_error: OSError | None = None
+        try:
+            os.close(descriptor)
+        except OSError as exc:
+            close_error = exc
+        try:
+            _cleanup_private_files(directory_fd, [name])
+        except DeviceCredentialConfigError:
+            raise
+        if close_error is not None:
+            raise DeviceCredentialConfigError("unable to clean up device artifact") from close_error
         raise
     return descriptor
 
@@ -395,20 +445,13 @@ def write_device_artifacts(created: CreatedDevice, public_url: str, output_dir: 
             artifact.flush()
             os.fsync(artifact.fileno())
         os.fsync(directory_fd)
-    except DeviceCredentialConfigError:
-        for name in made:
-            try:
-                os.unlink(name, dir_fd=directory_fd)
-            except OSError:
-                pass
+    except BaseException as exc:
+        _cleanup_private_files(directory_fd, made)
+        if isinstance(exc, DeviceCredentialConfigError):
+            raise
+        if isinstance(exc, Exception):
+            raise RuntimeError("unable to create device artifact") from None
         raise
-    except Exception:
-        for name in made:
-            try:
-                os.unlink(name, dir_fd=directory_fd)
-            except OSError:
-                pass
-        raise RuntimeError("unable to create device artifact") from None
     finally:
         os.close(directory_fd)
     return output_dir / url_name, output_dir / png_name
