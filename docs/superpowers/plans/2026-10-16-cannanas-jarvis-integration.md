@@ -130,15 +130,15 @@
 - Restart policy (`on_child_exit`): exactly one restart with bounded backoff (e.g. 1 s, then give up); after restart, pending confirmations are invalidated (coordinator hook) and the initialize/version verification repeats; if restart fails, mark Cannanas degraded, never kill JARVIS.
 - Child environment passes only the four adapter variables plus a bare PATH; TLS/origin policy is enforced adapter-side (client config only pins release/SHA and budgets).
 
-- [ ] **Step 1: Write failing client tests** (against `tests/fixtures/fake_adapter.py`)
+- [x] **Step 1: Write failing client tests** (against `tests/fixtures/fake_adapter.py`)
   - `TestInitBudget10s`, `TestToolBudget25s`, `TestSinglePersistentSession`, `TestExactToolSetVerified`, `TestVersionAndSHAPinned`, `TestChildExitRestartsOnce`, `TestRestartInvalidatesCoordinatorHook`, `TestMissingBinaryDegradesNotCrashes`.
 
-- [ ] **Step 2: Implement** — client class + fixture; wire the coordinator-invalidated hook via a callback (defined as a stub; Task 6 supplies it).
+- [x] **Step 2: Implement** — client class + fixture; wire the coordinator-invalidated hook via a callback (defined as a stub; Task 6 supplies it).
 
-- [ ] **Step 3: Run tests GREEN**
+- [x] **Step 3: Run tests GREEN**
   - `/root/.hermes/cache/scratch/marklv-task1-venv/bin/python -m unittest tests.test_cannanas_client -v`
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
   - `git add core/cannanas_client.py tests/fixtures/fake_adapter.py tests/test_cannanas_client.py requirements-headless.txt`
   - `git commit -m "feat(cannanas): persistent serialized MCP client with budgets and restart fence"`
 
@@ -158,15 +158,15 @@
 - For reads, audit failure is non-fatal and produces exactly one bounded operator warning.
 - Never persisted: bearer values, MCP confirmation tokens/nonces, durable phone secrets, Gemini session material, raw API responses.
 
-- [ ] **Step 1: Write failing audit tests**
+- [x] **Step 1: Write failing audit tests**
   - `TestAuditAppends0640`, `TestAuditSecretFree`, `TestAuditPreCommitBeforePost`, `TestAuditUnavailableFailsWriteClosed`, `TestReadAuditFailureDegradesWithWarning`, `TestSymlinkedAuditRefused`.
 
-- [ ] **Step 2: Implement** — audit module only; plugin wiring is Task 7.
+- [x] **Step 2: Implement** — audit module only; plugin wiring is Task 7.
 
-- [ ] **Step 3: Run tests GREEN**
+- [x] **Step 3: Run tests GREEN**
   - `/root/.hermes/cache/scratch/marklv-task1-venv/bin/python -m unittest tests.test_cannanas_audit -v`
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
   - `git add core/cannanas_audit.py tests/test_cannanas_audit.py`
   - `git commit -m "feat(cannanas): fail-closed 0640 audit written before POST"`
 
@@ -188,15 +188,15 @@
   - Fence hooks: called from the client's restart path (Task 4) and from JARVIS startup — process-lifetime in-memory + persistence of nothing; a JARVIS restart therefore fences by construction.
 - `core/cannanas_host.py` skeleton: `adapter_boot_id()` (fresh per JARVIS process, supplied to prepare/confirm), `confirmation_grammar(text) -> {"affirm" | "deny" | "none"}` — the deterministic bounded German affirmative/cancel grammar (e.g. exact "ja", "bestätigen", "abbrechen", "nein" forms with bounded variants; everything else `none`, no fuzzy matching).
 
-- [ ] **Step 1: Write failing coordinator tests**
+- [x] **Step 1: Write failing coordinator tests**
   - `TestStoreReplacesPreviousPending`, `TestConsumeAtomicExactlyOneExecutor` (two threads, one wins, one typed refusal), `TestConsumeRejectsWrongSessionDeviceTurnBoot`, `TestConsumeRejectsExpiredAndReplay`, `TestCancelClearsPending`, `TestTokenNeverVisible`, `TestRestartInvalidatesAll`, `TestGrammarBounded`.
 
-- [ ] **Step 2: Implement** — coordinator; keep it free of network imports so unit tests stay fast.
+- [x] **Step 2: Implement** — coordinator; keep it free of network imports so unit tests stay fast.
 
-- [ ] **Step 3: Run tests GREEN**
+- [x] **Step 3: Run tests GREEN**
   - `/root/.hermes/cache/scratch/marklv-task1-venv/bin/python -m unittest tests.test_confirmation_coordinator -v`
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
   - `git add core/cannanas_confirmation.py core/cannanas_host.py tests/test_confirmation_coordinator.py`
   - `git commit -m "feat(cannanas): host-side confirmation coordinator with atomic consume"`
 
@@ -223,17 +223,17 @@
 - Degraded readiness: missing vars (`JARVIS_CANNANAS_*` for host, adapter env vars pinned in deploy), client absence, or version/SHA mismatch → Cannanas returns fixed German unavailability and JARVIS, Spotify, HA keep running; state observable in the activity log without secrets.
 - Restart/retry rules (design *Packaging...* §6): read → one restart + one retry when no response may have been committed; prepare → restart invalidates preview, new prepare required; confirm → never retried, `unknown` until reconciled.
 
-- [ ] **Step 1: Write failing plugin + integration tests** (client mocked with the Task 4 fixture or a stub)
+- [x] **Step 1: Write failing plugin + integration tests** (client mocked with the Task 4 fixture or a stub)
   - `TestEnumClosedAtRegistry`, `TestReadActionCallsAdapterAndProjects`, `TestPrepareStoresPendingAndReturnsPreview`, `TestPrepareZeroPOSTs`, `TestHostConfirmConsumesAtomicallyAndPostsOnce`, `TestHostConfirmWrongSessionRefused`, `TestPostSendTimeoutIsUnknownNotRetried`, `TestRegistryRestartInvalidatesPending`, `TestDegradedCannanasKeepsJARVISAlive`, `TestMissingConfigFailsBeforeNetwork`, `TestCannabisStatusStillDenied`.
 
-- [ ] **Step 2: Implement** — plugin + host wiring; keep `plugins/cannanas.py` free of direct `httpx`/REST imports (adapter is the only network path).
+- [x] **Step 2: Implement** — plugin + host wiring; keep `plugins/cannanas.py` free of direct `httpx`/REST imports (adapter is the only network path).
 
-- [ ] **Step 3: Run tests GREEN**
+- [x] **Step 3: Run tests GREEN**
   - `/root/.hermes/cache/scratch/marklv-task1-venv/bin/python -m unittest tests.test_cannanas_plugin tests.test_cannanas_integration -v`
 
-- [ ] **Step 4: Run the full suite** — `... -m unittest discover -s tests -v`; expected: 293 + new, all green (Spotify/HA/phone/half-duplex untouched).
+- [x] **Step 4: Run the full suite** — `... -m unittest discover -s tests -v`; expected: 293 + new, all green (Spotify/HA/phone/half-duplex untouched).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
   - `git add plugins/cannanas.py core/headless.py core/cannanas_host.py main.py tests/test_cannanas_plugin.py tests/test_cannanas_integration.py`
   - `git commit -m "feat(cannanas): wire trusted plugin to adapter client, coordinator, and audit"`
 
