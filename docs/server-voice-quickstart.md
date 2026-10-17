@@ -102,9 +102,9 @@ Erwartet: Seite **200**, TLS-Prüfung **0**, nicht angemeldeter Status **401**. 
 ## Sichere Funktionsgrenzen dieses Meilensteins
 
 - Home Assistant ist **lesend** verfügbar: echte Zustände, Geräteübersicht und Temperaturen in °C. Schalten und gefährliche Desktop-/Shell-/Shutdown-Aktionen sind in diesem ersten Servermodus gesperrt.
-- Cannanas-Abfragen/-Änderungen sind noch nicht als funktionierender Bestandteil dieser Sprachstrecke freigegeben. Keine geratenen API-Endpunkte oder CLI-Pakete als Ersatz installieren.
+- Cannanas-Sprachaktionen (Lesen + zweistufiges Schreiben) sind jetzt Bestandteil dieser Sprachstrecke; Details im Abschnitt „Cannanas" unten. Sie werden erst nach der Operator-Abnahme (Adapter-Installation, eigener Schlüssel, Live-Abnahme) am Zielserver freigeschaltet. Keine geratenen API-Endpunkte oder CLI-Pakete als Ersatz installieren.
 - Telegram, iPhone-Audioausgabe und Raumsatelliten sind nicht Bestandteil dieser ersten Abnahme.
-- Konfigurations- und Zugangsdaten liegen nur lokal; kein HA- oder Gemini-Schlüssel wird hier dokumentiert.
+- Konfigurations- und Zugangsdaten liegen nur lokal; kein HA-, Gemini- oder Cannanas-Schlüssel wird hier dokumentiert.
 
 ## Tatsächlich geprüfte Ebenen
 
@@ -145,3 +145,40 @@ Safe troubleshooting:
 - Network errors appear as "Spotify API ist zurzeit nicht erreichbar" in the assistant output.
 
 These steps are explicitly deferred to the separate durable-device plan; current transient `pair` instructions stay valid.
+
+## Cannanas im Sprachbefehl
+
+Cannanas ist über die gesprochene Steuerung erreichbar. Die Antworten sind kurz und gebunden: Listen mit **höchstens fünf namentlich genannten** Einträgen, strukturell höchstens 25 Einträge pro Antwort. Bei nicht abgeprüften Mengen sagt JARVIS bewusst „mindestens“. Die komplette Architektur und die Operator-Schritte stehen in `docs/cannanas-jarvis-integration.md`; die Installation des gepinnten Adapters steht in `deploy/cannanas/README-DEPLOY.md`.
+
+### Lesen (direkt, ohne Bestätigung)
+
+Beispiele auf dem iPhone oder am Serverlautsprecher:
+
+- „Wie viele Pflanzen stehen im Wachraum?“
+- „Welche Pflanzen stehen in der Blüte?“
+- „Welche Batches wurden zuletzt angelegt?“
+- „Welches Vermehrungsmaterial ist verfügbar?“
+
+### Schreiben (immer zweistufig)
+
+Jeder Schreibvorgang braucht zwei getrennte Äußerungen und läuft **über den Serverhost, nie über das Sprachmodell**:
+
+1. **Vorbereiten:** „Lege eine Pflanze mit dem Namen X im Wachraum an.“ JARVIS liest die **komplette Vorschau** jedes zu schreibenden Feldes vor und fragt dann direkt: „Bitte bestätigen Sie mit einem klaren „ja“, oder sagen Sie „abbrechen“." In diesem Schritt wurde noch nichts geschrieben.
+2. **Bestätigen:** Erst eine **spätere**, abgeschlossene Äußerung mit exakt einem der Bestätigungsworte löst das Speichern aus. Das Modell kann nicht selbst bestätigen; Bestätigungsnummern oder Kennungen werden ihm nie gezeigt.
+
+Die Bestätigungs-Grammatik ist geschlossen und deterministisch — nur diese Formen zählen:
+
+- **Zustimmen:** „ja“, „ok“, „okay“, „bestätigen“, „bestätige“, „bitte bestätigen“, „ja bitte“, „speichern“, „speichere“
+- **Abbrechen:** „nein“, „abbrechen“, „brich ab“, „abbruch“, „stop“, „stopp“, „stoppe“, „stoppen“
+
+Jedes andere Gesagte (inklusive sinngemäßer Zustimmung) ist **keine** Bestätigung; die Vorschau bleibt dann fünf Minuten lang bestehen. Alles Weitere bleibt im Modellpfad.
+
+### Was zuverlässig geschützt ist
+
+- Pro Gerät gilt nur **ein** ausstehender Vorgang; eine neue Vorbereitung verwirft die vorherige Vorschau. Jede Vorschau läuft nach **fünf Minuten** ab; danach ist erneut vorzubereiten.
+- **STOP** oder eine unterbrochene Aufnahme bestätigt nie etwas: STOP verwirft die offene Preview, ohne etwas zu schreiben.
+- Nur das Gerät, dessen Mikrofontaste die Vorbereitung ausgelöst hat, kann seine eigene Preview bestätigen; unterbrochene, verschränkte oder widerrufene Geräte haben keinerlei Bestätigungsmöglichkeit.
+- Nach einem Neustart von JARVIS **oder** des Adapters ist jede ausstehende Preview veraltet — es ist dann erneut vorzubereiten.
+- Schlägt die Schreibprüfung oder die Adapter-Verbindung fehl, bleiben Spotify, Home Assistant und JARVIS-Gespräche vollständig aktiv; die Meldung ist eine kurze deutsche Störungszeile statt einer ausführlichen Diagnose.
+
+Die zugehörigen Zugangsdaten stehen ausschließlich lokal (Template: `deploy/cannanas/cannanas-adapter.credentials.example`); nie in Git, Chat oder Dokumentation. Keine Klubkennung oder Bestätigungsnummer steht in den Modellergebnissen, Logs im Dashboard oder Antworten.
