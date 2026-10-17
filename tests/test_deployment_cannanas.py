@@ -92,6 +92,16 @@ class TestUnitStillParses(unittest.TestCase):
             self.assertIn(keep, text)
         self.assertEqual(text.count('ExecStart='), 1)
 
+    def test_unit_pins_adapter_command_and_host_audit_paths(self):
+        text = UNIT.read_text()
+        self.assertIn(
+            'Environment=JARVIS_CANNANAS_ADAPTER_COMMAND='
+            '/opt/cannanas/adapter/venv/bin/cannanas-mcp-adapter',
+            text,
+        )
+        self.assertIn('Environment=JARVIS_CANNANAS_AUDIT_FILE=%h/cannanas-adapter/audit/jarvis-write-audit.jsonl',
+                      text)
+
     def test_unit_sections_still_parse(self):
         text = UNIT.read_text()
         for section in ('[Unit]', '[Service]', '[Install]'):
