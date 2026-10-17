@@ -512,7 +512,7 @@ class SpotifyOAuth:
         try:
             body = response.json()
         except Exception as exc:
-            raise SpotifyAPIError("malformed refresh response") from exc
+            raise SpotifyAPIError("bad_response", "malformed refresh response") from exc
         if not isinstance(body, dict) or "access_token" not in body:
             raise SpotifyAPIError("bad_response", "malformed refresh response")
         access_token = body["access_token"]
