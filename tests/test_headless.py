@@ -12,8 +12,16 @@ from ui_headless import JarvisUI
 class HeadlessTests(unittest.IsolatedAsyncioTestCase):
     def make_live(self):
         import main
+        from core.turn_provenance import CHANNEL_HTTP_TEXT, create_stable
+        from core.user_turn import finalize_turn
         with patch('memory.config_manager.load_api_keys', return_value={'gemini_api_key': 'test-key'}):
-            return main.JarvisLive(JarvisUI())
+            live = main.JarvisLive(JarvisUI())
+        # Dispatch tests represent the steady state after a finalized input
+        # turn; pre-finalization rejection has its own test in test_turn_finalization.
+        live._finalized_turn = finalize_turn(create_stable(
+            CHANNEL_HTTP_TEXT, stable_device_id='durable-device',
+            auth_session_id='auth-session-test', final=True))
+        return live
 
     def test_confirmation_fails_closed(self):
         from core import confirm

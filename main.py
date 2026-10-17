@@ -45,6 +45,7 @@ from datetime import datetime
 from pathlib import Path
 
 from core import headless
+from core import user_turn
 import numpy as np
 from google import genai
 from google.genai import types
@@ -571,6 +572,8 @@ class JarvisLive:
         self._input_stream_open = False
         self._input_epoch = None
         self._input_capture = None
+        # The currently finalized user turn (provenance envelope context, headless).
+        self._finalized_turn = None
         # Transcript-driven mouth shapes for the avatar. Fed from the receive
         # loop as words arrive, drained by the playback loop against the audio.
         self._visemes              = VisemeStream()
@@ -1172,6 +1175,14 @@ class JarvisLive:
         if headless.enabled() and not headless.tool_allowed(name, args):
             return types.FunctionResponse(id=fc.id, name=name,
                                           response={'error': 'Headless policy: tool/action denied'})
+        finalized_turn = self._finalized_turn
+        if (headless.enabled() and finalized_turn is None) or (
+                headless.enabled() and self._input_stream_open):
+            # A tool call may only act on a finalized user turn while the
+            # current input is settled: before finalization nothing can count
+            # as the user's turn (and nothing may be confirmed).
+            return types.FunctionResponse(id=fc.id, name=name,
+                                          response={'error': 'Headless policy: no finalized user turn'})
 
         print(f"[JARVIS] 🔧 {name}  {args}")
         self.ui.set_state("THINKING")
@@ -1306,7 +1317,8 @@ class JarvisLive:
                 if self._plugin_registry.has(name):
                     r = await loop.run_in_executor(
                         None,
-                        lambda: self._plugin_registry.run(name, args, player=self.ui, session_memory=None)
+                        lambda: self._plugin_registry.run(
+                            name, args, player=self.ui, session_memory=finalized_turn)
                     )
                     result = r or "Done."
                 else:
@@ -1351,6 +1363,14 @@ class JarvisLive:
                 if (self._input_stream_open and
                         self._input_capture == (msg.get('epoch'), msg.get('capture'))):
                     self._input_stream_open = False
+                    envelope = msg.get('envelope')
+                    if envelope is not None:
+                        # The completed capture finalizes: this user turn is now
+                        # the only provenance context tool dispatch may act on.
+                        try:
+                            self._finalized_turn = user_turn.finalize_turn(envelope)
+                        except (ValueError, TypeError):
+                            pass
                     await self.session.send_realtime_input(audio_stream_end=True)
                 continue
             if headless.capture_source() == 'phone':
@@ -2244,6 +2264,15 @@ class JarvisLive:
                         break
                     await asyncio.sleep(0.1)
                 if self.session:
+                    # Finalize the completed text input before the model may
+                    # react to it: no confirmation or tool call can precede
+                    # this registration.
+                    envelope = getattr(text, 'envelope', None)
+                    if envelope is not None:
+                        try:
+                            self._finalized_turn = user_turn.finalize_turn(envelope)
+                        except (ValueError, TypeError):
+                            self._finalized_turn = None
                     # A remote command is deliberate control and the phone user
                     # has no desktop WAKE button — so it wakes JARVIS if asleep.
                     if self._wake_enabled and not self._awake:

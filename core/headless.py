@@ -28,6 +28,12 @@ def tool_allowed(name: str, args: dict) -> bool:
     if name == 'spotify_control' and args.get('action') in (
             'play', 'pause', 'resume', 'next', 'previous', 'volume', 'current'):
         return True
+    if name == 'cannanas':
+        # Closed action enum only: confirm/cancel host operations, arbitrary
+        # MCP tool names, HTTP verbs and everything else are denied here,
+        # before any dispatch.
+        from core.cannanas_actions import CANNANAS_MODEL_ACTIONS
+        return args.get('action') in CANNANAS_MODEL_ACTIONS
     return False
 
 
