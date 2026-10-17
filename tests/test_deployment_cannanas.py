@@ -108,22 +108,23 @@ class TestUnitStillParses(unittest.TestCase):
                             if section == '[Unit]' else len(text))
 
 
-class TestInstallerUsesConstraintsMode(unittest.TestCase):
-    """The lock pins the adapter itself: it must ride as -c constraints, not -r
-    requirements, otherwise pip tries to fetch the adapter from an index."""
+class TestInstallerHashPinnedInstall(unittest.TestCase):
+    """The lock pins the adapter itself with its own hash: pip installs the
+    hash-annotated lock plus a generated adapter spec line directly."""
 
-    def test_install_uses_constraints_not_requirements(self):
+    def test_install_installs_the_hashed_lock_with_the_adapter_spec(self):
         script = SCRIPT.read_text()
-        self.assertIn('-c "$constraints"', script)
-        self.assertNotIn('-r "$constraints"', script)
-        # pip require-hashes demands the hash on the requirement itself: the
-        # installer generates a one-line pin spec with the locked hash, installs
-        # fully offline (--no-index) via --find-links, and cleans the spec up.
-        self.assertIn('--hash=sha256:${PINNED_SHA256}', script)
-        self.assertIn('--require-hashes', script)
-        self.assertIn('--no-index', script)
+        # pip require-hashes needs the hash on each requirement: the installer
+        # appends the hash-annotated lock to a generated adapter spec and
+        # installs exactly that (no constraints mode, no index fetches of the
+        # adapter itself beyond hash-checked find-links resolution).
+        self.assertIn("printf 'cannanas-mcp-adapter==%s --hash=sha256:%s", script)
+        self.assertIn('cat "$constraints" >> "$reqspec"', script)
         self.assertIn('--find-links "$wheel_dir"', script)
+        self.assertIn('--require-hashes', script)
         self.assertIn('rm -f "$reqspec"', script)
+        self.assertNotIn('-r "$constraints"', script)
+        self.assertNotIn('-c "$constraints"', script)
 
 
 class TestNoNewSockets(unittest.TestCase):

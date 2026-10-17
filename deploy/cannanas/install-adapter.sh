@@ -111,23 +111,21 @@ PY
   mkdir -p "$venv"
   python3 -m venv "$venv" || die "venv creation failed"
   local pip_args=(install --no-deps)
+  local wheel_dir reqspec
+  wheel_dir="$(cd "$(dirname "$wheel")" && pwd)"
+  # The lock (hash-annotated, includes the adapter itself) plus a freshly
+  # generated adapter spec line: pip installs every pinned artifact resolved
+  # by hash. --no-deps is safe because the lock covers all dependencies.
+  reqspec="$(mktemp "$wheel_dir/require-XXXXXX.txt")"
+  printf 'cannanas-mcp-adapter==%s --hash=sha256:%s\n' "$PINNED_VERSION" "$PINNED_SHA256" > "$reqspec"
   if [ -n "$constraints" ]; then
     [ -f "$constraints" ] || die "constraints lock not found"
-    # Constraints (-c), not requirements (-r): the lock also pins the adapter
-    # itself, which must come only from the verified wheel argument.
-    pip_args+=(-c "$constraints")
+    cat "$constraints" >> "$reqspec"
   fi
-  local wheel_dir pinned_spec reqspec
-  wheel_dir="$(cd "$(dirname "$wheel")" && pwd)"
-  pinned_spec="cannanas-mcp-adapter==${PINNED_VERSION} --hash=sha256:${PINNED_SHA256}"
-  reqspec="$(mktemp "$wheel_dir/require-XXXXXX.txt")"
-  printf '%s\n' "$pinned_spec" > "$reqspec"
-  # --no-index + --require-hashes keeps the install fully local and hash-checked;
-  # the constraint lock stays as -c for any future dependency install.
-  pip_args+=(--no-index --find-links "$wheel_dir" --require-hashes -r "$reqspec")
+  pip_args+=(--find-links "$wheel_dir" --require-hashes -r "$reqspec")
   local install_log
   if ! install_log="$("$venv/bin/pip" "${pip_args[@]}" 2>&1)"; then
-    printf '%s\n' "$install_log" | tail -4 >&2
+    printf '%s\n' "$install_log" | tail -6 >&2
     rm -f "$reqspec"
     die "pip install failed"
   fi
