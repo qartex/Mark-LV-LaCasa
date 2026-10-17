@@ -33,7 +33,7 @@ Gemini  ⇄ single trusted tool "cannanas" (closed action enum, plugins/cannanas
         ▼
 core/cannanas_host.py (CannanasHost)
   ├─ persistent serialized MCP STDIO client (core/cannanas_client.py)
-  │    pinned release 1.0.0 + wheel SHA; boot verifies the exact tool set
+  │    pinned release 1.0.1 + wheel SHA; boot verifies the exact tool set
   ├─ ConfirmationCoordinator (core/cannanas_confirmation.py) — in-memory,
   │    one pending per device, atomic pending→executing consume
   ├─ host-only confirmation grammar (exact German forms, no fuzzy match)
@@ -119,7 +119,7 @@ integration work**.
    ```sh
    deploy/cannanas/install-adapter.sh --verify <wheel>
    sha256sum <wheel>   # must equal the pinned
-   # 8349fbd2fc6a3761334e035c06077e4e2f3eff3ee7da2b7bf001de7c709e113c
+   # 7085943afc149d3f2356fca66d8a9d0bac9c2576166e99e36093a56b87153f5f
    ```
    The same pinned SHA is compiled into `core/cannanas_client.py`
    (`PINNED_WHEEL_SHA256`) and is verified again at every child start.

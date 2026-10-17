@@ -218,7 +218,7 @@ Found while reading the canonical bridge (all must be fixed in the package; none
 
 - [ ] **Step 3: Hermes-side smoke check** — run the wheel-based adapter from a short-lived smoke venv next to the existing Hermes configuration using *dummy* env values and the fixture transport; do not restart the Hermes service in this task.
 
-- [ ] **Step 4: Commit** — `feat: build and pin adapter release 1.0.0 with hashed constraints`
+- [ ] **Step 4: Commit** — `feat: build and pin adapter release 1.0.1 with hashed constraints`
 
 ---
 

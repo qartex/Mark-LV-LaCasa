@@ -11,7 +11,7 @@ REPO = Path(__file__).resolve().parent.parent
 SCRIPT = REPO / 'deploy' / 'cannanas' / 'install-adapter.sh'
 CREDENTIALS_EXAMPLE = REPO / 'deploy' / 'cannanas' / 'cannanas-adapter.credentials.example'
 UNIT = REPO / 'deploy' / 'jarvis.service'
-PINNED_SHA = '8349fbd2fc6a3761334e035c06077e4e2f3eff3ee7da2b7bf001de7c709e113c'
+PINNED_SHA = '7085943afc149d3f2356fca66d8a9d0bac9c2576166e99e36093a56b87153f5f'
 ADAPTER_VARS = ('CANNANAS_API_KEY', 'CANNANAS_CLUB_ID',
                 'CANNANAS_STATE_DIR', 'CANNANAS_AUDIT_FILE')
 

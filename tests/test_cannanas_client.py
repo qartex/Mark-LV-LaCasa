@@ -15,7 +15,7 @@ EXPECTED_TOOLS = [
     'confirm_batch_update', 'prepare_diary_create', 'confirm_diary_create',
 ]
 
-PINNED_VERSION = '1.0.0'
+PINNED_VERSION = '1.0.1'
 PINNED_SHA = 'a' * 64
 
 
@@ -124,7 +124,7 @@ class TestVersionAndSHAPinned(ClientFixture):
         from core.cannanas_client import PINNED_ADAPTER_VERSION, PINNED_WHEEL_SHA256
         self.assertEqual(PINNED_ADAPTER_VERSION, PINNED_VERSION)
         self.assertEqual(PINNED_WHEEL_SHA256,
-                         '8349fbd2fc6a3761334e035c06077e4e2f3eff3ee7da2b7bf001de7c709e113c')
+                         '7085943afc149d3f2356fca66d8a9d0bac9c2576166e99e36093a56b87153f5f')
 
 
 class TestChildExitRestartsOnce(ClientFixture):
