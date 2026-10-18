@@ -40,6 +40,8 @@ TRANSCRIPT_MARKER = "SPOKEN-TRANSCRIPT-LEAK-TOKEN-b9d3"
 CONVERSATION_ID = "conv-satellite-01"
 LOOPBACK = "127.0.0.1"
 REPLY_PCM = bytes(range(256)) * 8  # 2048 bytes of fake 16-bit mono PCM
+# ~0.25 peak-amplitude square wave: well above the silence threshold.
+LOUD_PCM = (b"\x00\x40" * 64) * 4
 
 LOG_NAME = "esp32_jarvis_bridge"
 
@@ -131,6 +133,7 @@ class FakeTurnEngine:
     def __init__(self, transcript=TRANSCRIPT_MARKER, reply=REPLY_PCM):
         self.calls = []
         self.result = (transcript, reply)
+        self.resets = 0
         self.gate: asyncio.Future | None = None  # optional: keep the turn pending under test control
 
     async def turn(self, mic_pcm):
@@ -138,6 +141,9 @@ class FakeTurnEngine:
         if self.gate is not None:
             await self.gate
         return self.result
+
+    def reset_conversation(self):
+        self.resets += 1
 
 
 def make_bridge(**overrides):
@@ -332,9 +338,15 @@ class MicAccumulationTests(unittest.IsolatedAsyncioTestCase):
         await stop(False)  # never started, no chunks
         self.assertTrue(await _wait_for(lambda: not (b._turn_task and not b._turn_task.done())))
         self.assertEqual([], engine.calls)
+        # A silent turn ends the conversation: no audio, no TTS, but the device
+        # must be released from its listening state with RUN_END.
         self.assertEqual(
-            [("subscribe", None)],
-            [op for op in client.ops if op[0] != "close"],
+            [("subscribe", None), ("event", "VOICE_ASSISTANT_RUN_END")],
+            [
+                (op[0], op[1] if op[0] == "subscribe" else op[1].name)
+                for op in client.ops
+                if op[0] != "close"
+            ],
         )
         client.hang_up()
         await task
@@ -379,6 +391,7 @@ class ReplyStreamingTests(unittest.IsolatedAsyncioTestCase):
             [
                 "VOICE_ASSISTANT_RUN_START",
                 "VOICE_ASSISTANT_STT_START",
+                "VOICE_ASSISTANT_INTENT_END",
                 "VOICE_ASSISTANT_TTS_START",
                 "VOICE_ASSISTANT_TTS_END",
                 "VOICE_ASSISTANT_TTS_STREAM_START",
@@ -392,10 +405,10 @@ class ReplyStreamingTests(unittest.IsolatedAsyncioTestCase):
         tts_end = next(op for op in timeline if op[0] == "event" and op[1].name == "VOICE_ASSISTANT_TTS_END")
         self.assertTrue(tts_end[2].get("url"), "TTS_END must carry a url for the device state machine")
         first_audio = next(i for i, op in enumerate(timeline) if op[0] == "audio")
-        self.assertEqual(5, first_audio, "listening and TTS start events must precede audio")
+        self.assertEqual(6, first_audio, "listening and TTS start events must precede audio")
         self.assertTrue(all(op[0] == "event" for op in timeline[-2:]))
         codes = [op[1].value for op in timeline if op[0] == "event"]
-        self.assertEqual([1, 3, 7, 8, 98, 99, 2], codes)
+        self.assertEqual([1, 3, 6, 7, 8, 98, 99, 2], codes)
         client.hang_up()
         await _task
 
@@ -412,6 +425,135 @@ class ReplyStreamingTests(unittest.IsolatedAsyncioTestCase):
             await b._stream_reply(client, two_seconds)
         self.assertTrue(delays, "long TTS must not be burst into the fixed speaker buffer")
         self.assertTrue(all(delay > 0 for delay in delays))
+
+
+class MultiTurnConversationTests(unittest.IsolatedAsyncioTestCase):
+    """A question from JARVIS must keep the microphone open for the answer."""
+
+    async def test_question_answer_keeps_the_conversation_open(self):
+        engine = FakeTurnEngine(transcript="Welcher Ort?")
+        b = make_bridge(engine=engine)
+        client = FakeVoiceClient()
+        _task, (start, stop, audio) = await _session_with_handlers(b, client)
+        await start(CONVERSATION_ID, 1, None, "hey jarvis")
+        await audio(b"\x01\x00" * 64, None)
+        await stop(False)
+        self.assertTrue(await _wait_for(client.saw_run_end))
+        intent_end = [
+            op for op in client.ops
+            if op[0] == "event" and op[1].name == "VOICE_ASSISTANT_INTENT_END"
+        ]
+        self.assertTrue(intent_end, "the device needs INTENT_END to know it may listen on")
+        self.assertEqual("1", intent_end[0][2]["continue_conversation"])
+        self.assertEqual("Welcher Ort?", intent_end[0][2]["speech"])
+        self.assertEqual(CONVERSATION_ID, intent_end[0][2]["conversation_id"])
+        client.hang_up()
+        await _task
+
+    async def test_statement_answer_keeps_listening_too(self):
+        """Continuous conversation: the mic stays open after every answer.
+
+        The turn only ends when the user stays silent for the idle window, so a
+        location or a follow-up word never needs the wake word again.
+        """
+        engine = FakeTurnEngine(transcript="Mir geht es gut, danke.")
+        b = make_bridge(engine=engine)
+        client = FakeVoiceClient()
+        _task, (start, stop, audio) = await _session_with_handlers(b, client)
+        await start(CONVERSATION_ID, 1, None, "hey jarvis")
+        await audio(LOUD_PCM, None)
+        await stop(False)
+        self.assertTrue(await _wait_for(client.saw_run_end))
+        intent_end = next(
+            op for op in client.ops
+            if op[0] == "event" and op[1].name == "VOICE_ASSISTANT_INTENT_END"
+        )
+        self.assertEqual("1", intent_end[2]["continue_conversation"])
+        client.hang_up()
+        await _task
+
+    async def test_followup_start_gets_the_longer_window(self):
+        engine = FakeTurnEngine(transcript="Welcher Ort?")
+        b = make_bridge(engine=engine, capture_window=0.05, followup_window=0.3)
+        client = FakeVoiceClient()
+        _task, (start, stop, audio) = await _session_with_handlers(b, client)
+        with captured_logs() as logs:
+            await start(CONVERSATION_ID, 1, None, "hey jarvis")
+            self.assertTrue(await _wait_for(lambda: any("idle_window=0.05" in l for l in logs)))
+            await audio(LOUD_PCM, None)
+            await stop(False)
+            self.assertTrue(await _wait_for(client.saw_run_end))
+            await start(CONVERSATION_ID, 1, None, "")
+            self.assertTrue(
+                await _wait_for(lambda: any("idle_window=0.3" in l for l in logs)),
+                "a follow-up turn must wait longer for the user's answer",
+            )
+        client.hang_up()
+        await _task
+
+    async def test_long_speech_must_not_be_cut_off(self):
+        b = make_bridge(capture_window=0.3, followup_window=0.3, silence_end=0.5)
+        client = FakeVoiceClient()
+        _task, (start, stop, audio) = await _session_with_handlers(b, client)
+        await start(CONVERSATION_ID, 1, None, "hey jarvis")
+        # Keep talking for more than twice the idle window: only silence ends a turn.
+        spoke_until = time.monotonic() + 0.8
+        while time.monotonic() < spoke_until:
+            await audio(LOUD_PCM, None)
+            await asyncio.sleep(0.1)
+        self.assertFalse(client.saw_run_end(), "speech must keep the microphone open")
+        await stop(False)
+        self.assertTrue(await _wait_for(client.saw_run_end))
+        client.hang_up()
+        await _task
+
+    async def test_turn_ends_after_a_short_silence_tail(self):
+        b = make_bridge(capture_window=5.0, silence_end=0.2)
+        engine = FakeTurnEngine()
+        b.engine = engine
+        client = FakeVoiceClient()
+        _task, (start, stop, audio) = await _session_with_handlers(b, client)
+        with captured_logs() as logs:
+            await start(CONVERSATION_ID, 1, None, "hey jarvis")
+            await audio(LOUD_PCM, None)
+            self.assertTrue(
+                await _wait_for(lambda: any("silence" in line for line in logs), 3.0),
+                "the turn must end once the user stopped speaking",
+            )
+        self.assertTrue(await _wait_for(client.saw_run_end))
+        self.assertEqual(1, len(engine.calls))
+        client.hang_up()
+        await _task
+
+    async def test_silent_followup_turn_ends_the_conversation(self):
+        engine = FakeTurnEngine(transcript="Welcher Ort?")
+        b = make_bridge(engine=engine, capture_window=0.05, followup_window=0.05)
+        client = FakeVoiceClient()
+        _task, (start, stop, audio) = await _session_with_handlers(b, client)
+        await start(CONVERSATION_ID, 1, None, "hey jarvis")
+        await audio(b"\x01\x00" * 64, None)
+        await stop(False)
+        self.assertTrue(await _wait_for(client.saw_run_end))
+        resets_before = engine.resets
+        client.ops.clear()
+        await start(CONVERSATION_ID, 1, None, "")
+        await stop(False)  # user said nothing
+        self.assertTrue(await _wait_for(client.saw_run_end))
+        self.assertEqual(0, len(engine.calls[1:]), "silence must not call the model")
+        self.assertGreater(engine.resets, resets_before)
+        client.hang_up()
+        await _task
+
+    async def test_wake_word_start_resets_the_conversation_memory(self):
+        engine = FakeTurnEngine()
+        b = make_bridge(engine=engine)
+        client = FakeVoiceClient()
+        _task, (start, _stop, _audio) = await _session_with_handlers(b, client)
+        self.assertEqual(0, engine.resets)
+        await start(CONVERSATION_ID, 1, None, "hey jarvis")
+        self.assertEqual(1, engine.resets)
+        client.hang_up()
+        await _task
 
 
 # --------------------------------------------------------------------------- engine failure / timeout
@@ -699,6 +841,57 @@ class CliAndLoggingTests(unittest.TestCase):
 
     def test_tts_default_model_is_a_quota_available_tts_model(self):
         self.assertEqual("gemini-3.8-flash-tts", bridge.DEFAULT_TTS_MODEL)
+
+    def test_provider_rate_limits_are_retryable_but_not_model_errors(self):
+        class Err(Exception):
+            def __init__(self, code):
+                self.code = code
+
+        self.assertTrue(bridge._is_retryable(Err(429)))
+        self.assertTrue(bridge._is_retryable(Err(503)))
+        self.assertFalse(bridge._is_retryable(Err(404)))
+        self.assertFalse(bridge._is_retryable(ValueError("boom")))
+        self.assertTrue(bridge._is_model_incompatible(Err(400)))
+        self.assertTrue(bridge._is_model_incompatible(Err(404)))
+        self.assertFalse(bridge._is_model_incompatible(Err(429)))
+
+    def test_every_model_has_a_fallback_chain(self):
+        self.assertIn(bridge.DEFAULT_MODEL, bridge.FALLBACK_CHAT_MODELS)
+        self.assertIn(bridge.DEFAULT_TTS_MODEL, bridge.FALLBACK_TTS_MODELS)
+        self.assertGreater(len(bridge.FALLBACK_CHAT_MODELS), 1)
+        self.assertGreater(len(bridge.FALLBACK_TTS_MODELS), 1)
+
+    def test_engine_reuses_the_model_that_last_worked(self):
+        engine = bridge.GeminiTurnEngine(GEMINI_KEY_MARKER)
+        self.assertEqual(
+            ("a", "b", "c"), engine._model_order(None, ("a", "b", "c"))
+        )
+        self.assertEqual(
+            ("c", "a", "b"), engine._model_order("c", ("a", "b", "c"))
+        )
+
+    def test_engine_replays_the_running_dialogue_to_the_model(self):
+        engine = bridge.GeminiTurnEngine(GEMINI_KEY_MARKER)
+        pcm = b"\x01\x00" * 8
+        self.assertEqual(1, len(engine._contents(pcm)))
+        engine._remember(pcm, "Welcher Ort?")
+        contents = engine._contents(pcm)
+        self.assertEqual(3, len(contents))
+        self.assertEqual("user", contents[0]["role"])
+        self.assertEqual("model", contents[1]["role"])
+        self.assertEqual("Welcher Ort?", contents[1]["parts"][0]["text"])
+        self.assertEqual("user", contents[2]["role"])
+        engine.reset_conversation()
+        self.assertEqual(1, len(engine._contents(pcm)))
+
+    def test_engine_conversation_history_is_bounded(self):
+        engine = bridge.GeminiTurnEngine(GEMINI_KEY_MARKER)
+        pcm = b"\x01\x00" * 8
+        for _ in range(12):
+            engine._remember(pcm, "Antwort")
+        self.assertLessEqual(
+            len(engine._contents(pcm)), 1 + 2 * bridge.MAX_HISTORY_TURNS
+        )
 
     def test_main_refuses_bad_key_mode_without_leaking(self):
         bad = _key_file(self._tmp.name, mode=0o644, name="bad-api-key")

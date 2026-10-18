@@ -47,6 +47,7 @@ import inspect
 import io
 import logging
 import sys
+import time
 import wave
 from pathlib import Path
 
@@ -81,9 +82,35 @@ DEFAULT_SAMPLE_RATE = 16000  # ESPHome voice-assistant microphone and speaker
 DEFAULT_TTS_SOURCE_SAMPLE_RATE = 24000  # Gemini TTS raw PCM output
 DEFAULT_MODEL = "gemini-flash-latest"
 DEFAULT_TTS_MODEL = "gemini-3.8-flash-tts"
+# Free-tier keys hit per-minute limits per model; the turn must survive a 429
+# instead of dropping the user's question.
+FALLBACK_CHAT_MODELS = (
+    "gemini-flash-latest",
+    # The preview chat models reject inline audio (400), so the audio-capable
+    # lite models are the real fallbacks behind a 429.
+    "gemini-flash-lite-latest",
+    "gemini-3.1-flash-lite-preview",
+)
+FALLBACK_TTS_MODELS = (
+    "gemini-3.8-flash-tts",
+    "gemini-3.1-flash-tts-preview",
+    "gemini-3.8-flash-lite-tts",
+)
+RETRY_DELAYS_S = (2.0, 5.0)
 DEFAULT_TTS_VOICE = "Kore"
 DEFAULT_TURN_TIMEOUT_S = 60.0
 DEFAULT_CAPTURE_WINDOW_S = 5.0
+# A follow-up turn follows JARVIS's own question, so the user answers without a
+# wake word and usually starts after a short pause.
+DEFAULT_FOLLOWUP_WINDOW_S = 8.0
+# Dialogue turns replayed to the model so a follow-up keeps its context.
+MAX_HISTORY_TURNS = 6
+# Listening is driven by speech, not by a fixed cut: the user may talk as long
+# as he likes, and the turn only ends after this much silence.
+DEFAULT_SILENCE_END_S = 1.2
+DEFAULT_MAX_UTTERANCE_S = 25.0
+DEFAULT_VOICE_LEVEL = 500  # RMS on the 16-bit scale; room noise stays below
+_LISTEN_POLL_S = 0.1
 REPLY_CHUNK_BYTES = 2048  # 1024 samples of 16-bit mono PCM per message
 
 # TTS_END must carry a non-empty url: the firmware ignores an empty one and
@@ -100,8 +127,10 @@ _ASSISTANT_NAME = "JARVIS"
 DEFAULT_SYSTEM_INSTRUCTION = (
     "Du bist %s, ein knapper Assistent an einem Lautsprecher im Growraum. "
     "Antworte immer auf Deutsch: kurz, freundlich, in hoestens ein bis zwei "
-    "Saetzen ohne Listen. Wenn dir Audio fehlt oder du etwas nicht verstehst, "
-    "bitte einmal kurz wiederholen." % _ASSISTANT_NAME
+    "Saetzen ohne Listen. Wenn eine Angabe fehlt (zum Beispiel der Ort beim "
+    "Wetter), rate nicht, sondern frage in einem kurzen Satz danach. Wenn dir "
+    "Audio fehlt oder du etwas nicht verstehst, bitte einmal kurz wiederholen."
+    % _ASSISTANT_NAME
 )
 
 
@@ -199,6 +228,55 @@ def _inline_audio_bytes(value) -> bytes:
     raise TypeError("inline audio payload is not bytes or base64 text")
 
 
+def _is_retryable(exc: BaseException) -> bool:
+    """Provider-side transient failures (quota, overload), not model errors."""
+    code = getattr(exc, "code", None)
+    if code is not None:
+        try:
+            return int(code) in (429, 500, 502, 503, 504)
+        except (TypeError, ValueError):
+            pass
+    text = str(exc)
+    return "429" in text or "RESOURCE_EXHAUSTED" in text or "503" in text
+
+
+def _is_model_incompatible(exc: BaseException) -> bool:
+    """The model cannot serve THIS request (no audio input, unknown id)."""
+    code = getattr(exc, "code", None)
+    if code is not None:
+        try:
+            return int(code) in (400, 404)
+        except (TypeError, ValueError):
+            pass
+    text = str(exc)
+    return "INVALID_ARGUMENT" in text or "NOT_FOUND" in text
+
+
+def _pcm_level(pcm: bytes) -> int:
+    """Rough RMS of 16-bit mono PCM, used only to detect that speech started."""
+    usable = len(pcm) - (len(pcm) % 2)
+    if usable == 0:
+        return 0
+    samples = array("h")
+    samples.frombytes(pcm[:usable])
+    if sys.byteorder != "little":
+        samples.byteswap()
+    total = 0
+    for value in samples:
+        total += value * value
+    return int((total / len(samples)) ** 0.5)
+
+
+def _wants_followup(answer: str) -> bool:
+    """Always keep the microphone open after a reply.
+
+    The user talks continuously: the turn ends on silence (the idle window in
+    ``_listen_until_done``), never because our answer did not look like a
+    question. The argument is still accepted so call sites stay explicit.
+    """
+    return True
+
+
 def _decode_tts_audio(payload: bytes) -> tuple[bytes, int]:
     """Return raw 16-bit mono PCM and its sample rate.
 
@@ -262,39 +340,119 @@ class GeminiTurnEngine:
         self._tts_voice = tts_voice
         self._sample_rate = int(sample_rate)
         self._system_instruction = system_instruction or DEFAULT_SYSTEM_INSTRUCTION
+        self._history: list[dict] = []
+        self._chat_model_pref: str | None = None
+        self._tts_model_pref: str | None = None
+
+    def reset_conversation(self) -> None:
+        """Drop the remembered dialogue (a new wake-word turn starts fresh)."""
+        self._history = []
+
+    def _contents(self, mic_pcm: bytes) -> list[dict]:
+        """Dialogue so far plus this turn's audio."""
+        contents = list(self._history)
+        contents.append(
+            {
+                "role": "user",
+                "parts": [
+                    {
+                        "inline_data": {
+                            "mime_type": _pcm_mime(self._sample_rate),
+                            "data": bytes(mic_pcm),
+                        }
+                    }
+                ],
+            }
+        )
+        return contents
+
+    def _remember(self, mic_pcm: bytes, answer: str) -> None:
+        """Keep both sides of the turn so a follow-up keeps its context."""
+        self._history.append(
+            {
+                "role": "user",
+                "parts": [
+                    {
+                        "inline_data": {
+                            "mime_type": _pcm_mime(self._sample_rate),
+                            "data": bytes(mic_pcm),
+                        }
+                    }
+                ],
+            }
+        )
+        self._history.append({"role": "model", "parts": [{"text": answer}]})
+        del self._history[: -2 * MAX_HISTORY_TURNS]
 
     async def turn(self, mic_pcm: bytes) -> tuple[str, bytes]:
         return await asyncio.to_thread(self._turn_sync, mic_pcm)
+
+    @staticmethod
+    def _call_with_retries(client, model: str, contents, config):
+        """Retry provider quota/overload failures before giving up on a model."""
+        last: BaseException | None = None
+        for delay in (0.0,) + RETRY_DELAYS_S:
+            if delay:
+                time.sleep(delay)
+            try:
+                return client.models.generate_content(
+                    model=model, contents=contents, config=config
+                )
+            except Exception as exc:
+                if not _is_retryable(exc):
+                    raise
+                last = exc
+        assert last is not None
+        raise last
+
+    def _model_order(self, preferred: str | None, chain) -> tuple[str, ...]:
+        """Try the model that last worked first, then the rest of the chain."""
+        head = (preferred,) if preferred else ()
+        return tuple(dict.fromkeys(head + tuple(chain)))
+
+    def _generate(self, client, models, contents, config):
+        """Walk a model chain so one exhausted model does not drop the turn."""
+        last: BaseException | None = None
+        for model in models:
+            try:
+                result = self._call_with_retries(client, model, contents, config)
+            except Exception as exc:
+                if _is_retryable(exc) or _is_model_incompatible(exc):
+                    _LOG.info("model unavailable status=fallback model=%s", model)
+                    last = exc
+                    continue
+                raise
+            return model, result
+        assert last is not None
+        raise last
 
     def _turn_sync(self, mic_pcm: bytes) -> tuple[str, bytes]:
         from google import genai  # lazy, optional dependency
 
         client = genai.Client(api_key=self._gemini_key, http_options={"api_version": "v1beta"})
         types = genai.types
-        answer_call = client.models.generate_content(
-            model=self._model,
-            contents=[
-                {
-                    "role": "user",
-                    "parts": [
-                        {
-                            "inline_data": {
-                                "mime_type": _pcm_mime(self._sample_rate),
-                                "data": bytes(mic_pcm),
-                            }
-                        }
-                    ],
-                }
-            ],
-            config=types.GenerateContentConfig(system_instruction=self._system_instruction),
+        chat_models = self._model_order(
+            self._chat_model_pref, (self._model,) + FALLBACK_CHAT_MODELS
         )
+        used_chat, answer_call = self._generate(
+            client,
+            chat_models,
+            self._contents(mic_pcm),
+            types.GenerateContentConfig(system_instruction=self._system_instruction),
+        )
+        self._chat_model_pref = used_chat
         answer = (answer_call.text or "").strip()
         if not answer:
             raise RuntimeError("model returned no text")
-        speech_call = client.models.generate_content(
-            model=self._tts_model,
-            contents=answer,
-            config=types.GenerateContentConfig(
+        self._remember(mic_pcm, answer)
+        tts_models = self._model_order(
+            self._tts_model_pref, (self._tts_model,) + FALLBACK_TTS_MODELS
+        )
+        used_tts, speech_call = self._generate(
+            client,
+            tts_models,
+            answer,
+            types.GenerateContentConfig(
                 response_modalities=["AUDIO"],
                 speech_config=types.SpeechConfig(
                     voice_config=types.VoiceConfig(
@@ -305,6 +463,7 @@ class GeminiTurnEngine:
                 ),
             ),
         )
+        self._tts_model_pref = used_tts
         part = speech_call.candidates[0].content.parts[0]
         return answer, _tts_pcm_from_response(_inline_audio_bytes(part.inline_data.data))
 
@@ -392,6 +551,10 @@ class JarvisBridge:
         tts_source_sample_rate: int = DEFAULT_TTS_SOURCE_SAMPLE_RATE,
         turn_timeout: float = DEFAULT_TURN_TIMEOUT_S,
         capture_window: float = DEFAULT_CAPTURE_WINDOW_S,
+        followup_window: float = DEFAULT_FOLLOWUP_WINDOW_S,
+        silence_end: float = DEFAULT_SILENCE_END_S,
+        max_utterance: float = DEFAULT_MAX_UTTERANCE_S,
+        voice_level: int = DEFAULT_VOICE_LEVEL,
         system_instruction: str | None = None,
         voice_client_factory=None,
         sleep=None,
@@ -406,6 +569,16 @@ class JarvisBridge:
         self._capture_window = float(capture_window)
         if self._capture_window <= 0:
             raise ValueError("capture_window must be positive")
+        self._followup_window = float(followup_window)
+        if self._followup_window <= 0:
+            raise ValueError("followup_window must be positive")
+        self._silence_end = float(silence_end)
+        if self._silence_end <= 0:
+            raise ValueError("silence_end must be positive")
+        self._max_utterance = float(max_utterance)
+        if self._max_utterance <= 0:
+            raise ValueError("max_utterance must be positive")
+        self._voice_level = int(voice_level)
         self.engine: GeminiTurnEngine = engine or GeminiTurnEngine(
             gemini_key,
             model=model,
@@ -424,6 +597,12 @@ class JarvisBridge:
         self._active = False
         self._listening_announced = False
         self._stopped = False
+        # Multi-turn: the device re-enters the pipeline without a wake word
+        # after an answer of ours that asked something.
+        self._followup_pending = False
+        self._conversation_id = ""
+        self._heard_speech = False
+        self._last_voice_at = 0.0
         if sleep is not None:
             self._sleep = sleep
         else:
@@ -476,22 +655,61 @@ class JarvisBridge:
         self._mic_chunks = []
         self._active = True
         self._listening_announced = False
+        followup = bool(self._followup_pending) and not wake_word_phrase
+        self._followup_pending = False
+        if not followup:
+            self._reset_conversation()
+        if conversation_id:
+            self._conversation_id = str(conversation_id)
+        window = self._followup_window if followup else self._capture_window
+        self._heard_speech = False
+        self._last_voice_at = 0.0
         self._capture_task = asyncio.get_running_loop().create_task(
-            self._finish_after_capture_window()
+            self._listen_until_done(window)
         )
         _LOG.info(
-            "assistant start flags=%s wake_word=%s",
+            "assistant start flags=%s wake_word=%s followup=%s idle_window=%s",
             int(bool(flags)),
             bool(wake_word_phrase),
+            followup,
+            window,
         )
         return 0
 
-    async def _finish_after_capture_window(self) -> None:
+    def _reset_conversation(self) -> None:
+        """Forget the running dialogue in the engine (new wake-word turn)."""
+        reset = getattr(self.engine, "reset_conversation", None)
+        if callable(reset):
+            reset()
+
+    async def _listen_until_done(self, idle_window: float) -> None:
+        """Keep listening while the user speaks; end after real silence.
+
+        ``idle_window`` only bounds the wait for the FIRST speech; once speech
+        was heard the turn ends ``silence_end`` seconds after the last voiced
+        chunk, so a long sentence is never cut in the middle.
+        """
+        loop = asyncio.get_running_loop()
+        started = loop.time()
         try:
-            await asyncio.sleep(self._capture_window)
-            if self._active:
-                _LOG.info("capture window ended status=processing")
-                self._finish_turn_request()
+            while self._active:
+                await asyncio.sleep(_LISTEN_POLL_S)
+                if not self._active:
+                    return
+                now = loop.time()
+                if self._heard_speech:
+                    if now - self._last_voice_at >= self._silence_end:
+                        _LOG.info("listen ended status=silence")
+                        self._finish_turn_request()
+                        return
+                elif now - started >= idle_window:
+                    _LOG.info("listen ended status=idle-timeout")
+                    self._finish_turn_request()
+                    return
+                if now - started >= self._max_utterance:
+                    _LOG.info("listen ended status=max-utterance")
+                    self._finish_turn_request()
+                    return
         finally:
             if self._capture_task is asyncio.current_task():
                 self._capture_task = None
@@ -507,6 +725,9 @@ class JarvisBridge:
         if not data:  # empty chunk marks the end of the recording
             self._finish_turn_request()
             return
+        if _pcm_level(data) >= self._voice_level:
+            self._heard_speech = True
+            self._last_voice_at = asyncio.get_running_loop().time()
         self._mic_chunks.append(bytes(data))
         if data2:
             self._mic_chunks.append(bytes(data2))
@@ -529,8 +750,15 @@ class JarvisBridge:
         if self._turn_task is not None:
             return  # already running
         if not self._mic_chunks:
+            voice = self._voice
             self._reset_turn()
+            self._reset_conversation()
             _LOG.info("turn empty status=skipped")
+            if voice is not None:
+                # Leave the device listening state and end the conversation.
+                self._turn_task = asyncio.get_running_loop().create_task(
+                    self._send_run_end(voice)
+                )
             return
         voice = self._voice
         if voice is None:
@@ -573,21 +801,47 @@ class JarvisBridge:
                 return
             transcript, reply_pcm = result
             if not self._stopped:
-                await self._stream_reply(voice, reply_pcm)
+                await self._stream_reply(
+                    voice,
+                    reply_pcm,
+                    answer=transcript,
+                    continue_conversation=_wants_followup(transcript),
+                )
             _LOG.info("turn finished chars=%d audio_bytes=%d", len(transcript), len(reply_pcm))
         finally:
             if self._turn_task is asyncio.current_task():
                 self._turn_task = None
 
-    async def _stream_reply(self, voice, reply_pcm) -> None:
+    async def _send_run_end(self, voice) -> None:
+        try:
+            await voice.send_voice_assistant_event(_voice_event("RUN_END"), {})
+        finally:
+            if self._turn_task is asyncio.current_task():
+                self._turn_task = None
+
+    async def _stream_reply(
+        self, voice, reply_pcm, *, answer: str = "", continue_conversation: bool = False
+    ) -> None:
         pcm = _resample_pcm16_mono(
             bytes(reply_pcm), self._tts_source_sample_rate, self._device_sample_rate
         )
+        # INTENT_END carries continue_conversation; the firmware restarts the
+        # microphone after the reply only when that flag is set, which is what
+        # lets the user answer a follow-up question without the wake word.
+        await voice.send_voice_assistant_event(
+            _voice_event("INTENT_END"),
+            {
+                "conversation_id": self._conversation_id,
+                "continue_conversation": "1" if continue_conversation else "0",
+                "speech": answer,
+            },
+        )
+        self._followup_pending = continue_conversation
         # TTS_START starts the raw API speaker; TTS_END is what moves the device
         # into STREAMING_RESPONSE (only that state writes audio to the speaker);
         # STREAM_START/END bracket the PCM.
         await voice.send_voice_assistant_event(
-            _voice_event("TTS_START"), {"text": "JARVIS"}
+            _voice_event("TTS_START"), {"text": answer or "JARVIS"}
         )
         await voice.send_voice_assistant_event(
             _voice_event("TTS_END"), {"url": REPLY_STREAM_URL}
@@ -608,6 +862,8 @@ class JarvisBridge:
                     await asyncio.sleep(wait_time)
         await voice.send_voice_assistant_event(_voice_event("TTS_STREAM_END"), {})
         await voice.send_voice_assistant_event(_voice_event("RUN_END"), {})
+        if not continue_conversation:
+            self._reset_conversation()
 
 
 # --------------------------------------------------------------------------- CLI
@@ -635,6 +891,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sample-rate", type=int, default=DEFAULT_SAMPLE_RATE)
     parser.add_argument("--turn-timeout", type=float, default=DEFAULT_TURN_TIMEOUT_S)
     parser.add_argument("--capture-window", type=float, default=DEFAULT_CAPTURE_WINDOW_S)
+    parser.add_argument(
+        "--followup-window", type=float, default=DEFAULT_FOLLOWUP_WINDOW_S
+    )
+    parser.add_argument(
+        "--silence-end",
+        type=float,
+        default=DEFAULT_SILENCE_END_S,
+        help="seconds of silence that end the user's turn",
+    )
+    parser.add_argument(
+        "--max-utterance", type=float, default=DEFAULT_MAX_UTTERANCE_S
+    )
+    parser.add_argument("--voice-level", type=int, default=DEFAULT_VOICE_LEVEL)
     return parser
 
 
@@ -664,6 +933,10 @@ def main(argv=None) -> int:
         sample_rate=args.sample_rate,
         turn_timeout=args.turn_timeout,
         capture_window=args.capture_window,
+        followup_window=args.followup_window,
+        silence_end=args.silence_end,
+        max_utterance=args.max_utterance,
+        voice_level=args.voice_level,
     )
     try:
         asyncio.run(satellite_bridge.run())
