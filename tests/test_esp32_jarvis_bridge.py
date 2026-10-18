@@ -8,6 +8,8 @@ the same mode-0600 single-line contract reused from esp32_api_acceptance.
 """
 
 import asyncio
+from array import array
+import base64
 import contextlib
 import inspect
 import json
@@ -109,6 +111,20 @@ class FakeVoiceClient:
         )
 
 
+def _wav_bytes(frames: bytes, *, rate: int, channels: int) -> bytes:
+    """Wrap raw 16-bit frames in a minimal RIFF/WAVE container."""
+    import io
+    import wave
+
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as handle:
+        handle.setnchannels(channels)
+        handle.setsampwidth(2)
+        handle.setframerate(rate)
+        handle.writeframes(frames)
+    return buffer.getvalue()
+
+
 class FakeTurnEngine:
     """Deterministic stand-in for the Gemini turn engine."""
 
@@ -132,6 +148,7 @@ def make_bridge(**overrides):
         api_key=API_KEY_MARKER,
         gemini_key=GEMINI_KEY_MARKER,
         engine=engine,
+        tts_source_sample_rate=bridge.DEFAULT_SAMPLE_RATE,
     )
     base.update(overrides)
     return bridge.JarvisBridge(**base)
@@ -221,7 +238,8 @@ class StartContractTests(unittest.IsolatedAsyncioTestCase):
         b = make_bridge()
         client = FakeVoiceClient()
         _task, (start, stop, audio) = await _session_with_handlers(b, client)
-        result = start(CONVERSATION_ID, 0, None, None)
+        self.assertTrue(inspect.iscoroutinefunction(start))
+        result = await start(CONVERSATION_ID, 0, None, None)
         self.assertIs(int, type(result))
         self.assertEqual(0, result)
         client.hang_up()
@@ -231,21 +249,34 @@ class StartContractTests(unittest.IsolatedAsyncioTestCase):
         b = make_bridge()
         client = FakeVoiceClient()
         _task, (start, stop, audio) = await _session_with_handlers(b, client)
-        result = start("conv-2", 1, object(), "hey jarvis")
+        result = await start("conv-2", 1, object(), "hey jarvis")
         self.assertEqual((0, int), (result, type(result)))
         client.hang_up()
         await _task
+
+    async def test_first_audio_marks_pipeline_running_and_listening(self):
+        b = make_bridge()
+        client = FakeVoiceClient()
+        task, (start, _stop, audio) = await _session_with_handlers(b, client)
+        await start(CONVERSATION_ID, 1, None, "hey jarvis")
+        await audio(b"\x01\x00" * 32, None)
+        names = [op[1].name for op in client.ops if op[0] == "event"]
+        self.assertEqual(
+            ["VOICE_ASSISTANT_RUN_START", "VOICE_ASSISTANT_STT_START"], names
+        )
+        client.hang_up()
+        await task
 
     async def test_no_socket_is_created_during_start_and_turn(self):
         b = make_bridge()
         client = FakeVoiceClient()
         _task, (start, stop, audio) = await _session_with_handlers(b, client)
         with unittest.mock.patch("socket.socket", side_effect=AssertionError("socket used")) as spy:
-            start(CONVERSATION_ID, 0, None, None)
-            audio(b"\x01\x00" * 64, None)
-            stop(False)
+            await start(CONVERSATION_ID, 0, None, None)
+            await audio(b"\x01\x00" * 64, None)
+            await stop(False)
             self.assertTrue(await _wait_for(client.saw_run_end), "turn never completed")
-            stop(True)  # post-turn abort path as well
+            await stop(True)  # post-turn abort path as well
         self.assertEqual(0, spy.call_count, "bridge must not create sockets by hand")
         client.hang_up()
         await _task
@@ -259,11 +290,11 @@ class MicAccumulationTests(unittest.IsolatedAsyncioTestCase):
         b = make_bridge(engine=engine)
         client = FakeVoiceClient()
         _task, (start, stop, audio) = await _session_with_handlers(b, client)
-        start(CONVERSATION_ID, 0, None, None)
-        audio(b"\x01\x00" * 80, None)
-        audio(b"\x02\x00" * 40, None)
-        audio(b"\x03\x00" * 20, b"\x04\x00" * 10)
-        stop(False)
+        await start(CONVERSATION_ID, 0, None, None)
+        await audio(b"\x01\x00" * 80, None)
+        await audio(b"\x02\x00" * 40, None)
+        await audio(b"\x03\x00" * 20, b"\x04\x00" * 10)
+        await stop(False)
         self.assertTrue(
             await _wait_for(lambda: engine.calls and client.saw_run_end),
             "turn never completed",
@@ -277,12 +308,28 @@ class MicAccumulationTests(unittest.IsolatedAsyncioTestCase):
         client.hang_up()
         await _task
 
+    async def test_capture_window_finishes_without_device_stop_callback(self):
+        """API audio streams until the controller endpoints the utterance."""
+        engine = FakeTurnEngine()
+        b = make_bridge(engine=engine, capture_window=0.02)
+        client = FakeVoiceClient()
+        task, (start, _stop, audio) = await _session_with_handlers(b, client)
+        await start(CONVERSATION_ID, 0, None, None)
+        await audio(b"\x10\x00" * 320, None)
+        self.assertTrue(
+            await _wait_for(lambda: engine.calls and client.saw_run_end),
+            "bounded capture did not finish the turn",
+        )
+        self.assertEqual([b"\x10\x00" * 320], engine.calls)
+        client.hang_up()
+        await task
+
     async def test_stop_without_start_or_chunks_skips_gemini(self):
         engine = FakeTurnEngine()
         b = make_bridge(engine=engine)
         client = FakeVoiceClient()
         task, (start, stop, audio) = await _session_with_handlers(b, client)
-        stop(False)  # never started, no chunks
+        await stop(False)  # never started, no chunks
         self.assertTrue(await _wait_for(lambda: not (b._turn_task and not b._turn_task.done())))
         self.assertEqual([], engine.calls)
         self.assertEqual(
@@ -296,59 +343,75 @@ class MicAccumulationTests(unittest.IsolatedAsyncioTestCase):
 # --------------------------------------------------------------------------- reply streaming
 
 class ReplyStreamingTests(unittest.IsolatedAsyncioTestCase):
-    async def test_reply_streamed_as_raw_16bit_mono_chunks_then_empty_marker(self):
+    async def test_reply_streamed_as_raw_16bit_mono_chunks(self):
         engine = FakeTurnEngine(reply=REPLY_PCM)
         b = make_bridge(engine=engine)
         client = FakeVoiceClient()
         _task, (start, stop, audio) = await _session_with_handlers(b, client)
-        start(CONVERSATION_ID, 0, None, None)
-        audio(REPLY_PCM[:64], None)
-        stop(False)
+        await start(CONVERSATION_ID, 0, None, None)
+        await audio(REPLY_PCM[:64], None)
+        await stop(False)
         self.assertTrue(await _wait_for(client.saw_run_end))
         audio_ops = [op for op in client.ops if op[0] == "audio"]
         self.assertTrue(audio_ops, "reply audio must be streamed to the device")
         payloads = [op[1] for op in audio_ops]
-        # Terminated by exactly one trailing empty chunk (end-of-stream marker).
-        self.assertEqual(b"", payloads[-1])
-        self.assertTrue(all(len(c) == 0 or len(c) % 2 == 0 for c in payloads),
-                        "chunks must stay 16-bit aligned")
-        body = b"".join(payloads[:-1])
+        self.assertTrue(all(c and len(c) % 2 == 0 for c in payloads),
+                        "chunks must be non-empty and 16-bit aligned")
+        body = b"".join(payloads)
         self.assertEqual(REPLY_PCM, body, "chunks must be byte-exact PCM, no container header")
         self.assertNotIn(b"RIFF", body)
         self.assertNotIn(b"WAVE", body)
-        self.assertTrue(all(len(c) <= bridge.REPLY_CHUNK_BYTES for c in payloads[:-1]))
+        self.assertTrue(all(len(c) <= bridge.REPLY_CHUNK_BYTES for c in payloads))
         client.hang_up()
         await _task
 
-    async def test_run_event_order_tts_stream_start_then_tts_end_run_end(self):
+    async def test_run_event_order_matches_api_audio_stream_contract(self):
         b = make_bridge()
         client = FakeVoiceClient()
         _task, (start, stop, audio) = await _session_with_handlers(b, client)
-        start(CONVERSATION_ID, 0, None, None)
-        audio(REPLY_PCM[:64], None)
-        stop(False)
+        await start(CONVERSATION_ID, 0, None, None)
+        await audio(REPLY_PCM[:64], None)
+        await stop(False)
         self.assertTrue(await _wait_for(client.saw_run_end))
         timeline = [op for op in client.ops if op[0] in ("audio", "event")]
-        # Only device-meaningful bridge events are allowed.
         names = [op[1].name for op in timeline if op[0] == "event"]
-        for name in names:
-            self.assertIn(name, {"VOICE_ASSISTANT_TTS_STREAM_START", "VOICE_ASSISTANT_TTS_END",
-                                 "VOICE_ASSISTANT_RUN_END"})
-        ordered = [op[0] for op in timeline]
-        # TTS_STREAM_START strictly before the first audio chunk.
-        self.assertEqual("event", ordered[0])
-        self.assertEqual("VOICE_ASSISTANT_TTS_STREAM_START", names[0])
+        self.assertEqual(
+            [
+                "VOICE_ASSISTANT_RUN_START",
+                "VOICE_ASSISTANT_STT_START",
+                "VOICE_ASSISTANT_TTS_START",
+                "VOICE_ASSISTANT_TTS_END",
+                "VOICE_ASSISTANT_TTS_STREAM_START",
+                "VOICE_ASSISTANT_TTS_STREAM_END",
+                "VOICE_ASSISTANT_RUN_END",
+            ],
+            names,
+        )
+        # The firmware only enters STREAMING_RESPONSE (the state that actually
+        # writes API audio to the speaker) on TTS_END with a non-empty url.
+        tts_end = next(op for op in timeline if op[0] == "event" and op[1].name == "VOICE_ASSISTANT_TTS_END")
+        self.assertTrue(tts_end[2].get("url"), "TTS_END must carry a url for the device state machine")
         first_audio = next(i for i, op in enumerate(timeline) if op[0] == "audio")
-        self.assertEqual(1, first_audio, "no audio may precede TTS_STREAM_START")
-        # TTS_END and RUN_END strictly after the last (empty) audio chunk.
+        self.assertEqual(5, first_audio, "listening and TTS start events must precede audio")
         self.assertTrue(all(op[0] == "event" for op in timeline[-2:]))
-        self.assertEqual(["VOICE_ASSISTANT_TTS_END", "VOICE_ASSISTANT_RUN_END"], names[-2:])
-        # Event codes match the native-API proto enum values
-        # (TTS_STREAM_START=98, TTS_END=8, RUN_END=2 in esphome's api.proto).
         codes = [op[1].value for op in timeline if op[0] == "event"]
-        self.assertEqual([98, 8, 2], codes)
+        self.assertEqual([1, 3, 7, 8, 98, 99, 2], codes)
         client.hang_up()
         await _task
+
+    async def test_reply_stream_is_paced_to_the_device_buffer(self):
+        b = make_bridge()
+        client = FakeVoiceClient()
+        delays = []
+
+        async def fake_sleep(delay):
+            delays.append(delay)
+
+        two_seconds = b"\x00\x00" * (bridge.DEFAULT_SAMPLE_RATE * 2)
+        with unittest.mock.patch.object(bridge.asyncio, "sleep", fake_sleep):
+            await b._stream_reply(client, two_seconds)
+        self.assertTrue(delays, "long TTS must not be burst into the fixed speaker buffer")
+        self.assertTrue(all(delay > 0 for delay in delays))
 
 
 # --------------------------------------------------------------------------- engine failure / timeout
@@ -362,14 +425,22 @@ class TurnFailureTests(unittest.IsolatedAsyncioTestCase):
         b = make_bridge(engine=BrokenEngine())
         client = FakeVoiceClient()
         _task, (start, stop, audio) = await _session_with_handlers(b, client)
-        start(CONVERSATION_ID, 0, None, None)
-        audio(b"\x01\x00" * 16, None)
-        stop(False)
+        await start(CONVERSATION_ID, 0, None, None)
+        await audio(b"\x01\x00" * 16, None)
+        await stop(False)
         self.assertTrue(
             await _wait_for(lambda: b._turn_task is None),
             "failed turn must be discarded",
         )
-        self.assertEqual([], [op for op in client.ops if op[0] in ("audio", "event")])
+        self.assertEqual(
+            [
+                "VOICE_ASSISTANT_RUN_START",
+                "VOICE_ASSISTANT_STT_START",
+                "VOICE_ASSISTANT_RUN_END",
+            ],
+            [op[1].name for op in client.ops if op[0] == "event"],
+        )
+        self.assertEqual([], [op for op in client.ops if op[0] == "audio"])
         self.assertEqual([], b._mic_chunks)
         client.hang_up()
         await _task
@@ -381,15 +452,23 @@ class TurnFailureTests(unittest.IsolatedAsyncioTestCase):
         client = FakeVoiceClient()
         _task, (start, stop, audio) = await _session_with_handlers(bridge_obj, client)
         engine.gate = asyncio.get_running_loop().create_future()  # keep the turn pending
-        start(CONVERSATION_ID, 0, None, None)
-        audio(b"\x01\x00" * 16, None)
-        stop(False)
+        await start(CONVERSATION_ID, 0, None, None)
+        await audio(b"\x01\x00" * 16, None)
+        await stop(False)
         self.assertTrue(
             await _wait_for(lambda: bridge_obj._turn_task is None),
             "timed-out turn must be discarded",
         )
         self.assertEqual(1, len(engine.calls), "engine was still invoked once")
-        self.assertEqual([], [op for op in client.ops if op[0] in ("audio", "event")])
+        self.assertEqual(
+            [
+                "VOICE_ASSISTANT_RUN_START",
+                "VOICE_ASSISTANT_STT_START",
+                "VOICE_ASSISTANT_RUN_END",
+            ],
+            [op[1].name for op in client.ops if op[0] == "event"],
+        )
+        self.assertEqual([], [op for op in client.ops if op[0] == "audio"])
         client.hang_up()
         await _task
 
@@ -403,26 +482,27 @@ class AbortTests(unittest.IsolatedAsyncioTestCase):
         client = FakeVoiceClient()
         _task, (start, stop, audio) = await _session_with_handlers(b, client)
         engine.gate = asyncio.get_running_loop().create_future()
-        start(CONVERSATION_ID, 0, None, None)
-        audio(b"\x01\x00" * 32, None)
-        stop(False)  # turn scheduled and pending on the engine gate
+        await start(CONVERSATION_ID, 0, None, None)
+        await audio(b"\x01\x00" * 32, None)
+        await stop(False)  # turn scheduled and pending on the engine gate
         self.assertTrue(await _wait_for(lambda: engine.calls), "engine never invoked")
-        stop(True)  # aborted mid-turn
+        await stop(True)  # aborted mid-turn
         self.assertTrue(
             await _wait_for(lambda: b._turn_task is None),
             "turn task must be dropped on abort",
         )
         await asyncio.sleep(0)  # allow any (wrong) streaming to surface
         self.assertEqual(
-            [], [op for op in client.ops if op[0] in ("audio", "event")],
-            "aborted turn must stream nothing",
+            ["VOICE_ASSISTANT_RUN_START", "VOICE_ASSISTANT_STT_START"],
+            [op[1].name for op in client.ops if op[0] == "event"],
         )
+        self.assertEqual([], [op for op in client.ops if op[0] == "audio"])
         self.assertEqual([], b._mic_chunks)
         # A fresh start after an abort works again.
         engine.gate = None
-        start("conv-fresh", 0, None, None)
-        audio(b"\x02\x00" * 8, None)
-        stop(False)
+        await start("conv-fresh", 0, None, None)
+        await audio(b"\x02\x00" * 8, None)
+        await stop(False)
         self.assertTrue(await _wait_for(client.saw_run_end))
         client.hang_up()
         await _task
@@ -432,7 +512,7 @@ class AbortTests(unittest.IsolatedAsyncioTestCase):
         client = FakeVoiceClient()
         _task, (start, stop, audio) = await _session_with_handlers(b, client)
         noop = b._turn_task is None
-        stop(True)
+        await stop(True)
         self.assertTrue(noop)
         self.assertEqual(b"", b"".join(b._mic_chunks))
         client.hang_up()
@@ -521,9 +601,9 @@ class ReconnectTests(unittest.IsolatedAsyncioTestCase):
         client = FakeVoiceClient()
         task, (start, stop, audio) = await _session_with_handlers(bridge_obj, client)
         with captured_logs() as lines:
-            start(CONVERSATION_ID, 0, None, None)
-            audio(b"\x01\x00" * 8, None)
-            stop(False)
+            await start(CONVERSATION_ID, 0, None, None)
+            await audio(b"\x01\x00" * 8, None)
+            await stop(False)
             await _wait_for(lambda: bridge_obj._turn_task is None)
         blob = "\n".join(lines)
         for secret in (API_KEY_MARKER, GEMINI_KEY_MARKER, TRANSCRIPT_MARKER):
@@ -561,6 +641,7 @@ class CliAndLoggingTests(unittest.TestCase):
         self.assertEqual(24000, args.sample_rate)
         self.assertEqual(30.0, args.turn_timeout)
         defaults = parser.parse_args(["--relay-host", "h", "--key-file", "k", "--gemini-key-file", "g"])
+        self.assertEqual("gemini-flash-latest", bridge.DEFAULT_MODEL)
         self.assertEqual(bridge.DEFAULT_MODEL, defaults.model)
         self.assertEqual(bridge.DEFAULT_TTS_MODEL, defaults.tts_model)
         self.assertEqual(bridge.DEFAULT_TTS_VOICE, defaults.tts_voice)
@@ -584,6 +665,40 @@ class CliAndLoggingTests(unittest.TestCase):
     def test_pcm_mime_uses_declared_device_rate(self):
         self.assertEqual("audio/pcm;rate=24000", bridge._pcm_mime(24000))
         self.assertEqual("audio/pcm;rate=16000", bridge._pcm_mime(16000))
+        self.assertEqual(16000, bridge.DEFAULT_SAMPLE_RATE)
+
+    def test_tts_pcm_resamples_from_24khz_to_device_16khz(self):
+        source = array("h", [i * 1000 for i in range(24)]).tobytes()
+        converted = bridge._resample_pcm16_mono(source, 24000, 16000)
+        samples = array("h")
+        samples.frombytes(converted)
+        self.assertEqual(16, len(samples))
+        self.assertEqual([0, 1500, 3000, 4500], list(samples[:4]))
+
+    def test_inline_audio_accepts_sdk_raw_bytes_and_base64_text(self):
+        raw = b"\x01\x02\x03\x04"
+        self.assertEqual(raw, bridge._inline_audio_bytes(raw))
+        encoded = base64.b64encode(raw).decode("ascii")
+        self.assertEqual(raw, bridge._inline_audio_bytes(encoded))
+
+    def test_tts_wav_container_is_decoded_to_raw_pcm(self):
+        """gemini-3.x TTS answers with a WAV container, not bare L16 PCM."""
+        frames = array("h", [i for i in range(32)]).tobytes()
+        wav = _wav_bytes(frames, rate=24000, channels=1)
+        self.assertEqual((frames, 24000), bridge._decode_tts_audio(wav))
+
+    def test_tts_raw_pcm_is_returned_with_the_default_rate(self):
+        raw = b"\x01\x00\x02\x00"
+        self.assertEqual((raw, 24000), bridge._decode_tts_audio(raw))
+
+    def test_tts_wav_at_a_foreign_rate_is_resampled_to_the_source_rate(self):
+        frames = array("h", [i * 100 for i in range(48)]).tobytes()
+        wav = _wav_bytes(frames, rate=48000, channels=1)
+        pcm = bridge._tts_pcm_from_response(wav)
+        self.assertEqual(24, len(pcm) // 2)
+
+    def test_tts_default_model_is_a_quota_available_tts_model(self):
+        self.assertEqual("gemini-3.8-flash-tts", bridge.DEFAULT_TTS_MODEL)
 
     def test_main_refuses_bad_key_mode_without_leaking(self):
         bad = _key_file(self._tmp.name, mode=0o644, name="bad-api-key")

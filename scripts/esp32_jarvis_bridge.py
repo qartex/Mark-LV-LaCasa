@@ -8,8 +8,8 @@ bridge answers its voice-assistant requests with the Gemini API.
 Contract (aioesphomeapi voice assistant, API-audio mode):
 
 - ``subscribe_voice_assistant(handle_start, handle_stop, handle_audio)``.
-- ``handle_start`` is called synchronously and MUST return an int; returning
-  ``0`` answers ``VoiceAssistantResponse(port=0)`` so the device streams the
+- ``handle_start`` is awaited by ``aioesphomeapi`` and MUST resolve to an int;
+  resolving to ``0`` answers ``VoiceAssistantResponse(port=0)`` so the device streams the
   microphone over the encrypted native API connection (no external unicast
   endpoint of any kind is opened by this process).
 - ``handle_audio(data, data2)`` delivers 16-bit little-endian mono PCM mic
@@ -38,26 +38,32 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from array import array
 import base64
 import contextlib
 import enum
 import functools
 import inspect
+import io
 import logging
 import sys
+import wave
 from pathlib import Path
 
 from esp32_api_acceptance import KeyFileError, load_api_key  # reused contract
 
 __all__ = [
+    "DEFAULT_CAPTURE_WINDOW_S",
     "DEFAULT_MODEL",
     "DEFAULT_RELAY_PORT",
     "DEFAULT_SAMPLE_RATE",
+    "DEFAULT_TTS_SOURCE_SAMPLE_RATE",
     "DEFAULT_SYSTEM_INSTRUCTION",
     "DEFAULT_TTS_MODEL",
     "DEFAULT_TTS_VOICE",
     "DEFAULT_TURN_TIMEOUT_S",
     "REPLY_CHUNK_BYTES",
+    "REPLY_STREAM_URL",
     "EspHomeVoiceClient",
     "GeminiTurnEngine",
     "JarvisBridge",
@@ -71,12 +77,20 @@ __all__ = [
 _LOG = logging.getLogger("esp32_jarvis_bridge")
 
 DEFAULT_RELAY_PORT = 16053
-DEFAULT_SAMPLE_RATE = 24000
-DEFAULT_MODEL = "gemini-2.5-flash"
-DEFAULT_TTS_MODEL = "gemini-2.5-flash-preview-tts"
+DEFAULT_SAMPLE_RATE = 16000  # ESPHome voice-assistant microphone and speaker
+DEFAULT_TTS_SOURCE_SAMPLE_RATE = 24000  # Gemini TTS raw PCM output
+DEFAULT_MODEL = "gemini-flash-latest"
+DEFAULT_TTS_MODEL = "gemini-3.8-flash-tts"
 DEFAULT_TTS_VOICE = "Kore"
 DEFAULT_TURN_TIMEOUT_S = 60.0
+DEFAULT_CAPTURE_WINDOW_S = 5.0
 REPLY_CHUNK_BYTES = 2048  # 1024 samples of 16-bit mono PCM per message
+
+# TTS_END must carry a non-empty url: the firmware ignores an empty one and
+# would then never enter STREAMING_RESPONSE, the only state that writes the
+# streamed PCM to the speaker. With `speaker:` bound (no media player) the
+# device never fetches it, so this placeholder is inert.
+REPLY_STREAM_URL = "http://127.0.0.1/tts/bridge.pcm"
 
 _BACKOFF_START_S = 1.0
 _BACKOFF_FACTOR = 2
@@ -121,6 +135,40 @@ def _pcm_mime(sample_rate: int) -> str:
     return f"audio/pcm;rate={int(sample_rate)}"
 
 
+def _resample_pcm16_mono(data: bytes, source_rate: int, target_rate: int) -> bytes:
+    """Linearly resample signed 16-bit mono PCM without optional dependencies."""
+    source_rate = int(source_rate)
+    target_rate = int(target_rate)
+    if source_rate <= 0 or target_rate <= 0:
+        raise ValueError("sample rates must be positive")
+    usable = len(data) - (len(data) % 2)
+    if usable == 0:
+        return b""
+    samples = array("h")
+    samples.frombytes(data[:usable])
+    if sys.byteorder != "little":
+        samples.byteswap()
+    if source_rate == target_rate or len(samples) == 1:
+        return data[:usable]
+    output_count = max(1, (len(samples) * target_rate) // source_rate)
+    converted = array("h")
+    for out_index in range(output_count):
+        numerator = out_index * source_rate
+        left = numerator // target_rate
+        fraction = numerator % target_rate
+        if left >= len(samples) - 1:
+            value = samples[-1]
+        else:
+            value = (
+                samples[left] * (target_rate - fraction)
+                + samples[left + 1] * fraction
+            ) // target_rate
+        converted.append(max(-32768, min(32767, value)))
+    if sys.byteorder != "little":
+        converted.byteswap()
+    return converted.tobytes()
+
+
 @functools.lru_cache(maxsize=None)
 def _voice_event(suffix: str):
     """Resolve a VoiceAssistantEventType member (real enum when installed)."""
@@ -140,6 +188,52 @@ async def _maybe_await(value):
     if inspect.isawaitable(value):
         return await value
     return value
+
+
+def _inline_audio_bytes(value) -> bytes:
+    """Normalize google-genai inline audio across SDK byte/string versions."""
+    if isinstance(value, str):
+        return base64.b64decode(value, validate=True)
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return bytes(value)
+    raise TypeError("inline audio payload is not bytes or base64 text")
+
+
+def _decode_tts_audio(payload: bytes) -> tuple[bytes, int]:
+    """Return raw 16-bit mono PCM and its sample rate.
+
+    Newer Gemini TTS models answer with a WAV container (``audio/wav``) while
+    older ones return bare ``audio/L16`` PCM; both must reach the device as raw
+    PCM, because the ESP32 firmware writes the API audio frame untouched.
+    """
+    data = bytes(payload)
+    if data[:4] == b"RIFF" and data[8:12] == b"WAVE":
+        with wave.open(io.BytesIO(data), "rb") as handle:
+            if handle.getsampwidth() != 2:
+                raise ValueError("TTS WAV must be 16-bit")
+            rate = handle.getframerate()
+            channels = handle.getnchannels()
+            frames = handle.readframes(handle.getnframes())
+        if channels == 1:
+            return frames, rate
+        if channels == 2:
+            samples = array("h")
+            samples.frombytes(frames)
+            mono = array(
+                "h",
+                ((samples[i] + samples[i + 1]) // 2 for i in range(0, len(samples) - 1, 2)),
+            )
+            return mono.tobytes(), rate
+        raise ValueError("unsupported TTS channel count")
+    return data, DEFAULT_TTS_SOURCE_SAMPLE_RATE
+
+
+def _tts_pcm_from_response(payload: bytes) -> bytes:
+    """Decode a TTS reply to raw PCM at ``DEFAULT_TTS_SOURCE_SAMPLE_RATE``."""
+    pcm, rate = _decode_tts_audio(payload)
+    if rate == DEFAULT_TTS_SOURCE_SAMPLE_RATE:
+        return pcm
+    return _resample_pcm16_mono(pcm, rate, DEFAULT_TTS_SOURCE_SAMPLE_RATE)
 
 
 # --------------------------------------------------------------------------- Gemini
@@ -203,12 +297,16 @@ class GeminiTurnEngine:
             config=types.GenerateContentConfig(
                 response_modalities=["AUDIO"],
                 speech_config=types.SpeechConfig(
-                    voice_config=types.PrebuiltVoiceConfig(voice_name=self._tts_voice)
+                    voice_config=types.VoiceConfig(
+                        prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                            voice_name=self._tts_voice
+                        )
+                    )
                 ),
             ),
         )
         part = speech_call.candidates[0].content.parts[0]
-        return answer, base64.b64decode(part.inline_data.data)
+        return answer, _tts_pcm_from_response(_inline_audio_bytes(part.inline_data.data))
 
 
 # --------------------------------------------------------------------------- ESPHome client
@@ -291,7 +389,9 @@ class JarvisBridge:
         tts_model: str = DEFAULT_TTS_MODEL,
         tts_voice: str = DEFAULT_TTS_VOICE,
         sample_rate: int = DEFAULT_SAMPLE_RATE,
+        tts_source_sample_rate: int = DEFAULT_TTS_SOURCE_SAMPLE_RATE,
         turn_timeout: float = DEFAULT_TURN_TIMEOUT_S,
+        capture_window: float = DEFAULT_CAPTURE_WINDOW_S,
         system_instruction: str | None = None,
         voice_client_factory=None,
         sleep=None,
@@ -299,6 +399,13 @@ class JarvisBridge:
         self.relay_host = str(relay_host)
         self.relay_port = int(relay_port)
         self._turn_timeout = float(turn_timeout)
+        self._device_sample_rate = int(sample_rate)
+        self._tts_source_sample_rate = int(tts_source_sample_rate)
+        if self._device_sample_rate <= 0 or self._tts_source_sample_rate <= 0:
+            raise ValueError("sample rates must be positive")
+        self._capture_window = float(capture_window)
+        if self._capture_window <= 0:
+            raise ValueError("capture_window must be positive")
         self.engine: GeminiTurnEngine = engine or GeminiTurnEngine(
             gemini_key,
             model=model,
@@ -312,8 +419,10 @@ class JarvisBridge:
         )
         self._voice = None
         self._mic_chunks: list[bytes] = []
+        self._capture_task: asyncio.Task | None = None
         self._turn_task: asyncio.Task | None = None
         self._active = False
+        self._listening_announced = False
         self._stopped = False
         if sleep is not None:
             self._sleep = sleep
@@ -357,13 +466,19 @@ class JarvisBridge:
             self._abort_turn()
             await _maybe_await(voice.close())
 
-    # -- device callbacks (sync, called from the aioesphomeapi loop)
+    # -- device callbacks (awaited by aioesphomeapi 46.3.0)
 
-    def handle_start(self, conversation_id, flags, audio_settings, wake_word_phrase) -> int:
-        """Answer the device's request to start: API-audio mode (port=0 -> 0)."""
+    async def handle_start(
+        self, conversation_id, flags, audio_settings, wake_word_phrase
+    ) -> int:
+        """Resolve the start request to encrypted API-audio mode (port 0)."""
         self._abort_turn()  # discard any stale turn from a previous round
         self._mic_chunks = []
         self._active = True
+        self._listening_announced = False
+        self._capture_task = asyncio.get_running_loop().create_task(
+            self._finish_after_capture_window()
+        )
         _LOG.info(
             "assistant start flags=%s wake_word=%s",
             int(bool(flags)),
@@ -371,9 +486,24 @@ class JarvisBridge:
         )
         return 0
 
-    def handle_audio(self, data: bytes, data2: bytes | None) -> None:
+    async def _finish_after_capture_window(self) -> None:
+        try:
+            await asyncio.sleep(self._capture_window)
+            if self._active:
+                _LOG.info("capture window ended status=processing")
+                self._finish_turn_request()
+        finally:
+            if self._capture_task is asyncio.current_task():
+                self._capture_task = None
+
+    async def handle_audio(self, data: bytes, data2: bytes | None) -> None:
         if not self._active or self._voice is None:
             return
+        if not self._listening_announced:
+            await self._voice.send_voice_assistant_event(_voice_event("RUN_START"), {})
+            await self._voice.send_voice_assistant_event(_voice_event("STT_START"), {})
+            self._listening_announced = True
+            _LOG.info("microphone stream started status=listening")
         if not data:  # empty chunk marks the end of the recording
             self._finish_turn_request()
             return
@@ -381,7 +511,7 @@ class JarvisBridge:
         if data2:
             self._mic_chunks.append(bytes(data2))
 
-    def handle_stop(self, aborted: bool) -> None:
+    async def handle_stop(self, aborted: bool) -> None:
         if aborted:
             _LOG.info("assistant aborted status=discarded")
             self._abort_turn()
@@ -391,6 +521,11 @@ class JarvisBridge:
     # -- turn execution
 
     def _finish_turn_request(self) -> None:
+        capture_task = self._capture_task
+        self._capture_task = None
+        if capture_task is not None and capture_task is not asyncio.current_task():
+            capture_task.cancel()
+        self._active = False
         if self._turn_task is not None:
             return  # already running
         if not self._mic_chunks:
@@ -404,6 +539,10 @@ class JarvisBridge:
         self._turn_task = loop.create_task(self._run_turn(voice))
 
     def _abort_turn(self) -> None:
+        capture_task = self._capture_task
+        self._capture_task = None
+        if capture_task is not None and not capture_task.done():
+            capture_task.cancel()
         task = self._turn_task
         self._turn_task = None
         self._reset_turn()
@@ -413,6 +552,7 @@ class JarvisBridge:
     def _reset_turn(self) -> None:
         self._mic_chunks = []
         self._active = False
+        self._listening_announced = False
 
     async def _run_turn(self, voice) -> None:
         mic_pcm = b"".join(self._mic_chunks)
@@ -425,9 +565,11 @@ class JarvisBridge:
                 )
             except asyncio.TimeoutError:
                 _LOG.info("turn timed out status=discarded")
+                await voice.send_voice_assistant_event(_voice_event("RUN_END"), {})
                 return
             except Exception as exc:  # status-only: never log engine internals
                 _LOG.info("turn failed status=discarded error_type=%s", type(exc).__name__)
+                await voice.send_voice_assistant_event(_voice_event("RUN_END"), {})
                 return
             transcript, reply_pcm = result
             if not self._stopped:
@@ -438,13 +580,33 @@ class JarvisBridge:
                 self._turn_task = None
 
     async def _stream_reply(self, voice, reply_pcm) -> None:
-        pcm = bytes(reply_pcm)
+        pcm = _resample_pcm16_mono(
+            bytes(reply_pcm), self._tts_source_sample_rate, self._device_sample_rate
+        )
+        # TTS_START starts the raw API speaker; TTS_END is what moves the device
+        # into STREAMING_RESPONSE (only that state writes audio to the speaker);
+        # STREAM_START/END bracket the PCM.
+        await voice.send_voice_assistant_event(
+            _voice_event("TTS_START"), {"text": "JARVIS"}
+        )
+        await voice.send_voice_assistant_event(
+            _voice_event("TTS_END"), {"url": REPLY_STREAM_URL}
+        )
         await voice.send_voice_assistant_event(_voice_event("TTS_STREAM_START"), {})
         if pcm:
+            loop = asyncio.get_running_loop()
+            started = loop.time()
+            audio_seconds_sent = 0.0
+            bytes_per_second = self._device_sample_rate * 2
             for offset in range(0, len(pcm), REPLY_CHUNK_BYTES):
-                await voice.send_voice_assistant_audio(pcm[offset : offset + REPLY_CHUNK_BYTES])
-        await voice.send_voice_assistant_audio(b"")  # device: end-of-stream marker
-        await voice.send_voice_assistant_event(_voice_event("TTS_END"), {})
+                chunk = pcm[offset : offset + REPLY_CHUNK_BYTES]
+                await voice.send_voice_assistant_audio(chunk)
+                audio_seconds_sent += len(chunk) / bytes_per_second
+                elapsed = loop.time() - started
+                wait_time = (audio_seconds_sent - 0.384) - elapsed
+                if wait_time > 0:
+                    await asyncio.sleep(wait_time)
+        await voice.send_voice_assistant_event(_voice_event("TTS_STREAM_END"), {})
         await voice.send_voice_assistant_event(_voice_event("RUN_END"), {})
 
 
@@ -472,6 +634,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tts-voice", default=DEFAULT_TTS_VOICE)
     parser.add_argument("--sample-rate", type=int, default=DEFAULT_SAMPLE_RATE)
     parser.add_argument("--turn-timeout", type=float, default=DEFAULT_TURN_TIMEOUT_S)
+    parser.add_argument("--capture-window", type=float, default=DEFAULT_CAPTURE_WINDOW_S)
     return parser
 
 
@@ -500,6 +663,7 @@ def main(argv=None) -> int:
         tts_voice=args.tts_voice,
         sample_rate=args.sample_rate,
         turn_timeout=args.turn_timeout,
+        capture_window=args.capture_window,
     )
     try:
         asyncio.run(satellite_bridge.run())

@@ -63,9 +63,11 @@ substitutions:
   # shutdown line), so this is closer to a low-power idle than a true power off.
   enable_deep_sleep: 'false'
 
-  # Media player volume clamps (the onboard amp distorts near the top).
+  # Media player volume clamps. The user asked for full output, so the top is
+  # 1.0; the onboard amp gets loud and can distort above ~0.8, the sliders let
+  # it be turned back down.
   volume_min: '0.4'
-  volume_max: '0.8'
+  volume_max: '1.0'
 
   # Clock timezone in POSIX form - the device has no IANA database. It is only
   # a fallback: HA's time platform syncs the clock, and the `set_time_zone` API
@@ -345,6 +347,8 @@ speaker:
         timeout: never
       - id: media_mixing_input
         timeout: never
+      - id: assistant_mixing_input
+        timeout: never
 
   # The mixer needs both inputs at one sample rate; these resample if needed.
   - platform: resampler
@@ -353,6 +357,14 @@ speaker:
   - platform: resampler
     id: media_resampling_speaker
     output_speaker: media_mixing_input
+  # Dedicated assistant chain. The media player pins its 48 kHz stream info on
+  # the announcement resampler, and a resampler applies that info to whatever
+  # is written to it; sharing it made the assistant's 16 kHz PCM be read as
+  # 48 kHz and come out as aliasing noise. This one only ever sees the
+  # microphone rate.
+  - platform: resampler
+    id: assistant_resampling_speaker
+    output_speaker: assistant_mixing_input
 
 media_player:
   - platform: speaker
@@ -465,9 +477,8 @@ micro_wake_word:
                           then:
                             - media_player.stop:
                                 announcement: true
-                          # Phase 2: the wake word is local-only feedback here:
-                          # chime once (except in night mode). The voice
-                          # assistant itself is still never auto-started.
+                          # Phase 4: acknowledge locally, then explicitly start
+                          # the encrypted Assist conversation handled by bridge.
                           else:
                             - if:
                                 condition:
@@ -478,12 +489,17 @@ micro_wake_word:
                                       priority: true
                                       sound_file: !lambda return id(wake_word_triggered_sound);
                                   - delay: 300ms
+                            - voice_assistant.start:
+                                wake_word: !lambda return wake_word;
 
 
 voice_assistant:
   id: va
   microphone: i2s_mics
-  media_player: external_media_player
+  # Streamed TTS arrives as raw PCM over the API and is written to THIS speaker.
+  # Without a speaker binding the board acknowledges TTS_STREAM_START/END but
+  # silently drops every audio frame, so the reply is never audible.
+  speaker: assistant_resampling_speaker
   micro_wake_word: mww
   use_wake_word: true   # Phase 4: wake word starts the Assist conversation
   noise_suppression_level: 0
@@ -560,6 +576,13 @@ voice_assistant:
         then:
           - lambda: id(voice_assistant_phase) = ${voice_assist_replying_phase_id};
           - script.execute: control_leds
+  on_tts_stream_start:
+    # PCM replies stream straight into the speaker and never touch the media
+    # player, so its on_state cannot switch the amplifier on. Do it here, before
+    # the first audio frame is written to the DAC.
+    - switch.turn_on: amp_enable
+    - lambda: id(voice_assistant_phase) = ${voice_assist_replying_phase_id};
+    - script.execute: control_leds
   on_tts_end:
     - script.execute:
         id: send_tts_uri_event

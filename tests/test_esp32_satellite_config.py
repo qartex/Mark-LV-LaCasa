@@ -56,6 +56,18 @@ class Esp32SatelliteConfigTests(unittest.TestCase):
         self.assertNotRegex(self.thin, r"(?m)^\s*name: growraum-sprache-1\s*$")
         self.assertNotRegex(self.thin, r'(?m)^\s*friendly_name: ["\']?Growraum Sprache 1["\']?\s*$')
 
+    def test_home_test_uses_verified_static_fritz_address(self):
+        """A rogue DHCP lease must not move the accepted home-test node."""
+        self.assertIn(
+            "wifi:\n"
+            "  manual_ip:\n"
+            "    static_ip: 192.168.178.122\n"
+            "    gateway: 192.168.178.1\n"
+            "    subnet: 255.255.255.0\n"
+            "    dns1: 192.168.178.1\n",
+            self.thin,
+        )
+
     def test_exact_tool_and_esphome_version_pins(self):
         requirements = [
             line.strip()
@@ -120,8 +132,8 @@ class Esp32SatelliteConfigTests(unittest.TestCase):
         self.assertRegex(self.core, r"(?m)^      bssid: !secret wifi_bssid$")
 
     def test_phase2_mic_is_unmuted_and_wake_word_runs_locally(self):
-        """Phase-2 decision (user-approved): mic listens; detection stays local."""
-        forbidden_actions = ("voice_assistant.start", "microphone.stop_capture")
+        """Phase-2 microphone stays live while Phase 4 owns conversation start."""
+        forbidden_actions = ("microphone.stop_capture",)
         for action in forbidden_actions:
             self.assertNotIn(action, self.core, f"forbidden action remains: {action}")
 
@@ -182,6 +194,61 @@ class Esp32SatelliteConfigTests(unittest.TestCase):
         """Phase 4: wake word detection opens an encrypted Assist conversation."""
         self.assertRegex(self.core, r"(?m)^  use_wake_word: true\s+.*$")
         self.assertIn("  micro_wake_word: mww\n", self.core)
+        detection = self.core.split("  on_wake_word_detected:\n", 1)[1].split(
+            "\nvoice_assistant:\n", 1
+        )[0]
+        self.assertIn(
+            "- voice_assistant.start:\n"
+            "                                wake_word: !lambda return wake_word;",
+            detection,
+        )
+
+    def test_voice_assistant_binds_the_speaker_for_streamed_tts(self):
+        """The API streams TTS PCM; without a speaker binding the board drops it."""
+        self.assertIn(
+            "  speaker: assistant_resampling_speaker\n",
+            self._voice_assistant_block(),
+        )
+
+    def test_assistant_has_a_dedicated_speaker_chain(self):
+        """The media player pins 48 kHz on the announcement resampler.
+
+        Sharing it would make the assistant's 16 kHz PCM be read as 48 kHz and
+        come out as aliasing noise, so the assistant needs its own resampler and
+        mixer input whose stream info stays at the microphone rate.
+        """
+        self.assertIn(
+            "  - platform: mixer\n    id: mixing_speaker\n", self.core
+        )
+        mixer = self.core.split("  - platform: mixer\n    id: mixing_speaker\n", 1)[1].split(
+            "\n  - platform:", 1
+        )[0]
+        self.assertIn("- id: assistant_mixing_input", mixer)
+        self.assertIn(
+            "  - platform: resampler\n"
+            "    id: assistant_resampling_speaker\n"
+            "    output_speaker: assistant_mixing_input\n",
+            self.core,
+        )
+
+    def test_voice_assistant_uses_pcm_speaker_output_only(self):
+        """`speaker` and `media_player` are an exclusive ESPHome group."""
+        va = self._voice_assistant_block()
+        self.assertNotIn("media_player: external_media_player", va)
+        self.assertIn("on_tts_stream_start:", va)
+        self.assertIn("switch.turn_on: amp_enable", va)
+
+    def test_media_player_reaches_full_volume(self):
+        self.assertRegex(self.core, r"(?m)^  volume_max: '1\.0'$")
+
+    def _voice_assistant_block(self):
+        lines = self.core.split("\nvoice_assistant:\n", 1)[1].splitlines()
+        block = []
+        for line in lines:
+            if line and not line.startswith((" ", "#")):
+                break
+            block.append(line)
+        return "\n".join(block) + "\n"
 
     def test_boot_and_wake_sounds_are_disabled(self):
         for switch_id in ("wake_sound", "boot_sound"):
