@@ -178,8 +178,10 @@ class Esp32SatelliteConfigTests(unittest.TestCase):
         self.assertIn("switch.is_off: night_mode", detection)
         self.assertNotIn("switch.is_on: wake_sound", detection)
 
-    def test_voice_assistant_pipeline_stays_manual(self):
-        self.assertRegex(self.core, r"(?m)^  use_wake_word: false$")
+    def test_wake_word_auto_starts_assist_for_the_bridge_client(self):
+        """Phase 4: wake word detection opens an encrypted Assist conversation."""
+        self.assertRegex(self.core, r"(?m)^  use_wake_word: true\s+.*$")
+        self.assertIn("  micro_wake_word: mww\n", self.core)
 
     def test_boot_and_wake_sounds_are_disabled(self):
         for switch_id in ("wake_sound", "boot_sound"):

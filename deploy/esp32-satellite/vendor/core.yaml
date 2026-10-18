@@ -485,7 +485,7 @@ voice_assistant:
   microphone: i2s_mics
   media_player: external_media_player
   micro_wake_word: mww
-  use_wake_word: false
+  use_wake_word: true   # Phase 4: wake word starts the Assist conversation
   noise_suppression_level: 0
   auto_gain: 0 dbfs
   volume_multiplier: 1
