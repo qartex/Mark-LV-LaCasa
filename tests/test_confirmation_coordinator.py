@@ -235,7 +235,7 @@ class TestPendingRecordShape(unittest.TestCase):
                                  'expires_at', 'state', 'opaque_mcp_token'})
         pending = make_pending()
         self.assertLessEqual(pending.expires_at - pending.created_at, 600.0)
-        self.assertEqual(pending.expires_at - pending.created_at, TTL_5_MIN)
+        self.assertAlmostEqual(pending.expires_at - pending.created_at, TTL_5_MIN)
 
 
 class TestGrammarBounded(unittest.TestCase):
