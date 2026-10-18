@@ -101,10 +101,8 @@ esphome:
               - script.execute: control_leds
     - priority: -100
       then:
-        # Phase-1 privacy invariant: muting makes every captured buffer all-zero.
-        # Capture remains active only because this I2S controller supplies the
-        # BCLK/LRCLK/MCLK required by the speaker's secondary I2S bus.
-        - microphone.mute: i2s_mics
+        # Phase-2 decision (explicitly approved by the user): the microphone
+        # listens from boot; capture feeds the on-device wake word only.
         - microphone.capture: i2s_mics
         # Restore the alarm settings and the timezone saved in flash.
         - lambda: |-
@@ -132,7 +130,7 @@ esphome:
               - number.set:
                   id: wake_word_threshold
                   value: !lambda |-
-                    uint8_t cutoff = id(alexa).get_default_probability_cutoff();
+                    uint8_t cutoff = id(hey_jarvis).get_default_probability_cutoff();
                     for (auto *m : id(mww).get_wake_words()) {
                       if (m->is_enabled()) {
                         cutoff = m->get_default_probability_cutoff();
@@ -144,7 +142,10 @@ esphome:
         # Apply the wake word cutoffs once the select and the slider hold
         # their restored values (their own on_value may fire before that).
         - script.execute: apply_wake_word_sensitivity
-        - logger.log: "Phase-1 privacy lock: microphone muted; clock-only capture active"
+        # Start local wake-word detection ("Hey Jarvis"). No audio leaves the
+        # board in this step; the voice assistant itself is never auto-started.
+        - micro_wake_word.start:
+        - logger.log: "Phase-2: microphone active; hey_jarvis wake word listening locally"
 
 esp32:
   board: esp32-s3-devkitc-1
@@ -424,23 +425,17 @@ media_player:
       - id: boot_sound_custom
         file: ${boot_sound_file}
 
-# Home Assistant picks the active wake word: the device page shows a "Wake word"
-# select listing every model below. The first
-# model is the default on a fresh flash; the choice is then kept in flash. Models
-# that are not selected are not loaded, so the extra ones cost flash, not RAM.
+# The board listens to ONE wake word: "Hey Jarvis". Standalone micro_wake_word
+# only activates the first model of the list, so that one and only that one is
+# configured here (the others were removed; each extra model cost flash and RAM
+# and only Alexa ever listened).
 micro_wake_word:
   id: mww
   microphone: i2s_mics
   stop_after_detection: false
   models:
-    - model: https://github.com/esphome/micro-wake-word-models/raw/40ff33f57f8fc6ad71a75ef085abbf742495b225/models/v2/alexa.json
-      id: alexa
-    - model: https://github.com/esphome/micro-wake-word-models/raw/40ff33f57f8fc6ad71a75ef085abbf742495b225/models/v2/okay_nabu.json
-      id: okay_nabu
     - model: https://github.com/esphome/micro-wake-word-models/raw/40ff33f57f8fc6ad71a75ef085abbf742495b225/models/v2/hey_jarvis.json
       id: hey_jarvis
-    - model: https://github.com/esphome/micro-wake-word-models/raw/40ff33f57f8fc6ad71a75ef085abbf742495b225/models/v2/hey_mycroft.json
-      id: hey_mycroft
   vad:
     model: https://github.com/esphome/micro-wake-word-models/raw/40ff33f57f8fc6ad71a75ef085abbf742495b225/models/v2/vad.json
   on_wake_word_detected:
@@ -470,13 +465,13 @@ micro_wake_word:
                           then:
                             - media_player.stop:
                                 announcement: true
-                          # Phase 1 never starts Assist; the branch intentionally ends here.
+                          # Phase 2: the wake word is local-only feedback here:
+                          # chime once (except in night mode). The voice
+                          # assistant itself is still never auto-started.
                           else:
                             - if:
                                 condition:
-                                  and:
-                                    - switch.is_on: wake_sound
-                                    - switch.is_off: night_mode   # the ring is enough at night
+                                  switch.is_off: night_mode   # the ring is enough at night
                                 then:
                                   - script.execute:
                                       id: play_sound
@@ -746,7 +741,7 @@ globals:
   - id: mic_is_muted
     type: bool
     restore_value: no
-    initial_value: 'true'
+    initial_value: 'false'   # Phase 2: the microphone listens by default
   # Transient pass-through for the current ring colour (set by led_set_effect
   # from its params right before use), so no need to persist across reboots.
   - id: led_ring_color_r
@@ -1246,6 +1241,13 @@ switch:
           then:
             - micro_wake_word.stop:
             - voice_assistant.stop:
+    # Phase 2: disabling the diagnostic mute restarts local detection.
+    on_turn_off:
+      - if:
+          condition:
+            lambda: return !id(init_in_progress);
+          then:
+            - micro_wake_word.start:
 
   - platform: gpio
     id: amp_enable
@@ -1281,6 +1283,11 @@ switch:
     turn_on_action:
       - lambda: id(mic_is_muted) = true;
       - microphone.mute: i2s_mics
+      - script.execute: flash_ring
+    # Phase 2: unmuting restores local wake-word listening again.
+    turn_off_action:
+      - lambda: id(mic_is_muted) = false;
+      - microphone.unmute: i2s_mics
       - script.execute: flash_ring
 
 

@@ -119,38 +119,67 @@ class Esp32SatelliteConfigTests(unittest.TestCase):
         self.assertRegex(self.core, r"(?m)^      password: !secret wifi_password$")
         self.assertRegex(self.core, r"(?m)^      bssid: !secret wifi_bssid$")
 
-    def test_privacy_lock_mutes_before_the_only_capture_path(self):
-        forbidden_actions = (
-            "voice_assistant.start",
-            "micro_wake_word.start",
-            "microphone.unmute",
-            "microphone.stop_capture",
-        )
+    def test_phase2_mic_is_unmuted_and_wake_word_runs_locally(self):
+        """Phase-2 decision (user-approved): mic listens; detection stays local."""
+        forbidden_actions = ("voice_assistant.start", "microphone.stop_capture")
         for action in forbidden_actions:
             self.assertNotIn(action, self.core, f"forbidden action remains: {action}")
 
-        captures = list(re.finditer(r"(?m)^\s*- microphone\.capture: i2s_mics\s*$", self.core))
-        self.assertEqual(1, len(captures), "clock-only microphone capture must have one boot path")
+        self.assertNotRegex(self.core, r"(?m)^\s*- action: start_va\s*$")
         boot_section = self.core.split("  on_boot:\n", 1)[1].split("\nesp32:\n", 1)[0]
-        self.assertIn(
-            "        - microphone.mute: i2s_mics\n"
-            "        - microphone.capture: i2s_mics\n",
+        captures = list(re.finditer(
+            r"(?m)^\s*- microphone\.capture: i2s_mics\s*$", boot_section
+        ))
+        self.assertEqual(1, len(captures), "clock/master capture must have one boot path")
+        self.assertNotIn(
+            "- microphone.mute: i2s_mics",
             boot_section,
-            "boot must unconditionally mute before clock-only capture",
+            "phase 2 boots with the microphone listening",
         )
         self.assertIn(
             "  - id: mic_is_muted\n"
             "    type: bool\n"
             "    restore_value: no\n"
-            "    initial_value: 'true'\n",
+            "    initial_value: 'false'   # Phase 2: the microphone listens by default\n",
             self.core,
         )
+        self.assertIn("- micro_wake_word.start:", boot_section)
 
-    def test_wakeword_and_voice_assistant_consumers_remain_stopped(self):
-        self.assertIn("micro_wake_word:", self.core)
-        self.assertIn("voice_assistant:", self.core)
-        self.assertNotRegex(self.core, r"(?m)^\s*- action: start_va\s*$")
-        self.assertNotRegex(self.core, r"(?m)^\s*on_turn_off:\s*$\n(?:.*\n){0,8}\s*- micro_wake_word")
+    def test_phase2_mute_switch_can_unmute_again(self):
+        switch_block = re.search(
+            r"(?ms)^  - platform: template\n    id: mic_mute_switch\n(.*?)(?=^  - platform:)",
+            self.core,
+        )
+        if switch_block is None:
+            self.fail("missing mic_mute_switch")
+        block = switch_block.group(1)
+        self.assertIn("turn_on_action:", block)
+        self.assertIn("- microphone.mute: i2s_mics", block)
+        self.assertIn("turn_off_action:", block)
+        self.assertIn("- microphone.unmute: i2s_mics", block)
+        self.assertIn("id(mic_is_muted) = false", block)
+
+    def test_phase2_wake_word_model_and_local_feedback_are_pinned(self):
+        hey_jarvis = (
+            "https://github.com/esphome/micro-wake-word-models/raw/"
+            "40ff33f57f8fc6ad71a75ef085abbf742495b225/models/v2/hey_jarvis.json"
+        )
+        self.assertIn(f"- model: {hey_jarvis}", self.core)
+        # Standalone mww activates only the first model; hey_jarvis must be the
+        # only model so it is the one that actually listens.
+        self.assertNotIn("models/v2/alexa.json", self.core)
+        self.assertNotIn("models/v2/okay_nabu.json", self.core)
+        self.assertNotIn("models/v2/hey_mycroft.json", self.core)
+        self.assertNotIn("id(alexa)", self.core)
+        detection = self.core.split("  on_wake_word_detected:\n", 1)[1].split(
+            "\nvoice_assistant:\n", 1
+        )[0]
+        self.assertIn("wake_word_triggered_sound", detection)
+        self.assertIn("switch.is_off: night_mode", detection)
+        self.assertNotIn("switch.is_on: wake_sound", detection)
+
+    def test_voice_assistant_pipeline_stays_manual(self):
+        self.assertRegex(self.core, r"(?m)^  use_wake_word: false$")
 
     def test_boot_and_wake_sounds_are_disabled(self):
         for switch_id in ("wake_sound", "boot_sound"):
@@ -174,7 +203,7 @@ class Esp32SatelliteConfigTests(unittest.TestCase):
             stripped = line.strip()
             if stripped.startswith(("file: https://", "model: https://", "- model: https://")):
                 asset_urls.append(stripped.split(": ", 1)[1])
-        self.assertGreaterEqual(len(asset_urls), 8)
+        self.assertGreaterEqual(len(asset_urls), 5)
         for url in asset_urls:
             if "home-assistant-voice-pe" in url:
                 self.assertIn(VOICE_ASSET_COMMIT, url)
