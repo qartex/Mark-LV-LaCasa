@@ -198,6 +198,13 @@ class Esp32SatelliteConfigTests(unittest.TestCase):
         ):
             self.assertIn(line, self.core)
 
+    def test_phase1_media_pipeline_matches_fixed_wav_fixture(self):
+        media_pipeline = self.core.split("    media_pipeline:\n", 1)[1].split(
+            "    on_announcement:\n", 1
+        )[0]
+        self.assertIn("      format: WAV\n", media_pipeline)
+        self.assertNotIn("      format: FLAC\n", media_pipeline)
+
     def test_plaintext_wifi_and_production_identity_are_absent(self):
         combined = "\n".join(
             path.read_text(encoding="utf-8")

@@ -21,7 +21,20 @@ chmod 600 secrets.yaml
 /private/tmp/waveshare-phase1-venv/bin/esphome config waveshare-phase1.yaml
 ```
 
-The local secret schema is exactly `wifi_ssid`, `wifi_password`, and `api_encryption_key`. Keep `secrets.yaml` beside the thin config and never commit it.
+The local secret schema is exactly `wifi_ssid`, `wifi_password`, `wifi_bssid`, and `api_encryption_key`. Keep `secrets.yaml` beside the thin config and never commit it.
+
+## Speaker acceptance
+
+Phase 1 serves a fixed low-amplitude WAV fixture, so the `media_pipeline.format` is intentionally `WAV`. API command acceptance and an HTTP fetch are transport evidence only; the operator must separately confirm that the tone and spoken sentence are audible and intelligible.
+
+The normal relay binds only to the bridge host's freshly discovered Tailscale address. If macOS accepts the Tailscale connection but then refuses its LAN connection with `EHOSTUNREACH`, use the narrower key-authenticated reverse tunnel instead:
+
+```sh
+ssh -N -o ExitOnForwardFailure=yes \
+  -R 127.0.0.1:16053:<board-ip>:6053 <controller>
+```
+
+Verify the controller listener is bound only to `127.0.0.1`, run encrypted API discovery through that loopback endpoint, and tear the tunnel down after acceptance. Never omit the explicit remote loopback bind.
 
 ## Local-only outputs
 

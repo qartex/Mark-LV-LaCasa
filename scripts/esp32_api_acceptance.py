@@ -217,23 +217,16 @@ class EspHomeConnection:
         async def _play():
             import aioesphomeapi  # type: ignore[import-not-found]  # lazy, optional.
 
-            media_url = url
-            try:
-                request = aioesphomeapi.MediaPlayerCommandRequest(
-                    key=entity_key,
-                    command=aioesphomeapi.MediaPlayerCommand.PLAY,
-                    media_url=media_url,
-                )
-            except TypeError:
-                request = aioesphomeapi.MediaPlayerCommandRequest(
-                    key=entity_key,
-                    command=aioesphomeapi.MediaPlayerCommand.PLAY,
-                    commanded_media_url=media_url,
-                )
-            sender = getattr(self._client, "send", None)
+            sender = getattr(self._client, "media_player_command", None)
             if sender is None:
-                raise AcceptanceError("installed native API client cannot send commands")
-            await sender(request)
+                raise AcceptanceError(
+                    "installed native API client cannot send media-player commands"
+                )
+            sender(
+                entity_key,
+                command=aioesphomeapi.MediaPlayerCommand.PLAY,
+                media_url=url,
+            )
 
         self._run(_play())
 

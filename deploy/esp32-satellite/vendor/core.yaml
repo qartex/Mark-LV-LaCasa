@@ -368,7 +368,8 @@ media_player:
       sample_rate: 48000        # what Music Assistant serves
     media_pipeline:
       speaker: media_resampling_speaker
-      format: FLAC
+      # Phase-1 acceptance serves one fixed low-amplitude WAV fixture.
+      format: WAV
       num_channels: 1           # mono hardware, one speaker
       sample_rate: 48000
     on_announcement:

@@ -26,6 +26,7 @@ import unittest.mock
 import wave
 from pathlib import Path
 from random import Random
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
@@ -820,6 +821,45 @@ class FakeConnection:
         self.ops.append(("disconnect", None))
 
 
+class EspHomeConnectionTests(unittest.TestCase):
+    def test_play_uses_public_media_player_command_api(self):
+        calls = []
+
+        class FakeNativeClient:
+            def media_player_command(self, key, **kwargs):
+                calls.append((key, kwargs))
+
+        fake_module = SimpleNamespace(
+            MediaPlayerCommand=SimpleNamespace(PLAY="play")
+        )
+        connection = acceptance.EspHomeConnection(
+            "127.0.0.1", 6053, noise_psk="fake-key"
+        )
+        connection._client = FakeNativeClient()
+        self.addCleanup(connection._teardown_loop)
+        with unittest.mock.patch.dict(
+            sys.modules, {"aioesphomeapi": fake_module}
+        ):
+            connection.play_media_url(
+                41, "http://192.168.37.2:18080/jarvis-speaker-test.wav"
+            )
+        self.assertEqual(
+            [
+                (
+                    41,
+                    {
+                        "command": "play",
+                        "media_url": (
+                            "http://192.168.37.2:18080/"
+                            "jarvis-speaker-test.wav"
+                        ),
+                    },
+                )
+            ],
+            calls,
+        )
+
+
 class ApiAcceptanceTests(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -828,6 +868,11 @@ class ApiAcceptanceTests(unittest.TestCase):
 
     def _key_file(self, mode=0o600, content=KEY_MARKER + "\n"):
         path = Path(self._tmp.name) / "api-key"
+        # Recreate from scratch: a previous subTest may have left the file in a
+        # deliberately restrictive mode (e.g. 0o040), and only root may truncate
+        # a file it lost the write bit to.
+        if path.exists():
+            path.unlink()
         path.write_bytes(content.encode())
         path.chmod(mode)
         return path
