@@ -466,7 +466,7 @@ class SpotifyOAuth:
         if record.refresh_token is None:
             raise SpotifyAuthorizationRequired("no refresh token")
         try:
-            new_record = self._do_refresh(record.client_id, record.refresh_token, now)
+            new_record = self._do_refresh(record, now)
         except SpotifyAuthorizationRequired:
             # Permanent authorization failure: only SpotifyAuthorizationRequired
             # escapes _do_refresh, and only for invalid_grant / revocation /
@@ -483,7 +483,11 @@ class SpotifyOAuth:
         except Exception:
             return None
 
-    def _do_refresh(self, client_id: str, refresh_token: str, now: datetime) -> OAuthRecord:
+    def _do_refresh(self, record: OAuthRecord, now: datetime) -> OAuthRecord:
+        client_id = record.client_id
+        refresh_token = record.refresh_token
+        if refresh_token is None:
+            raise SpotifyAuthorizationRequired("no refresh token")
         data = {
             "grant_type": "refresh_token",
             "refresh_token": refresh_token,

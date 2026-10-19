@@ -56,17 +56,11 @@ class Esp32SatelliteConfigTests(unittest.TestCase):
         self.assertNotRegex(self.thin, r"(?m)^\s*name: growraum-sprache-1\s*$")
         self.assertNotRegex(self.thin, r'(?m)^\s*friendly_name: ["\']?Growraum Sprache 1["\']?\s*$')
 
-    def test_home_test_uses_verified_static_fritz_address(self):
-        """A rogue DHCP lease must not move the accepted home-test node."""
-        self.assertIn(
-            "wifi:\n"
-            "  manual_ip:\n"
-            "    static_ip: 192.168.178.122\n"
-            "    gateway: 192.168.178.1\n"
-            "    subnet: 255.255.255.0\n"
-            "    dns1: 192.168.178.1\n",
-            self.thin,
-        )
+    def test_lacasa_deployment_uses_dhcp_and_can_roam_between_mesh_aps(self):
+        """The relocated grow-room node must not retain the old home subnet/AP."""
+        self.assertNotIn("manual_ip:", self.thin)
+        self.assertNotIn("192.168.178.", self.thin)
+        self.assertNotRegex(self.core, r"(?m)^\s+bssid:")
 
     def test_exact_tool_and_esphome_version_pins(self):
         requirements = [
@@ -122,14 +116,13 @@ class Esp32SatelliteConfigTests(unittest.TestCase):
             {
                 "wifi_ssid": "REPLACE_WITH_WIFI_SSID",
                 "wifi_password": "REPLACE_WITH_WIFI_PASSWORD",
-                "wifi_bssid": "REPLACE_WITH_HOME_AP_BSSID",
                 "api_encryption_key": "REPLACE_WITH_32_BYTE_BASE64_KEY",
             },
             entries,
         )
         self.assertRegex(self.core, r"(?m)^    - ssid: !secret wifi_ssid$")
         self.assertRegex(self.core, r"(?m)^      password: !secret wifi_password$")
-        self.assertRegex(self.core, r"(?m)^      bssid: !secret wifi_bssid$")
+        self.assertNotRegex(self.core, r"(?m)^\s+bssid:")
 
     def test_phase2_mic_is_unmuted_and_wake_word_runs_locally(self):
         """Phase-2 microphone stays live while Phase 4 owns conversation start."""

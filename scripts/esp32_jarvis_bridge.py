@@ -97,7 +97,7 @@ FALLBACK_TTS_MODELS = (
     "gemini-3.8-flash-lite-tts",
 )
 RETRY_DELAYS_S = (2.0, 5.0)
-DEFAULT_TTS_VOICE = "Kore"
+DEFAULT_TTS_VOICE = "Charon"
 DEFAULT_TURN_TIMEOUT_S = 60.0
 DEFAULT_CAPTURE_WINDOW_S = 5.0
 # A follow-up turn follows JARVIS's own question, so the user answers without a
@@ -129,9 +129,33 @@ DEFAULT_SYSTEM_INSTRUCTION = (
     "Antworte immer auf Deutsch: kurz, freundlich, in hoestens ein bis zwei "
     "Saetzen ohne Listen. Wenn eine Angabe fehlt (zum Beispiel der Ort beim "
     "Wetter), rate nicht, sondern frage in einem kurzen Satz danach. Wenn dir "
-    "Audio fehlt oder du etwas nicht verstehst, bitte einmal kurz wiederholen."
+    "Audio fehlt oder du etwas nicht verstehst, bitte einmal kurz wiederholen. "
+    "Nutze fuer Befehle wie spielen, pausieren, fortsetzen, naechster Titel, "
+    "vorheriger Titel, Lautstaerke oder was gerade laeuft die Spotify-Funktion."
     % _ASSISTANT_NAME
 )
+
+SPOTIFY_FUNCTION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "action": {
+            "type": "string",
+            "enum": ["play", "pause", "resume", "next", "previous", "volume", "current"],
+        },
+        "query": {"type": "string"},
+        "kind": {"type": "string", "enum": ["track", "album", "artist"]},
+        "volume_percent": {"type": "integer", "minimum": 0, "maximum": 100},
+    },
+    "required": ["action"],
+    "additionalProperties": False,
+}
+
+
+def _default_spotify_runner(parameters: dict) -> str:
+    """Load the deployed narrow controller only when a Spotify command exists."""
+    from plugins import spotify_control
+
+    return spotify_control.run(parameters)
 
 
 class VoiceAssistantEventType(enum.IntEnum):
@@ -228,6 +252,16 @@ def _inline_audio_bytes(value) -> bytes:
     raise TypeError("inline audio payload is not bytes or base64 text")
 
 
+def _tts_prompt(answer: str) -> str:
+    """Keep Gemini TTS in German and give JARVIS a calm male delivery."""
+    return (
+        "Sprich den folgenden Text ausschließlich auf Deutsch mit natürlicher "
+        "deutscher Aussprache und einer ruhigen, souveränen Männerstimme. "
+        "Lies nur den Text nach dem Doppelpunkt und füge nichts hinzu:\n"
+        + str(answer)
+    )
+
+
 def _is_retryable(exc: BaseException) -> bool:
     """Provider-side transient failures (quota, overload), not model errors."""
     code = getattr(exc, "code", None)
@@ -238,6 +272,19 @@ def _is_retryable(exc: BaseException) -> bool:
             pass
     text = str(exc)
     return "429" in text or "RESOURCE_EXHAUSTED" in text or "503" in text
+
+
+def _is_quota_error(exc: BaseException) -> bool:
+    """Quota failures usually persist; switch models instead of sleeping."""
+    code = getattr(exc, "code", None)
+    if code is not None:
+        try:
+            if int(code) == 429:
+                return True
+        except (TypeError, ValueError):
+            pass
+    text = str(exc)
+    return "429" in text or "RESOURCE_EXHAUSTED" in text
 
 
 def _is_model_incompatible(exc: BaseException) -> bool:
@@ -333,6 +380,7 @@ class GeminiTurnEngine:
         tts_voice: str = DEFAULT_TTS_VOICE,
         sample_rate: int = DEFAULT_SAMPLE_RATE,
         system_instruction: str | None = None,
+        spotify_runner=None,
     ):
         self._gemini_key = gemini_key
         self._model = model
@@ -340,6 +388,7 @@ class GeminiTurnEngine:
         self._tts_voice = tts_voice
         self._sample_rate = int(sample_rate)
         self._system_instruction = system_instruction or DEFAULT_SYSTEM_INSTRUCTION
+        self._spotify_runner = spotify_runner or _default_spotify_runner
         self._history: list[dict] = []
         self._chat_model_pref: str | None = None
         self._tts_model_pref: str | None = None
@@ -399,6 +448,8 @@ class GeminiTurnEngine:
                     model=model, contents=contents, config=config
                 )
             except Exception as exc:
+                if _is_quota_error(exc):
+                    raise
                 if not _is_retryable(exc):
                     raise
                 last = exc
@@ -426,6 +477,24 @@ class GeminiTurnEngine:
         assert last is not None
         raise last
 
+    def _answer_from_response(self, response) -> str:
+        """Return normal model text or execute exactly the Spotify function."""
+        for candidate in getattr(response, "candidates", ()) or ():
+            content = getattr(candidate, "content", None)
+            for part in getattr(content, "parts", ()) or ():
+                call = getattr(part, "function_call", None)
+                if call is None:
+                    continue
+                name = getattr(call, "name", "")
+                if name != "spotify_control":
+                    raise RuntimeError("unsupported model function")
+                parameters = dict(getattr(call, "args", None) or {})
+                answer = self._spotify_runner(parameters)
+                if not isinstance(answer, str) or not answer.strip():
+                    raise RuntimeError("Spotify controller returned no text")
+                return answer.strip()
+        return str(getattr(response, "text", "") or "").strip()
+
     def _turn_sync(self, mic_pcm: bytes) -> tuple[str, bytes]:
         from google import genai  # lazy, optional dependency
 
@@ -438,10 +507,21 @@ class GeminiTurnEngine:
             client,
             chat_models,
             self._contents(mic_pcm),
-            types.GenerateContentConfig(system_instruction=self._system_instruction),
+            types.GenerateContentConfig(
+                system_instruction=self._system_instruction,
+                tools=[types.Tool(function_declarations=[types.FunctionDeclaration(
+                    name="spotify_control",
+                    description=(
+                        "Steuert Spotify auf dem festen LaCasa-Empfaenger. "
+                        "Bei play Suchbegriff und Typ, bei volume Prozent angeben."
+                    ),
+                    parameters_json_schema=SPOTIFY_FUNCTION_SCHEMA,
+                )])],
+                automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+            ),
         )
         self._chat_model_pref = used_chat
-        answer = (answer_call.text or "").strip()
+        answer = self._answer_from_response(answer_call)
         if not answer:
             raise RuntimeError("model returned no text")
         self._remember(mic_pcm, answer)
@@ -451,7 +531,7 @@ class GeminiTurnEngine:
         used_tts, speech_call = self._generate(
             client,
             tts_models,
-            answer,
+            _tts_prompt(answer),
             types.GenerateContentConfig(
                 response_modalities=["AUDIO"],
                 speech_config=types.SpeechConfig(
@@ -558,6 +638,7 @@ class JarvisBridge:
         system_instruction: str | None = None,
         voice_client_factory=None,
         sleep=None,
+        ducking=None,
     ):
         self.relay_host = str(relay_host)
         self.relay_port = int(relay_port)
@@ -591,6 +672,7 @@ class JarvisBridge:
             lambda: EspHomeVoiceClient(self.relay_host, self.relay_port, api_key)
         )
         self._voice = None
+        self._ducking = ducking
         self._mic_chunks: list[bytes] = []
         self._capture_task: asyncio.Task | None = None
         self._turn_task: asyncio.Task | None = None
@@ -655,7 +737,10 @@ class JarvisBridge:
         self._mic_chunks = []
         self._active = True
         self._listening_announced = False
-        followup = bool(self._followup_pending) and not wake_word_phrase
+        # ESPHome may repeat the original wake-word phrase on the automatic
+        # continue-conversation callback. The bridge's pending state is the
+        # authoritative signal that this is the follow-up turn.
+        followup = bool(self._followup_pending)
         self._followup_pending = False
         if not followup:
             self._reset_conversation()
@@ -704,7 +789,7 @@ class JarvisBridge:
                         return
                 elif now - started >= idle_window:
                     _LOG.info("listen ended status=idle-timeout")
-                    self._finish_turn_request()
+                    self._finish_turn_request(discard_if_silent=True)
                     return
                 if now - started >= self._max_utterance:
                     _LOG.info("listen ended status=max-utterance")
@@ -741,7 +826,7 @@ class JarvisBridge:
 
     # -- turn execution
 
-    def _finish_turn_request(self) -> None:
+    def _finish_turn_request(self, *, discard_if_silent: bool = False) -> None:
         capture_task = self._capture_task
         self._capture_task = None
         if capture_task is not None and capture_task is not asyncio.current_task():
@@ -749,6 +834,11 @@ class JarvisBridge:
         self._active = False
         if self._turn_task is not None:
             return  # already running
+        if discard_if_silent and not self._heard_speech:
+            # The device continuously sends room-noise frames during an
+            # automatic follow-up. Do not send those frames back to the model,
+            # which can otherwise repeat its previous answer indefinitely.
+            self._mic_chunks = []
         if not self._mic_chunks:
             voice = self._voice
             self._reset_turn()
@@ -825,6 +915,27 @@ class JarvisBridge:
         pcm = _resample_pcm16_mono(
             bytes(reply_pcm), self._tts_source_sample_rate, self._device_sample_rate
         )
+        ducking = self._ducking
+        ducked = False
+        if ducking is not None:
+            ducked = bool(ducking.begin())
+            if ducked:
+                # Extend the recovery lease across the already-rendered audio.
+                ducking.heartbeat(len(pcm) / (self._device_sample_rate * 2) + 1.0)
+        try:
+            await self._stream_reply_pcm(
+                voice,
+                pcm,
+                answer=answer,
+                continue_conversation=continue_conversation,
+            )
+        finally:
+            if ducked and ducking is not None:
+                ducking.end()
+
+    async def _stream_reply_pcm(
+        self, voice, pcm: bytes, *, answer: str, continue_conversation: bool
+    ) -> None:
         # INTENT_END carries continue_conversation; the firmware restarts the
         # microphone after the reply only when that flag is set, which is what
         # lets the user answer a follow-up question without the wake word.
@@ -922,6 +1033,13 @@ def main(argv=None) -> int:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
+    try:
+        from core.ducking import DuckingController
+
+        ducking = DuckingController()
+    except Exception as exc:
+        print(f"ducking unavailable: {type(exc).__name__}", file=sys.stderr)
+        return 1
     satellite_bridge = JarvisBridge(
         relay_host=args.relay_host,
         relay_port=args.relay_port,
@@ -937,6 +1055,7 @@ def main(argv=None) -> int:
         silence_end=args.silence_end,
         max_utterance=args.max_utterance,
         voice_level=args.voice_level,
+        ducking=ducking,
     )
     try:
         asyncio.run(satellite_bridge.run())

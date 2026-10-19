@@ -88,6 +88,30 @@ class TokenRefreshTests(unittest.TestCase):
                     token = oauth.access_token(force_refresh=True)
         self.assertEqual(token, "new-token")
 
+    def test_real_refresh_preserves_authorization_window_and_scopes(self):
+        now = datetime(2026, 10, 19, tzinfo=timezone.utc)
+        record = _make_record(
+            authorized_at=now - timedelta(days=1),
+            authorization_expires_at=_six_months_from(now - timedelta(days=1)),
+            access_expires_at=now - timedelta(seconds=1),
+        )
+        response = MagicMock()
+        response.status_code = 200
+        response.json.return_value = {
+            "access_token": "fresh-token",
+            "expires_in": 3600,
+            # Spotify may omit scope and a rotated refresh token.
+        }
+        self.store.load.return_value = record
+        oauth = SpotifyOAuth(self.store, request=lambda *a, **k: response, clock=lambda: now)
+
+        self.assertEqual("fresh-token", oauth.access_token())
+        saved = self.store.save.call_args.args[0]
+        self.assertEqual(record.authorized_at, saved.authorized_at)
+        self.assertEqual(record.authorization_expires_at, saved.authorization_expires_at)
+        self.assertEqual(record.refresh_token, saved.refresh_token)
+        self.assertEqual(record.scopes, saved.scopes)
+
     def test_access_token_raises_when_no_record(self):
         oauth = SpotifyOAuth(self.store)
         with patch.object(oauth._store, 'load', return_value=None):

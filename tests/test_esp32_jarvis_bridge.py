@@ -24,6 +24,7 @@ import time
 import unittest
 import unittest.mock
 from pathlib import Path
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
@@ -321,12 +322,12 @@ class MicAccumulationTests(unittest.IsolatedAsyncioTestCase):
         client = FakeVoiceClient()
         task, (start, _stop, audio) = await _session_with_handlers(b, client)
         await start(CONVERSATION_ID, 0, None, None)
-        await audio(b"\x10\x00" * 320, None)
+        await audio(LOUD_PCM, None)
         self.assertTrue(
             await _wait_for(lambda: engine.calls and client.saw_run_end),
             "bounded capture did not finish the turn",
         )
-        self.assertEqual([b"\x10\x00" * 320], engine.calls)
+        self.assertEqual([LOUD_PCM], engine.calls)
         client.hang_up()
         await task
 
@@ -355,6 +356,61 @@ class MicAccumulationTests(unittest.IsolatedAsyncioTestCase):
 # --------------------------------------------------------------------------- reply streaming
 
 class ReplyStreamingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_reply_ducks_spotify_only_while_satellite_speaks(self):
+        class FakeDucking:
+            def __init__(self):
+                self.ops = []
+
+            def begin(self):
+                self.ops.append(("begin",))
+                return True
+
+            def heartbeat(self, hold_for=0.0):
+                self.ops.append(("heartbeat", hold_for))
+                return True
+
+            def end(self):
+                self.ops.append(("end",))
+                return True
+
+        ducking = FakeDucking()
+        b = make_bridge(ducking=ducking)
+        client = FakeVoiceClient()
+
+        await b._stream_reply(client, REPLY_PCM)
+
+        self.assertEqual("begin", ducking.ops[0][0])
+        self.assertTrue(any(op[0] == "heartbeat" for op in ducking.ops))
+        self.assertEqual("end", ducking.ops[-1][0])
+
+    async def test_reply_restores_spotify_when_satellite_stream_fails(self):
+        class FakeDucking:
+            def __init__(self):
+                self.ops = []
+
+            def begin(self):
+                self.ops.append("begin")
+                return True
+
+            def heartbeat(self, hold_for=0.0):
+                self.ops.append("heartbeat")
+                return True
+
+            def end(self):
+                self.ops.append("end")
+                return True
+
+        class BrokenVoice(FakeVoiceClient):
+            async def send_voice_assistant_audio(self, data):
+                raise ConnectionError("satellite gone")
+
+        ducking = FakeDucking()
+        b = make_bridge(ducking=ducking)
+
+        with self.assertRaises(ConnectionError):
+            await b._stream_reply(BrokenVoice(), REPLY_PCM)
+        self.assertEqual(["begin", "heartbeat", "end"], ducking.ops)
+
     async def test_reply_streamed_as_raw_16bit_mono_chunks(self):
         engine = FakeTurnEngine(reply=REPLY_PCM)
         b = make_bridge(engine=engine)
@@ -541,6 +597,30 @@ class MultiTurnConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await _wait_for(client.saw_run_end))
         self.assertEqual(0, len(engine.calls[1:]), "silence must not call the model")
         self.assertGreater(engine.resets, resets_before)
+        client.hang_up()
+        await _task
+
+    async def test_automatic_followup_with_repeated_wake_phrase_discards_room_noise(self):
+        engine = FakeTurnEngine(transcript="Was läuft gerade?")
+        b = make_bridge(engine=engine, capture_window=0.03, followup_window=0.08)
+        client = FakeVoiceClient()
+        _task, (start, stop, audio) = await _session_with_handlers(b, client)
+        await start(CONVERSATION_ID, 1, None, "hey jarvis")
+        await audio(LOUD_PCM, None)
+        await stop(False)
+        self.assertTrue(await _wait_for(client.saw_run_end))
+        self.assertEqual(1, len(engine.calls))
+
+        client.ops.clear()
+        with captured_logs() as logs:
+            # ESPHome repeats the original wake-word phrase on its automatic
+            # continue-conversation start, so pending state is authoritative.
+            await start(CONVERSATION_ID, 1, None, "hey jarvis")
+            await audio(b"\x01\x00" * 128, None)  # buffered room noise, no speech
+            self.assertTrue(await _wait_for(client.saw_run_end))
+
+        self.assertTrue(any("followup=True" in line for line in logs))
+        self.assertEqual(1, len(engine.calls), "room noise must not repeat the answer")
         client.hang_up()
         await _task
 
@@ -804,10 +884,59 @@ class CliAndLoggingTests(unittest.TestCase):
         self.assertIn("kurz", lowered)
         self.assertNotIn("tool", lowered)
 
+    def test_spotify_function_call_runs_the_narrow_controller(self):
+        calls = []
+        engine = bridge.GeminiTurnEngine(
+            GEMINI_KEY_MARKER,
+            spotify_runner=lambda args: calls.append(args) or "Spotify gestartet.",
+        )
+        response = SimpleNamespace(
+            text=None,
+            candidates=[SimpleNamespace(content=SimpleNamespace(parts=[
+                SimpleNamespace(function_call=SimpleNamespace(
+                    name="spotify_control",
+                    args={"action": "play", "query": "Queen", "kind": "artist"},
+                ))
+            ]))],
+        )
+
+        self.assertEqual("Spotify gestartet.", engine._answer_from_response(response))
+        self.assertEqual(
+            [{"action": "play", "query": "Queen", "kind": "artist"}], calls
+        )
+
+    def test_unknown_function_call_is_never_executed(self):
+        calls = []
+        engine = bridge.GeminiTurnEngine(
+            GEMINI_KEY_MARKER, spotify_runner=lambda args: calls.append(args) or "no"
+        )
+        response = SimpleNamespace(
+            text=None,
+            candidates=[SimpleNamespace(content=SimpleNamespace(parts=[
+                SimpleNamespace(function_call=SimpleNamespace(
+                    name="shell", args={"command": "id"}
+                ))
+            ]))],
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "unsupported model function"):
+            engine._answer_from_response(response)
+        self.assertEqual([], calls)
+
     def test_pcm_mime_uses_declared_device_rate(self):
         self.assertEqual("audio/pcm;rate=24000", bridge._pcm_mime(24000))
         self.assertEqual("audio/pcm;rate=16000", bridge._pcm_mime(16000))
         self.assertEqual(16000, bridge.DEFAULT_SAMPLE_RATE)
+
+    def test_default_tts_is_a_calm_male_jarvis_voice(self):
+        self.assertEqual("Charon", bridge.DEFAULT_TTS_VOICE)
+
+    def test_tts_prompt_forces_natural_german_pronunciation(self):
+        answer = "Auf Spotify läuft gerade ein Titel."
+        prompt = bridge._tts_prompt(answer)
+        self.assertIn("natürlicher deutscher Aussprache", prompt)
+        self.assertIn("ruhigen, souveränen Männerstimme", prompt)
+        self.assertTrue(prompt.endswith(answer))
 
     def test_tts_pcm_resamples_from_24khz_to_device_16khz(self):
         source = array("h", [i * 1000 for i in range(24)]).tobytes()
@@ -854,6 +983,25 @@ class CliAndLoggingTests(unittest.TestCase):
         self.assertTrue(bridge._is_model_incompatible(Err(400)))
         self.assertTrue(bridge._is_model_incompatible(Err(404)))
         self.assertFalse(bridge._is_model_incompatible(Err(429)))
+
+    def test_quota_error_falls_back_without_retry_delay(self):
+        class Err(Exception):
+            code = 429
+
+        class Models:
+            def __init__(self):
+                self.calls = 0
+
+            def generate_content(self, **kwargs):
+                self.calls += 1
+                raise Err("RESOURCE_EXHAUSTED")
+
+        client = SimpleNamespace(models=Models())
+        with unittest.mock.patch.object(bridge.time, "sleep") as sleep:
+            with self.assertRaises(Err):
+                bridge.GeminiTurnEngine._call_with_retries(client, "model", [], None)
+        self.assertEqual(1, client.models.calls)
+        sleep.assert_not_called()
 
     def test_every_model_has_a_fallback_chain(self):
         self.assertIn(bridge.DEFAULT_MODEL, bridge.FALLBACK_CHAT_MODELS)
