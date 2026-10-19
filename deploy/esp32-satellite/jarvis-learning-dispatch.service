@@ -1,0 +1,10 @@
+[Unit]
+Description=Dispatch queued JARVIS learning requirements to Hermes
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/lacasa/Mark-LV-LaCasa
+Environment=PYTHONPATH=/home/lacasa/Mark-LV-LaCasa:/home/lacasa/Mark-LV-LaCasa/scripts
+ExecStart=/home/lacasa/waveshare-va-test/venv/bin/python -m scripts.jarvis_learning_dispatch --queue-dir /home/lacasa/waveshare-va-test/learning-queue --webhook-url-file /home/lacasa/waveshare-va-test/hermes-webhook-url.txt --webhook-secret-file /home/lacasa/waveshare-va-test/hermes-webhook-secret.txt

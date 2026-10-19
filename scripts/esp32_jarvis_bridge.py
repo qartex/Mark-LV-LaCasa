@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import math
 from array import array
 import base64
 import contextlib
@@ -46,12 +47,20 @@ import functools
 import inspect
 import io
 import logging
+import secrets
 import sys
 import time
 import wave
 from pathlib import Path
 
 from esp32_api_acceptance import KeyFileError, load_api_key  # reused contract
+from core.turn_provenance import (
+    CHANNEL_ESP32_PCM,
+    IngressEnvelope,
+    TurnIdentity,
+    auth_session_id_of,
+)
+from core.user_turn import finalize_turn
 
 __all__ = [
     "DEFAULT_CAPTURE_WINDOW_S",
@@ -97,6 +106,7 @@ FALLBACK_TTS_MODELS = (
     "gemini-3.8-flash-lite-tts",
 )
 RETRY_DELAYS_S = (2.0, 5.0)
+MAX_FOLLOWUP_EXTENSIONS = 2
 DEFAULT_TTS_VOICE = "Charon"
 DEFAULT_TURN_TIMEOUT_S = 60.0
 DEFAULT_CAPTURE_WINDOW_S = 5.0
@@ -123,6 +133,18 @@ _BACKOFF_START_S = 1.0
 _BACKOFF_FACTOR = 2
 _BACKOFF_MAX_S = 30.0
 
+
+def load_gemini_keys(primary: Path, extra_paths) -> tuple[str, ...]:
+    """Load the primary Gemini key plus every extra key that exists on disk."""
+    keys = [load_api_key(primary)]
+    for path in extra_paths:
+        try:
+            keys.append(load_api_key(path))
+        except KeyFileError:
+            # An optional second account simply is not configured yet.
+            _LOG.info("gemini extra key skipped status=missing file_base=%s", path.name)
+    return tuple(keys)
+
 _ASSISTANT_NAME = "JARVIS"
 DEFAULT_SYSTEM_INSTRUCTION = (
     "Du bist %s, ein knapper Assistent an einem Lautsprecher im Growraum. "
@@ -131,9 +153,124 @@ DEFAULT_SYSTEM_INSTRUCTION = (
     "Wetter), rate nicht, sondern frage in einem kurzen Satz danach. Wenn dir "
     "Audio fehlt oder du etwas nicht verstehst, bitte einmal kurz wiederholen. "
     "Nutze fuer Befehle wie spielen, pausieren, fortsetzen, naechster Titel, "
-    "vorheriger Titel, Lautstaerke oder was gerade laeuft die Spotify-Funktion."
+    "vorheriger Titel, Lautstaerke oder was gerade laeuft die Spotify-Funktion. "
+    "Wenn jemand nach der Temperatur eines Raums fragt, nutze die "
+    "Temperature-Funktion mit dem Raumnamen und nenne den gemessenen Wert. "
+    "Wenn jemand einen Tagebucheintrag fuer einen Raum machen will, nutze die "
+    "Cannanas-Tagebuchfunktion; fehlt der Text, frage kurz danach. "
+    "Wenn ein ausdruecklicher Wunsch mit den vorhandenen Funktionen nicht "
+    "erfuellbar ist, nutze die Lernfunktion genau einmal. Sage nicht, dass du "
+    "es kannst: JARVIS muss es erst lernen."
     % _ASSISTANT_NAME
 )
+
+JARVIS_CONFIG_PATH = "/home/lacasa/Mark-LV-LaCasa/config/api_keys.json"
+TEMPERATURE_FUNCTION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "room": {
+            "type": "string",
+            "description": "Raumname wie Madrid, Helsinki oder Tokio.",
+        },
+    },
+    "required": ["room"],
+}
+
+DIARY_FUNCTION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "room": {"type": "string", "description": "Cannanas-Raumname."},
+        "text": {"type": "string", "description": "Der diktierte Tagebuchtext."},
+        "target": {
+            "type": "string",
+            "description": "Optional: zuvor geklaerte Pflanze oder Charge im Raum.",
+        },
+    },
+    "required": ["room"],
+    "additionalProperties": False,
+}
+
+LEARNING_FUNCTION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "request": {
+            "type": "string",
+            "description": "Der unerfuellbare Wunsch als knappe Funktionsanforderung.",
+            "maxLength": 1000,
+        },
+    },
+    "required": ["request"],
+    "additionalProperties": False,
+}
+
+
+def _room_key(name: str) -> str:
+    """Umlaut- and case-insensitive room identifier for matching."""
+    return (
+        str(name).strip().lower()
+        .replace("ä", "ae").replace("ö", "oe").replace("ü", "ue")
+        .replace("ß", "ss").replace(" ", "")
+    )
+
+
+def _ha_states(config_path: str) -> list[dict]:
+    """Read the HA state list with the token JARVIS already ships with."""
+    import json as _json
+    import urllib.request as _urllib
+
+    cfg = _json.load(open(config_path))
+    url = None
+    token = None
+
+    def _walk(node):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                yield k, v
+                yield from _walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                yield None, v
+                yield from _walk(v)
+        elif isinstance(node, str):
+            for part in node.replace('"', " ").split():
+                yield None, part
+
+    for k, v in _walk(cfg):
+        ks = str(k or "").lower()
+        if isinstance(v, str) and v.startswith("ey") and ("token" in ks or "ha" in ks):
+            token = v
+        if isinstance(v, str) and v.startswith("http") and "url" in ks:
+            url = v
+    if token is None:
+        raise RuntimeError("no home assistant token in jarvis config")
+    req = _urllib.Request(
+        (url or "http://192.168.1.88:8123") + "/api/states",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    with _urllib.urlopen(req, timeout=15) as resp:
+        return list(_json.load(resp))
+
+
+def _default_temperature_runner(args: dict) -> str:
+    """Speak the measured growroom temperature of the named zone."""
+    if not isinstance(args, dict) or not args.get("room"):
+        return "Welchen Raum möchtest du wissen?"
+    want = _room_key(args["room"])
+    zones: dict[str, tuple[str, str]] = {}
+    for state in _ha_states(JARVIS_CONFIG_PATH):
+        entity_id = str(state.get("entity_id", ""))
+        if entity_id.startswith("sensor.zonen_") and entity_id.endswith("_temperatur_celsius"):
+            room = entity_id[len("sensor.zonen_"):-len("_temperatur_celsius")]
+            zones[_room_key(room)] = (room, state.get("state", ""))
+    if want in zones:
+        room, raw = zones[want]
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return f"Raum {args['room']} liefert gerade keinen Temperaturwert."
+        return f"Raum {args['room']} hat aktuell {value:.1f} Grad."
+    rooms = ", ".join(zones[k][0] for k in sorted(zones)) or "keine"
+    return f"Für Raum {args['room']} habe ich keinen Temperatursensor. Verfügbare Räume: {rooms}."
 
 SPOTIFY_FUNCTION_SCHEMA = {
     "type": "object",
@@ -252,14 +389,20 @@ def _inline_audio_bytes(value) -> bytes:
     raise TypeError("inline audio payload is not bytes or base64 text")
 
 
-def _tts_prompt(answer: str) -> str:
-    """Keep Gemini TTS in German and give JARVIS a calm male delivery."""
-    return (
-        "Sprich den folgenden Text ausschließlich auf Deutsch mit natürlicher "
-        "deutscher Aussprache und einer ruhigen, souveränen Männerstimme. "
-        "Lies nur den Text nach dem Doppelpunkt und füge nichts hinzu:\n"
-        + str(answer)
-    )
+TTS_STYLE_INSTRUCTION = (
+    "Sprich ausschließlich auf Deutsch mit natürlicher deutscher Aussprache, "
+    "in einer ruhigen, souveränen Männerstimme."
+)
+
+
+def _tts_texts(answer: str) -> tuple[str, str]:
+    """Split a spoken turn: style goes to system_instruction, never to content.
+
+    The TTS models read their whole content aloud, so any instruction placed
+    in ``contents`` leaks into the speaker as spoken text. Style shaping has
+    to live in the config, contents must be exactly the answer.
+    """
+    return TTS_STYLE_INSTRUCTION, str(answer)
 
 
 def _is_retryable(exc: BaseException) -> bool:
@@ -287,6 +430,23 @@ def _is_quota_error(exc: BaseException) -> bool:
     return "429" in text or "RESOURCE_EXHAUSTED" in text
 
 
+def _is_bad_gemini_key(exc: BaseException) -> bool:
+    """A dead/revoked second-account key must not kill the turn."""
+    code = getattr(exc, "code", None)
+    if code is not None:
+        try:
+            if int(code) in (401, 403):
+                return True
+        except (TypeError, ValueError):
+            pass
+    lowered = str(exc).lower()
+    return (
+        "unauthenticated" in lowered
+        or "api key not valid" in lowered
+        or "api_key_invalid" in lowered
+    )
+
+
 def _is_model_incompatible(exc: BaseException) -> bool:
     """The model cannot serve THIS request (no audio input, unknown id)."""
     code = getattr(exc, "code", None)
@@ -312,6 +472,23 @@ def _pcm_level(pcm: bytes) -> int:
     for value in samples:
         total += value * value
     return int((total / len(samples)) ** 0.5)
+
+
+def _listen_cue_pcm() -> bytes:
+    """Soft double-beep marking "the microphone is open now".
+    Device-rate 16 kHz mono: 250 ms of silence, two 120 ms beeps at 880 Hz.
+    The board reopens its microphone right after the reply, so the cue tells
+    the user exactly when his answer will be heard.
+    """
+    rate = DEFAULT_SAMPLE_RATE
+    cue = bytearray()
+    cue += b"\x00\x00" * int(rate * 0.25)
+    for _beat in range(2):
+        for i in range(int(rate * 0.12)):
+            value = int(2500 * math.sin(2.0 * math.pi * 880.0 * i / rate))
+            cue += int(value).to_bytes(2, "little", signed=True)
+        cue += b"\x00\x00" * int(rate * 0.08)
+    return bytes(cue)
 
 
 def _wants_followup(answer: str) -> bool:
@@ -373,7 +550,7 @@ class GeminiTurnEngine:
 
     def __init__(
         self,
-        gemini_key: str,
+        gemini_key: str | tuple[str, ...],
         *,
         model: str = DEFAULT_MODEL,
         tts_model: str = DEFAULT_TTS_MODEL,
@@ -381,21 +558,116 @@ class GeminiTurnEngine:
         sample_rate: int = DEFAULT_SAMPLE_RATE,
         system_instruction: str | None = None,
         spotify_runner=None,
+        temperature_runner=None,
+        diary_workflow=None,
+        learning_queue=None,
     ):
-        self._gemini_key = gemini_key
+        self._gemini_keys = (
+            (gemini_key,) if isinstance(gemini_key, str) else tuple(gemini_key)
+        )
+        self._key_index = 0
         self._model = model
         self._tts_model = tts_model
         self._tts_voice = tts_voice
         self._sample_rate = int(sample_rate)
         self._system_instruction = system_instruction or DEFAULT_SYSTEM_INSTRUCTION
         self._spotify_runner = spotify_runner or _default_spotify_runner
+        self._temperature_runner = temperature_runner or _default_temperature_runner
+        self._diary_workflow = diary_workflow
+        self._learning_queue = learning_queue
+        self._turn_context = None
         self._history: list[dict] = []
         self._chat_model_pref: str | None = None
         self._tts_model_pref: str | None = None
+        self._announcement_job_id = ""
+
+    def current_key(self) -> str:
+        return self._gemini_keys[self._key_index]
+
+    def _rotate_key(self) -> bool:
+        """Advance to the next key; False when every key was tried."""
+        if self._key_index + 1 >= len(self._gemini_keys):
+            return False
+        self._key_index += 1
+        return True
+
+    def _turn_with_key_rotation(self, turn_fn) -> object:
+        """Run a turn on one key; rotate to the next key on quota exhaustion."""
+        first: BaseException | None = None
+        while True:
+            try:
+                return turn_fn(self.current_key())
+            except Exception as exc:
+                if not (_is_quota_error(exc) or _is_bad_gemini_key(exc)):
+                    raise
+                if first is None:
+                    first = exc
+                if not self._rotate_key():
+                    raise first
 
     def reset_conversation(self) -> None:
         """Drop the remembered dialogue (a new wake-word turn starts fresh)."""
         self._history = []
+
+    def set_turn_context(self, turn) -> None:
+        """Pin immutable provenance for every model-facing side effect."""
+        self._turn_context = turn
+
+    def has_pending_confirmation(self) -> bool:
+        workflow = self._diary_workflow
+        return bool(
+            workflow is not None
+            and self._turn_context is not None
+            and workflow.has_pending(self._turn_context)
+        )
+
+    def evaluate_pending_confirmation(self, transcript: str) -> str | None:
+        workflow = self._diary_workflow
+        if workflow is None or self._turn_context is None:
+            return None
+        return workflow.evaluate_confirmation(self._turn_context, transcript)
+
+    def cancel_pending_confirmation(self) -> bool:
+        """Fence a pending preview when the satellite connection goes away."""
+        workflow = self._diary_workflow
+        turn = self._turn_context
+        if workflow is None or turn is None:
+            return False
+        cancel = getattr(workflow, "cancel_pending", None)
+        if not callable(cancel):
+            return False
+        return bool(cancel(getattr(turn, "stable_device_id", "") or ""))
+
+    def attach_completion_announcement(self, answer: str) -> str:
+        queue = self._learning_queue
+        if queue is None:
+            return answer
+        claim = getattr(queue, "claim_completion_announcement", None)
+        if not callable(claim):
+            return answer
+        claimed = claim()
+        if not claimed:
+            return answer
+        announcement, job_id = claimed
+        # Held until the bridge confirms the audio was streamed (or releases it).
+        self._announcement_job_id = str(job_id)
+        return f"{announcement} {answer}".strip()
+
+    def confirm_announcement_spoken(self) -> bool:
+        """The reply including the announcement reached the speaker."""
+        job_id, self._announcement_job_id = self._announcement_job_id, ""
+        if not job_id or self._learning_queue is None:
+            return False
+        ack = getattr(self._learning_queue, "ack_completion_announcement", None)
+        return bool(callable(ack) and ack(job_id))
+
+    def release_announcement(self) -> bool:
+        """Speaking failed: hand the announcement back for a later turn."""
+        job_id, self._announcement_job_id = self._announcement_job_id, ""
+        if not job_id or self._learning_queue is None:
+            return False
+        release = getattr(self._learning_queue, "release_completion_announcement", None)
+        return bool(callable(release) and release(job_id))
 
     def _contents(self, mic_pcm: bytes) -> list[dict]:
         """Dialogue so far plus this turn's audio."""
@@ -461,24 +733,41 @@ class GeminiTurnEngine:
         head = (preferred,) if preferred else ()
         return tuple(dict.fromkeys(head + tuple(chain)))
 
-    def _generate(self, client, models, contents, config):
+    def _generate(self, client, models, contents, config, *, retry_config=None):
         """Walk a model chain so one exhausted model does not drop the turn."""
         last: BaseException | None = None
         for model in models:
             try:
                 result = self._call_with_retries(client, model, contents, config)
+                return model, result
             except Exception as exc:
                 if _is_retryable(exc) or _is_model_incompatible(exc):
                     _LOG.info("model unavailable status=fallback model=%s", model)
+                    if (
+                        _is_model_incompatible(exc)
+                        and retry_config is not None
+                        and retry_config is not config
+                    ):
+                        # Same model once more without optional shaping (the
+                        # lite TTS model rejects system_instruction outright).
+                        _LOG.info("model retry status=plain-config model=%s", model)
+                        try:
+                            return model, self._call_with_retries(
+                                client, model, contents, retry_config
+                            )
+                        except Exception as retry_exc:
+                            if _is_retryable(retry_exc) or _is_model_incompatible(retry_exc):
+                                last = retry_exc
+                                continue
+                            raise
                     last = exc
                     continue
                 raise
-            return model, result
         assert last is not None
         raise last
 
     def _answer_from_response(self, response) -> str:
-        """Return normal model text or execute exactly the Spotify function."""
+        """Run only the two narrow whitelisted voice functions."""
         for candidate in getattr(response, "candidates", ()) or ():
             content = getattr(candidate, "content", None)
             for part in getattr(content, "parts", ()) or ():
@@ -486,66 +775,173 @@ class GeminiTurnEngine:
                 if call is None:
                     continue
                 name = getattr(call, "name", "")
-                if name != "spotify_control":
-                    raise RuntimeError("unsupported model function")
                 parameters = dict(getattr(call, "args", None) or {})
-                answer = self._spotify_runner(parameters)
+                if name == "spotify_control":
+                    runner = self._spotify_runner
+                    answer = runner(parameters)
+                elif name == "growroom_temperature":
+                    runner = self._temperature_runner
+                    answer = runner(parameters)
+                elif name == "cannanas_diary_prepare":
+                    if self._diary_workflow is None or self._turn_context is None:
+                        raise RuntimeError("diary workflow unavailable")
+                    answer = self._diary_workflow.prepare(parameters, self._turn_context)
+                elif name == "request_capability_learning":
+                    if self._learning_queue is None or self._turn_context is None:
+                        raise RuntimeError("learning queue unavailable")
+                    answer = self._learning_queue.submit(parameters, self._turn_context)
+                else:
+                    raise RuntimeError("unsupported model function")
                 if not isinstance(answer, str) or not answer.strip():
-                    raise RuntimeError("Spotify controller returned no text")
+                    raise RuntimeError("voice function runner returned no text")
                 return answer.strip()
         return str(getattr(response, "text", "") or "").strip()
 
     def _turn_sync(self, mic_pcm: bytes) -> tuple[str, bytes]:
         from google import genai  # lazy, optional dependency
 
-        client = genai.Client(api_key=self._gemini_key, http_options={"api_version": "v1beta"})
+        # The answer phase owns every host side effect (Spotify, Cannanas,
+        # learning job, announcement claim). It runs exactly once; a quota
+        # failure during synthesis must never replay it.
+        answer = self._turn_with_key_rotation(
+            lambda _key: self._answer_on_key(genai, mic_pcm)
+        )
+        pcm = self._turn_with_key_rotation(
+            lambda _key: self._speech_on_key(genai, answer)
+        )
+        self._remember(mic_pcm, answer)  # only once the turn is actually spoken
+        return answer, pcm
+
+    def _chat_tools(self, types):
+        declarations = [
+            types.FunctionDeclaration(
+                name="spotify_control",
+                description=(
+                    "Steuert Spotify auf dem festen LaCasa-Empfaenger. "
+                    "Bei play Suchbegriff und Typ, bei volume Prozent angeben."
+                ),
+                parameters_json_schema=SPOTIFY_FUNCTION_SCHEMA,
+            ),
+            types.FunctionDeclaration(
+                name="growroom_temperature",
+                description=(
+                    "Gibt die aktuelle Raumtemperatur eines Growroom-Raums "
+                    "wieder (zum Beispiel Madrid oder Helsinki)."
+                ),
+                parameters_json_schema=TEMPERATURE_FUNCTION_SCHEMA,
+            ),
+        ]
+        if self._diary_workflow is not None:
+            declarations.append(types.FunctionDeclaration(
+                name="cannanas_diary_prepare",
+                description=(
+                    "Bereitet einen Cannanas-Tagebucheintrag fuer einen Raum vor. "
+                    "Speichern erfolgt erst nach einer spaeteren gesprochenen Bestaetigung."
+                ),
+                parameters_json_schema=DIARY_FUNCTION_SCHEMA,
+            ))
+        if self._learning_queue is not None:
+            declarations.append(types.FunctionDeclaration(
+                name="request_capability_learning",
+                description=(
+                    "Gibt einen ausdruecklichen Wunsch, den JARVIS noch nicht "
+                    "erfuellen kann, einmalig als Lernauftrag an Hermes weiter."
+                ),
+                parameters_json_schema=LEARNING_FUNCTION_SCHEMA,
+            ))
+        return [types.Tool(function_declarations=declarations)]
+
+    def _transcribe_pending_confirmation(self, client, types, chat_models, mic_pcm):
+        """Transcribe only; the host grammar, never Gemini, decides confirmation."""
+        used_model, response = self._generate(
+            client,
+            chat_models,
+            [{
+                "role": "user",
+                "parts": [{"inline_data": {
+                    "mime_type": _pcm_mime(self._sample_rate),
+                    "data": bytes(mic_pcm),
+                }}],
+            }],
+            types.GenerateContentConfig(
+                system_instruction=(
+                    "Transkribiere die deutsche Aufnahme wortgetreu. Gib nur "
+                    "die gesprochenen Woerter aus, ohne Kommentar."
+                ),
+            ),
+        )
+        transcript = str(getattr(response, "text", "") or "").strip()
+        return used_model, transcript
+
+    def _answer_on_key(self, genai, mic_pcm: bytes) -> str:
+        """Answer the turn once: transcription, tools, announcement claim."""
+        client = genai.Client(
+            api_key=self.current_key(), http_options={"api_version": "v1beta"}
+        )
         types = genai.types
         chat_models = self._model_order(
             self._chat_model_pref, (self._model,) + FALLBACK_CHAT_MODELS
         )
-        used_chat, answer_call = self._generate(
-            client,
-            chat_models,
-            self._contents(mic_pcm),
-            types.GenerateContentConfig(
-                system_instruction=self._system_instruction,
-                tools=[types.Tool(function_declarations=[types.FunctionDeclaration(
-                    name="spotify_control",
-                    description=(
-                        "Steuert Spotify auf dem festen LaCasa-Empfaenger. "
-                        "Bei play Suchbegriff und Typ, bei volume Prozent angeben."
+        answer = None
+        if self.has_pending_confirmation():
+            used_chat, transcript = self._transcribe_pending_confirmation(
+                client, types, chat_models, mic_pcm
+            )
+            self._chat_model_pref = used_chat
+            answer = self.evaluate_pending_confirmation(transcript)
+        if answer is None:
+            used_chat, answer_call = self._generate(
+                client,
+                chat_models,
+                self._contents(mic_pcm),
+                types.GenerateContentConfig(
+                    system_instruction=self._system_instruction,
+                    tools=self._chat_tools(types),
+                    automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                        disable=True
                     ),
-                    parameters_json_schema=SPOTIFY_FUNCTION_SCHEMA,
-                )])],
-                automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
-            ),
-        )
-        self._chat_model_pref = used_chat
-        answer = self._answer_from_response(answer_call)
+                ),
+            )
+            self._chat_model_pref = used_chat
+            answer = self._answer_from_response(answer_call)
         if not answer:
             raise RuntimeError("model returned no text")
-        self._remember(mic_pcm, answer)
+        return self.attach_completion_announcement(answer)
+
+    def _speech_on_key(self, genai, answer: str) -> bytes:
+        """Render the fixed answer; retried on another key without side effects."""
+        client = genai.Client(
+            api_key=self.current_key(), http_options={"api_version": "v1beta"}
+        )
+        types = genai.types
         tts_models = self._model_order(
             self._tts_model_pref, (self._tts_model,) + FALLBACK_TTS_MODELS
+        )
+        style, spoken = _tts_texts(answer)
+        plain_without_voice = types.GenerateContentConfig(
+            response_modalities=["AUDIO"],
+            speech_config=types.SpeechConfig(
+                voice_config=types.VoiceConfig(
+                    prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                        voice_name=self._tts_voice
+                    )
+                )
+            ),
         )
         used_tts, speech_call = self._generate(
             client,
             tts_models,
-            _tts_prompt(answer),
+            spoken,
             types.GenerateContentConfig(
                 response_modalities=["AUDIO"],
-                speech_config=types.SpeechConfig(
-                    voice_config=types.VoiceConfig(
-                        prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                            voice_name=self._tts_voice
-                        )
-                    )
-                ),
+                system_instruction=style,
+                speech_config=plain_without_voice.speech_config,
             ),
+            retry_config=plain_without_voice,
         )
         self._tts_model_pref = used_tts
         part = speech_call.candidates[0].content.parts[0]
-        return answer, _tts_pcm_from_response(_inline_audio_bytes(part.inline_data.data))
+        return _tts_pcm_from_response(_inline_audio_bytes(part.inline_data.data))
 
 
 # --------------------------------------------------------------------------- ESPHome client
@@ -622,7 +1018,7 @@ class JarvisBridge:
         relay_host: str,
         relay_port: int = DEFAULT_RELAY_PORT,
         api_key: str,
-        gemini_key: str,
+        gemini_key: str | tuple[str, ...],
         engine=None,
         model: str = DEFAULT_MODEL,
         tts_model: str = DEFAULT_TTS_MODEL,
@@ -636,9 +1032,13 @@ class JarvisBridge:
         max_utterance: float = DEFAULT_MAX_UTTERANCE_S,
         voice_level: int = DEFAULT_VOICE_LEVEL,
         system_instruction: str | None = None,
+        device_id: str = "growroom-sprache-1",
+        diary_workflow=None,
+        learning_queue=None,
         voice_client_factory=None,
         sleep=None,
         ducking=None,
+        session_nonce_factory=None,
     ):
         self.relay_host = str(relay_host)
         self.relay_port = int(relay_port)
@@ -667,7 +1067,17 @@ class JarvisBridge:
             tts_voice=tts_voice,
             sample_rate=sample_rate,
             system_instruction=system_instruction,
+            diary_workflow=diary_workflow,
+            learning_queue=learning_queue,
         )
+        self._device_id = str(device_id).strip() or "growroom-sprache-1"
+        self._key_digest = auth_session_id_of(api_key)
+        self._session_nonce_factory = session_nonce_factory or (
+            lambda: secrets.token_hex(16)
+        )
+        self._session_nonce = ""
+        self._auth_session_id = self._key_digest
+        self._turn_identity = TurnIdentity()
         self.voice_client_factory = voice_client_factory or (
             lambda: EspHomeVoiceClient(self.relay_host, self.relay_port, api_key)
         )
@@ -682,9 +1092,11 @@ class JarvisBridge:
         # Multi-turn: the device re-enters the pipeline without a wake word
         # after an answer of ours that asked something.
         self._followup_pending = False
+        self._followup_extensions_left = 0
         self._conversation_id = ""
         self._heard_speech = False
         self._last_voice_at = 0.0
+        self._window_peak_rms = 0
         if sleep is not None:
             self._sleep = sleep
         else:
@@ -718,6 +1130,7 @@ class JarvisBridge:
         """Serve one built voice client until the connection drops."""
         await voice.connect_and_subscribe(self.handle_start, self.handle_stop, self.handle_audio)
         self._voice = voice
+        self._begin_session()
         _LOG.info("satellite connected relay_port=%d", self.relay_port)
         try:
             await _maybe_await(voice.wait_until_disconnected())
@@ -725,7 +1138,56 @@ class JarvisBridge:
         finally:
             self._voice = None
             self._abort_turn()
+            self._cancel_pending_confirmation()
             await _maybe_await(voice.close())
+
+    def _begin_session(self) -> None:
+        """Fence every connection with its own opaque session identity.
+
+        The ESPHome PSK digest alone is constant for the life of the process, so
+        a reconnect would otherwise inherit the previous connection's identity
+        and could confirm a preview prepared before the disconnect.
+        """
+        self._session_nonce = str(self._session_nonce_factory())
+        self._auth_session_id = f"{self._key_digest}:{self._session_nonce}"
+
+    def _cancel_pending_confirmation(self) -> None:
+        cancel = getattr(self.engine, "cancel_pending_confirmation", None)
+        if not callable(cancel):
+            return
+        try:
+            if cancel():
+                _LOG.info("pending confirmation cancelled status=disconnected")
+        except Exception as exc:  # never let fencing break a reconnect
+            _LOG.info(
+                "pending confirmation cancel failed error_type=%s",
+                type(exc).__name__,
+            )
+
+    def _confirm_announcement_spoken(self) -> None:
+        confirm = getattr(self.engine, "confirm_announcement_spoken", None)
+        if not callable(confirm):
+            return
+        try:
+            if confirm():
+                _LOG.info("learning announcement spoken status=acknowledged")
+        except Exception as exc:
+            _LOG.info(
+                "learning announcement ack failed error_type=%s", type(exc).__name__
+            )
+
+    def _release_announcement(self) -> None:
+        release = getattr(self.engine, "release_announcement", None)
+        if not callable(release):
+            return
+        try:
+            if release():
+                _LOG.info("learning announcement status=retry")
+        except Exception as exc:
+            _LOG.info(
+                "learning announcement release failed error_type=%s",
+                type(exc).__name__,
+            )
 
     # -- device callbacks (awaited by aioesphomeapi 46.3.0)
 
@@ -744,11 +1206,13 @@ class JarvisBridge:
         self._followup_pending = False
         if not followup:
             self._reset_conversation()
+            self._followup_extensions_left = MAX_FOLLOWUP_EXTENSIONS
         if conversation_id:
             self._conversation_id = str(conversation_id)
         window = self._followup_window if followup else self._capture_window
         self._heard_speech = False
         self._last_voice_at = 0.0
+        self._window_peak_rms = 0
         self._capture_task = asyncio.get_running_loop().create_task(
             self._listen_until_done(window)
         )
@@ -813,6 +1277,9 @@ class JarvisBridge:
         if _pcm_level(data) >= self._voice_level:
             self._heard_speech = True
             self._last_voice_at = asyncio.get_running_loop().time()
+        peak = _pcm_level(data)
+        if peak > self._window_peak_rms:
+            self._window_peak_rms = peak
         self._mic_chunks.append(bytes(data))
         if data2:
             self._mic_chunks.append(bytes(data2))
@@ -829,6 +1296,11 @@ class JarvisBridge:
     def _finish_turn_request(self, *, discard_if_silent: bool = False) -> None:
         capture_task = self._capture_task
         self._capture_task = None
+        _LOG.info(
+            "listen window closed status=review peak_rms=%s voice_level=%s",
+            self._window_peak_rms,
+            self._voice_level,
+        )
         if capture_task is not None and capture_task is not asyncio.current_task():
             capture_task.cancel()
         self._active = False
@@ -842,13 +1314,26 @@ class JarvisBridge:
         if not self._mic_chunks:
             voice = self._voice
             self._reset_turn()
-            self._reset_conversation()
             _LOG.info("turn empty status=skipped")
             if voice is not None:
-                # Leave the device listening state and end the conversation.
-                self._turn_task = asyncio.get_running_loop().create_task(
-                    self._send_run_end(voice)
-                )
+                if self._followup_extensions_left > 0:
+                    # The user answered late: hand out another quiet window
+                    # via an inaudible 1-sample reply that keeps the mic open.
+                    self._followup_extensions_left -= 1
+                    _LOG.info("followup extended status=listening")
+                    self._turn_task = asyncio.get_running_loop().create_task(
+                        self._stream_reply_pcm(
+                            voice,
+                            b"\x00\x00",
+                            answer="",
+                            continue_conversation=True,
+                        )
+                    )
+                else:
+                    _LOG.info("conversation closed status=silent-timeout")
+                    self._turn_task = asyncio.get_running_loop().create_task(
+                        self._close_silent(voice)
+                    )
             return
         voice = self._voice
         if voice is None:
@@ -877,26 +1362,59 @@ class JarvisBridge:
         self._mic_chunks = []  # take over the buffered audio for this one turn
         try:
             try:
+                turn_id = self._turn_identity.issue()
+                envelope = IngressEnvelope(
+                    stable_device_id=self._device_id,
+                    auth_session_id=self._auth_session_id,
+                    capture_id=(
+                        f"{self._session_nonce or 'session'}:"
+                        f"{self._conversation_id or 'conversation'}:{turn_id}"
+                    ),
+                    user_turn_id=turn_id,
+                    channel=CHANNEL_ESP32_PCM,
+                    final=True,
+                )
+                turn = finalize_turn(envelope)
+                set_context = getattr(self.engine, "set_turn_context", None)
+                if callable(set_context):
+                    set_context(turn)
                 result = await asyncio.wait_for(
                     _maybe_await(self.engine.turn(mic_pcm)),
                     timeout=self._turn_timeout,
                 )
             except asyncio.TimeoutError:
                 _LOG.info("turn timed out status=discarded")
+                self._release_announcement()
                 await voice.send_voice_assistant_event(_voice_event("RUN_END"), {})
                 return
             except Exception as exc:  # status-only: never log engine internals
                 _LOG.info("turn failed status=discarded error_type=%s", type(exc).__name__)
+                self._release_announcement()
                 await voice.send_voice_assistant_event(_voice_event("RUN_END"), {})
                 return
             transcript, reply_pcm = result
             if not self._stopped:
-                await self._stream_reply(
-                    voice,
-                    reply_pcm,
-                    answer=transcript,
-                    continue_conversation=_wants_followup(transcript),
-                )
+                try:
+                    await self._stream_reply(
+                        voice,
+                        reply_pcm,
+                        answer=transcript,
+                        continue_conversation=_wants_followup(transcript),
+                    )
+                except Exception as exc:
+                    # The announcement was claimed but never heard: release it
+                    # so a later turn retries instead of losing it forever.
+                    self._release_announcement()
+                    _LOG.info(
+                        "reply stream failed status=discarded error_type=%s",
+                        type(exc).__name__,
+                    )
+                    with contextlib.suppress(Exception):
+                        await voice.send_voice_assistant_event(
+                            _voice_event("RUN_END"), {}
+                        )
+                    return
+                self._confirm_announcement_spoken()
             _LOG.info("turn finished chars=%d audio_bytes=%d", len(transcript), len(reply_pcm))
         finally:
             if self._turn_task is asyncio.current_task():
@@ -909,12 +1427,32 @@ class JarvisBridge:
             if self._turn_task is asyncio.current_task():
                 self._turn_task = None
 
+    async def _close_silent(self, voice) -> None:
+        """End a conversation whose follow-up windows elapsed without speech."""
+        try:
+            await voice.send_voice_assistant_event(
+                _voice_event("INTENT_END"),
+                {
+                    "conversation_id": self._conversation_id,
+                    "continue_conversation": "0",
+                    "speech": "",
+                },
+            )
+            self._followup_pending = False
+            self._reset_conversation()
+        finally:
+            await voice.send_voice_assistant_event(_voice_event("RUN_END"), {})
+            if self._turn_task is asyncio.current_task():
+                self._turn_task = None
+
     async def _stream_reply(
         self, voice, reply_pcm, *, answer: str = "", continue_conversation: bool = False
     ) -> None:
         pcm = _resample_pcm16_mono(
             bytes(reply_pcm), self._tts_source_sample_rate, self._device_sample_rate
         )
+        if continue_conversation:
+            pcm += _listen_cue_pcm()
         ducking = self._ducking
         ducked = False
         if ducking is not None:
@@ -996,6 +1534,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="alias for --key-file; exactly one of the two is required",
     )
     parser.add_argument("--gemini-key-file", required=True)
+    parser.add_argument(
+        "--extra-gemini-key-file",
+        action="append",
+        default=[],
+        help="further Gemini key files for quota rotation; missing files are skipped",
+    )
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--tts-model", default=DEFAULT_TTS_MODEL)
     parser.add_argument("--tts-voice", default=DEFAULT_TTS_VOICE)
@@ -1015,7 +1559,39 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--max-utterance", type=float, default=DEFAULT_MAX_UTTERANCE_S
     )
     parser.add_argument("--voice-level", type=int, default=DEFAULT_VOICE_LEVEL)
+    parser.add_argument(
+        "--device-id", default="growroom-sprache-1",
+        help="stable non-secret identity of this ESP32 satellite",
+    )
+    parser.add_argument(
+        "--learning-queue-dir",
+        default="/home/lacasa/waveshare-va-test/learning-queue",
+        help="owner-only durable JARVIS-to-Hermes queue",
+    )
     return parser
+
+
+def _optional_voice_workflows(queue_dir):
+    """Build Cannanas and learning independently so one failure degrades only it."""
+    import core.esp32_voice_workflows as workflows
+
+    diary = None
+    queue = None
+    try:
+        diary = workflows.CannanasRoomDiaryWorkflow()
+    except Exception as exc:
+        _LOG.info(
+            "voice workflow unavailable status=disabled workflow=cannanas error_type=%s",
+            type(exc).__name__,
+        )
+    try:
+        queue = workflows.LearningQueue(queue_dir)
+    except Exception as exc:
+        _LOG.info(
+            "voice workflow unavailable status=disabled workflow=learning_queue error_type=%s",
+            type(exc).__name__,
+        )
+    return diary, queue
 
 
 def main(argv=None) -> int:
@@ -1025,7 +1601,9 @@ def main(argv=None) -> int:
         return 1
     try:
         noise_key = load_api_key(Path(args.key_file or args.api_key_file))
-        gemini_key = load_api_key(Path(args.gemini_key_file))
+        gemini_keys = load_gemini_keys(
+            Path(args.gemini_key_file), [Path(p) for p in args.extra_gemini_key_file]
+        )
     except KeyFileError as exc:
         print(f"key file refused: {exc}", file=sys.stderr)
         return 1
@@ -1040,11 +1618,18 @@ def main(argv=None) -> int:
     except Exception as exc:
         print(f"ducking unavailable: {type(exc).__name__}", file=sys.stderr)
         return 1
+    try:
+        diary_workflow, learning_queue = _optional_voice_workflows(
+            args.learning_queue_dir
+        )
+    except Exception as exc:
+        print(f"voice workflows unavailable: {type(exc).__name__}", file=sys.stderr)
+        return 1
     satellite_bridge = JarvisBridge(
         relay_host=args.relay_host,
         relay_port=args.relay_port,
         api_key=noise_key,
-        gemini_key=gemini_key,
+        gemini_key=gemini_keys,
         model=args.model,
         tts_model=args.tts_model,
         tts_voice=args.tts_voice,
@@ -1055,6 +1640,9 @@ def main(argv=None) -> int:
         silence_end=args.silence_end,
         max_utterance=args.max_utterance,
         voice_level=args.voice_level,
+        device_id=args.device_id,
+        diary_workflow=diary_workflow,
+        learning_queue=learning_queue,
         ducking=ducking,
     )
     try:

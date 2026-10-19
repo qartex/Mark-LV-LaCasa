@@ -18,7 +18,13 @@ from dataclasses import dataclass
 CHANNEL_HTTP_TEXT = 'http_text'
 CHANNEL_CONTROL_WS_TEXT = 'control_ws_text'
 CHANNEL_PHONE_PCM = 'phone_pcm'
-CHANNELS = frozenset((CHANNEL_HTTP_TEXT, CHANNEL_CONTROL_WS_TEXT, CHANNEL_PHONE_PCM))
+CHANNEL_ESP32_PCM = 'esp32_pcm'
+CHANNELS = frozenset((
+    CHANNEL_HTTP_TEXT,
+    CHANNEL_CONTROL_WS_TEXT,
+    CHANNEL_PHONE_PCM,
+    CHANNEL_ESP32_PCM,
+))
 
 
 def auth_session_id_of(session_key: str) -> str:
@@ -100,9 +106,9 @@ def validate(envelope: object, *, known_devices: 'frozenset[str] | set[str] | No
         return False
     if not isinstance(envelope.final, bool):
         return False
-    if envelope.channel == CHANNEL_PHONE_PCM and (not envelope.capture_id
-                                                  or not envelope.stable_device_id):
-        # A durable device identity without its auth session is likewise mixed.
+    if envelope.channel in (CHANNEL_PHONE_PCM, CHANNEL_ESP32_PCM) and (
+            not envelope.capture_id or not envelope.stable_device_id):
+        # Audio without a capture/device identity is a mixed source.
         return False
     if envelope.stable_device_id and not envelope.auth_session_id:
         return False

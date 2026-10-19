@@ -133,6 +133,7 @@ class FakeTurnEngine:
 
     def __init__(self, transcript=TRANSCRIPT_MARKER, reply=REPLY_PCM):
         self.calls = []
+        self.turn_contexts = []
         self.result = (transcript, reply)
         self.resets = 0
         self.gate: asyncio.Future | None = None  # optional: keep the turn pending under test control
@@ -142,6 +143,9 @@ class FakeTurnEngine:
         if self.gate is not None:
             await self.gate
         return self.result
+
+    def set_turn_context(self, turn):
+        self.turn_contexts.append(turn)
 
     def reset_conversation(self):
         self.resets += 1
@@ -234,8 +238,13 @@ class ReuseAndLazinessTests(unittest.TestCase):
 
     def test_gemini_engine_client_is_lazy_and_fails_cleanly_without_genai(self):
         engine = bridge.GeminiTurnEngine(GEMINI_KEY_MARKER)
-        with self.assertRaises(ImportError):
-            asyncio.run(engine.turn(b"\x00\x00"))
+        # Force the "google-genai is not installed" condition: with the SDK
+        # installed this test would otherwise issue a real API call.
+        with unittest.mock.patch.dict(
+            sys.modules, {"google": None, "google.genai": None}
+        ):
+            with self.assertRaises(ImportError):
+                asyncio.run(engine.turn(b"\x00\x00"))
 
 
 # --------------------------------------------------------------------------- start contract
@@ -288,6 +297,24 @@ class StartContractTests(unittest.IsolatedAsyncioTestCase):
         client.hang_up()
         await _task
 
+    async def test_finalized_esp32_turn_has_stable_provenance_before_engine_call(self):
+        engine = FakeTurnEngine()
+        b = make_bridge(engine=engine)
+        client = FakeVoiceClient()
+        task, (start, stop, audio) = await _session_with_handlers(b, client)
+        await start(CONVERSATION_ID, 0, None, "hey jarvis")
+        await audio(LOUD_PCM, None)
+        await stop(False)
+        self.assertTrue(await _wait_for(client.saw_run_end))
+        self.assertEqual(1, len(engine.turn_contexts))
+        turn = engine.turn_contexts[0]
+        self.assertEqual("esp32_pcm", turn.channel)
+        self.assertEqual("growroom-sprache-1", turn.stable_device_id)
+        self.assertTrue(turn.auth_session_id)
+        self.assertTrue(turn.capture_id)
+        client.hang_up()
+        await task
+
 
 # --------------------------------------------------------------------------- mic accumulation
 
@@ -339,10 +366,14 @@ class MicAccumulationTests(unittest.IsolatedAsyncioTestCase):
         await stop(False)  # never started, no chunks
         self.assertTrue(await _wait_for(lambda: not (b._turn_task and not b._turn_task.done())))
         self.assertEqual([], engine.calls)
-        # A silent turn ends the conversation: no audio, no TTS, but the device
-        # must be released from its listening state with RUN_END.
+        # A silent turn with no open conversation ends it: no audio, no TTS,
+        # but the device must be released from its listening state.
         self.assertEqual(
-            [("subscribe", None), ("event", "VOICE_ASSISTANT_RUN_END")],
+            [
+                ("subscribe", None),
+                ("event", "VOICE_ASSISTANT_INTENT_END"),
+                ("event", "VOICE_ASSISTANT_RUN_END"),
+            ],
             [
                 (op[0], op[1] if op[0] == "subscribe" else op[1].name)
                 for op in client.ops
@@ -411,6 +442,21 @@ class ReplyStreamingTests(unittest.IsolatedAsyncioTestCase):
             await b._stream_reply(BrokenVoice(), REPLY_PCM)
         self.assertEqual(["begin", "heartbeat", "end"], ducking.ops)
 
+    async def test_followup_replies_end_with_a_listening_cue(self):
+        b = make_bridge()
+        client = FakeVoiceClient()
+        _task, (start, stop, audio) = await _session_with_handlers(b, client)
+        await start(CONVERSATION_ID, 1, None, "hey jarvis")
+        await audio(LOUD_PCM, None)
+        await stop(False)
+        self.assertTrue(await _wait_for(client.saw_run_end))
+        cue = bridge._listen_cue_pcm()
+        sent = b"".join(op[1] for op in client.ops if op[0] == "audio")
+        self.assertTrue(len(sent) > len(cue), "cue must follow the reply audio")
+        self.assertEqual(cue, sent[-len(cue):])
+        client.hang_up()
+        await _task
+
     async def test_reply_streamed_as_raw_16bit_mono_chunks(self):
         engine = FakeTurnEngine(reply=REPLY_PCM)
         b = make_bridge(engine=engine)
@@ -426,7 +472,11 @@ class ReplyStreamingTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(c and len(c) % 2 == 0 for c in payloads),
                         "chunks must be non-empty and 16-bit aligned")
         body = b"".join(payloads)
-        self.assertEqual(REPLY_PCM, body, "chunks must be byte-exact PCM, no container header")
+        cue = bridge._listen_cue_pcm()
+        self.assertEqual(REPLY_PCM, body[: len(REPLY_PCM)],
+                         "chunks must be byte-exact PCM, no container header")
+        self.assertEqual(cue, body[len(REPLY_PCM):],
+                         "follow-up replies end with the listening cue")
         self.assertNotIn(b"RIFF", body)
         self.assertNotIn(b"WAVE", body)
         self.assertTrue(all(len(c) <= bridge.REPLY_CHUNK_BYTES for c in payloads))
@@ -596,7 +646,10 @@ class MultiTurnConversationTests(unittest.IsolatedAsyncioTestCase):
         await stop(False)  # user said nothing
         self.assertTrue(await _wait_for(client.saw_run_end))
         self.assertEqual(0, len(engine.calls[1:]), "silence must not call the model")
-        self.assertGreater(engine.resets, resets_before)
+        self.assertEqual(resets_before, engine.resets)
+        intents = [op for op in client.ops
+                   if op[0] == "event" and op[1].name == "VOICE_ASSISTANT_INTENT_END"]
+        self.assertEqual(["1"], [op[2]["continue_conversation"] for op in intents])
         client.hang_up()
         await _task
 
@@ -621,6 +674,39 @@ class MultiTurnConversationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(any("followup=True" in line for line in logs))
         self.assertEqual(1, len(engine.calls), "room noise must not repeat the answer")
+        client.hang_up()
+        await _task
+
+    async def test_empty_followup_reopens_the_microphone_window(self):
+        """The user answers late: silent follow-ups must not close the talk."""
+        engine = FakeTurnEngine(transcript="Welchen Raum?")
+        b = make_bridge(engine=engine, capture_window=0.05, followup_window=0.05)
+        client = FakeVoiceClient()
+        _task, (start, stop, audio) = await _session_with_handlers(b, client)
+        await start(CONVERSATION_ID, 1, None, "hey jarvis")
+        await audio(LOUD_PCM, None)
+        await stop(False)
+        self.assertTrue(await _wait_for(client.saw_run_end))
+        self.assertEqual(1, len(engine.calls))
+
+        for _ in range(bridge.MAX_FOLLOWUP_EXTENSIONS):
+            client.ops.clear()
+            await start(CONVERSATION_ID, 1, None, "")
+            self.assertTrue(await _wait_for(client.saw_run_end))
+            client.ops.clear()
+
+        # After the last extension the conversation really closes.
+        client.ops.clear()
+        await start(CONVERSATION_ID, 1, None, "")
+        await stop(False)
+        self.assertTrue(await _wait_for(client.saw_run_end))
+        run_end_ops = [op for op in client.ops
+                       if op[0] == "event" and op[1].name == "VOICE_ASSISTANT_RUN_END"]
+        intents = [op for op in client.ops
+                   if op[0] == "event" and op[1].name == "VOICE_ASSISTANT_INTENT_END"]
+        self.assertEqual(1, len(run_end_ops))
+        self.assertEqual(1, len(intents))
+        self.assertEqual("0", intents[0][2]["continue_conversation"])
         client.hang_up()
         await _task
 
@@ -835,6 +921,177 @@ class ReconnectTests(unittest.IsolatedAsyncioTestCase):
         await task
 
 
+class OptionalWorkflowTests(unittest.TestCase):
+    def test_learning_queue_failure_keeps_cannanas_workflow(self):
+        import core.esp32_voice_workflows as workflows
+
+        diary_sentinel = object()
+        with tempfile.TemporaryDirectory() as tmp:
+            with unittest.mock.patch.object(
+                workflows, "CannanasRoomDiaryWorkflow", lambda: diary_sentinel
+            ), unittest.mock.patch.object(
+                workflows, "LearningQueue", side_effect=PermissionError("denied")
+            ):
+                diary, queue = bridge._optional_voice_workflows(tmp)
+        self.assertIs(diary_sentinel, diary)
+        self.assertIsNone(queue)
+
+    def test_cannanas_failure_keeps_learning_queue(self):
+        import core.esp32_voice_workflows as workflows
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with unittest.mock.patch.object(
+                workflows,
+                "CannanasRoomDiaryWorkflow",
+                side_effect=PermissionError("denied"),
+            ):
+                diary, queue = bridge._optional_voice_workflows(tmp)
+        self.assertIsNone(diary)
+        self.assertIsInstance(queue, workflows.LearningQueue)
+
+
+class SessionIdentityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_reconnect_gets_a_fresh_auth_session_and_capture_epoch(self):
+        engine = FakeTurnEngine()
+        b = make_bridge(engine=engine)
+        for _round in range(2):
+            client = FakeVoiceClient()
+            task, (start, stop, audio) = await _session_with_handlers(b, client)
+            await start(CONVERSATION_ID, 1, None, "hey jarvis")
+            await audio(b"\x01\x00" * 32, None)
+            await stop(False)
+            await _wait_for(lambda: b._turn_task is None)
+            client.hang_up()
+            await task
+        first, second = engine.turn_contexts[0], engine.turn_contexts[1]
+        self.assertNotEqual(
+            first.auth_session_id,
+            second.auth_session_id,
+            "a reconnect must not reuse the previous connection's session identity",
+        )
+        self.assertNotEqual(
+            first.capture_id.split(":")[0],
+            second.capture_id.split(":")[0],
+            "capture identity must be fenced per connection epoch",
+        )
+
+    async def test_disconnect_cancels_the_devices_pending_confirmation(self):
+        cancelled = []
+
+        class PendingEngine(FakeTurnEngine):
+            def cancel_pending_confirmation(self):
+                cancelled.append(True)
+                return True
+
+        b = make_bridge(engine=PendingEngine())
+        client = FakeVoiceClient()
+        task, _handlers = await _session_with_handlers(b, client)
+        client.hang_up()
+        await task
+        self.assertEqual([True], cancelled)
+
+
+class CompletionAnnouncementTests(unittest.IsolatedAsyncioTestCase):
+    def _completed_queue(self, tmpdir):
+        import os as _os
+
+        from core.esp32_voice_workflows import LearningQueue
+
+        queue = LearningQueue(tmpdir)
+        turn = SimpleNamespace(
+            stable_device_id="esp32-growroom-1",
+            capture_id="capture-1",
+            user_turn_id=1,
+        )
+        queue.submit({"request": "Lerne CO2."}, turn)
+        job = next(queue.pending.glob("*.json"))
+        _os.replace(job, queue.dispatched / job.name)
+        queue.write_completion(job.stem, capability="CO2-Wert", status="completed")
+        return queue, job
+
+    def test_engine_claims_the_announcement_before_speaking(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            queue, job = self._completed_queue(tmp)
+            engine = bridge.GeminiTurnEngine(
+                GEMINI_KEY_MARKER, learning_queue=queue
+            )
+            answer = engine.attach_completion_announcement("Es sind 24 Grad.")
+            self.assertIn("So, jetzt kannst du die Funktion CO2-Wert nutzen.", answer)
+            self.assertEqual([], list(queue.completed.glob("*.json")))
+            self.assertEqual(1, len(list(queue.claimed.glob("*.json"))))
+            engine.confirm_announcement_spoken()
+            self.assertTrue((queue.announced / job.name).exists())
+
+    async def test_failed_audio_stream_releases_the_announcement_for_retry(self):
+        confirmed, released = [], []
+
+        class AnnouncingEngine(FakeTurnEngine):
+            def confirm_announcement_spoken(self):
+                confirmed.append(True)
+
+            def release_announcement(self):
+                released.append(True)
+
+        class FailingAudioClient(FakeVoiceClient):
+            async def send_voice_assistant_audio(self, data):
+                raise RuntimeError("link down")
+
+        b = make_bridge(engine=AnnouncingEngine())
+        client = FailingAudioClient()
+        task, (start, stop, audio) = await _session_with_handlers(b, client)
+        await start(CONVERSATION_ID, 0, None, None)
+        await audio(b"\x01\x00" * 32, None)
+        await stop(False)
+        await _wait_for(lambda: b._turn_task is None)
+        self.assertEqual([], confirmed)
+        self.assertEqual([True], released, "an unspoken announcement must be retried")
+        client.hang_up()
+        await task
+
+    async def test_turn_failure_after_claim_releases_the_announcement(self):
+        released = []
+
+        class FailingEngine(FakeTurnEngine):
+            async def turn(self, mic_pcm):
+                raise RuntimeError("TTS quota exhausted")
+
+            def release_announcement(self):
+                released.append(True)
+
+        b = make_bridge(engine=FailingEngine())
+        client = FakeVoiceClient()
+        task, (start, stop, audio) = await _session_with_handlers(b, client)
+        await start(CONVERSATION_ID, 0, None, None)
+        await audio(b"\x01\x00" * 32, None)
+        await stop(False)
+        await _wait_for(lambda: b._turn_task is None)
+        self.assertEqual([True], released)
+        client.hang_up()
+        await task
+
+    async def test_spoken_announcement_is_acknowledged_once(self):
+        confirmed, released = [], []
+
+        class AnnouncingEngine(FakeTurnEngine):
+            def confirm_announcement_spoken(self):
+                confirmed.append(True)
+
+            def release_announcement(self):
+                released.append(True)
+
+        b = make_bridge(engine=AnnouncingEngine())
+        client = FakeVoiceClient()
+        task, (start, stop, audio) = await _session_with_handlers(b, client)
+        await start(CONVERSATION_ID, 0, None, None)
+        await audio(b"\x01\x00" * 32, None)
+        await stop(False)
+        await _wait_for(lambda: b._turn_task is None)
+        self.assertEqual([True], confirmed)
+        self.assertEqual([], released)
+        client.hang_up()
+        await task
+
+
 # --------------------------------------------------------------------------- CLI + logging
 
 class CliAndLoggingTests(unittest.TestCase):
@@ -883,6 +1140,8 @@ class CliAndLoggingTests(unittest.TestCase):
         self.assertIn("deutsch", lowered)
         self.assertIn("kurz", lowered)
         self.assertNotIn("tool", lowered)
+        self.assertIn("tagebuch", lowered)
+        self.assertIn("lernen", lowered)
 
     def test_spotify_function_call_runs_the_narrow_controller(self):
         calls = []
@@ -904,6 +1163,137 @@ class CliAndLoggingTests(unittest.TestCase):
         self.assertEqual(
             [{"action": "play", "query": "Queen", "kind": "artist"}], calls
         )
+
+    def test_temperature_function_runs_the_room_runner(self):
+        calls = []
+        engine = bridge.GeminiTurnEngine(
+            GEMINI_KEY_MARKER,
+            temperature_runner=lambda args: calls.append(args) or "Madrid 26,0 Grad.",
+        )
+        response = SimpleNamespace(
+            text=None,
+            candidates=[SimpleNamespace(content=SimpleNamespace(parts=[
+                SimpleNamespace(function_call=SimpleNamespace(
+                    name="growroom_temperature",
+                    args={"room": "Madrid"},
+                ))
+            ]))],
+        )
+        self.assertEqual("Madrid 26,0 Grad.", engine._answer_from_response(response))
+        self.assertEqual([{"room": "Madrid"}], calls)
+
+    def test_diary_prepare_function_runs_with_host_owned_turn_context(self):
+        calls = []
+        workflow = SimpleNamespace(
+            prepare=lambda args, turn: calls.append((args, turn)) or "Vorschau. Sag ja.",
+            take_completion_announcement=lambda: None,
+        )
+        engine = bridge.GeminiTurnEngine(
+            GEMINI_KEY_MARKER, diary_workflow=workflow,
+        )
+        turn = SimpleNamespace(stable_device_id="esp32-1", user_turn_id=4)
+        engine.set_turn_context(turn)
+        response = SimpleNamespace(
+            text=None,
+            candidates=[SimpleNamespace(content=SimpleNamespace(parts=[
+                SimpleNamespace(function_call=SimpleNamespace(
+                    name="cannanas_diary_prepare",
+                    args={"room": "Helsinki", "text": "Blätter kontrolliert."},
+                ))
+            ]))],
+        )
+        self.assertEqual("Vorschau. Sag ja.", engine._answer_from_response(response))
+        self.assertEqual(
+            [({"room": "Helsinki", "text": "Blätter kontrolliert."}, turn)], calls
+        )
+
+    def test_learning_function_queues_requirement_with_turn_context(self):
+        calls = []
+        queue = SimpleNamespace(
+            submit=lambda args, turn: calls.append((args, turn)) or "Muss ich lernen.",
+            take_completion_announcement=lambda: None,
+        )
+        engine = bridge.GeminiTurnEngine(GEMINI_KEY_MARKER, learning_queue=queue)
+        turn = SimpleNamespace(stable_device_id="esp32-1", user_turn_id=5)
+        engine.set_turn_context(turn)
+        response = SimpleNamespace(
+            text=None,
+            candidates=[SimpleNamespace(content=SimpleNamespace(parts=[
+                SimpleNamespace(function_call=SimpleNamespace(
+                    name="request_capability_learning",
+                    args={"request": "Lerne den CO2-Wert anzusagen."},
+                ))
+            ]))],
+        )
+        self.assertEqual("Muss ich lernen.", engine._answer_from_response(response))
+        self.assertEqual(
+            [({"request": "Lerne den CO2-Wert anzusagen."}, turn)], calls
+        )
+
+    def test_pending_diary_confirmation_is_decided_by_workflow(self):
+        turn = SimpleNamespace(stable_device_id="esp32-1", user_turn_id=6)
+        workflow = SimpleNamespace(
+            has_pending=lambda candidate: candidate is turn,
+            evaluate_confirmation=lambda candidate, text: (
+                "Erledigt — Tagebucheintrag gespeichert."
+                if candidate is turn and text == "ja" else None
+            ),
+        )
+        engine = bridge.GeminiTurnEngine(
+            GEMINI_KEY_MARKER, diary_workflow=workflow,
+        )
+        engine.set_turn_context(turn)
+        self.assertTrue(engine.has_pending_confirmation())
+        self.assertEqual(
+            "Erledigt — Tagebucheintrag gespeichert.",
+            engine.evaluate_pending_confirmation("ja"),
+        )
+
+    def test_completed_learning_job_is_prefixed_once(self):
+        announcements = iter(
+            [("So, jetzt kannst du die Funktion CO2 nutzen.", "job-1"), None]
+        )
+        queue = SimpleNamespace(
+            claim_completion_announcement=lambda: next(announcements),
+            ack_completion_announcement=lambda job_id: True,
+        )
+        engine = bridge.GeminiTurnEngine(GEMINI_KEY_MARKER, learning_queue=queue)
+        self.assertEqual(
+            "So, jetzt kannst du die Funktion CO2 nutzen. Aktuelle Antwort.",
+            engine.attach_completion_announcement("Aktuelle Antwort."),
+        )
+        self.assertEqual(
+            "Nächste Antwort.", engine.attach_completion_announcement("Nächste Antwort.")
+        )
+        self.assertTrue(engine.confirm_announcement_spoken())
+
+    def test_default_temperature_runner_reports_measured_zone(self):
+        fake = [
+            {"entity_id": "sensor.zonen_madrid_temperatur_celsius", "state": "26.0"},
+            {"entity_id": "sensor.zonen_helsinki_temperatur_celsius", "state": "24.2"},
+            {"entity_id": "sensor.zonen_halle_temperatur_celsius", "state": "13.6"},
+        ]
+        with unittest.mock.patch.object(bridge, "_ha_states", return_value=fake):
+            self.assertEqual(
+                "Raum Madrid hat aktuell 26.0 Grad.",
+                bridge._default_temperature_runner({"room": "Madrid"}),
+            )
+            self.assertEqual(
+                "Raum Helsinki hat aktuell 24.2 Grad.",
+                bridge._default_temperature_runner({"room": "Helsinki"}),
+            )
+            answer = bridge._default_temperature_runner({"room": "Tokio"})
+            self.assertIn("keinen Temperatursensor", answer)
+            self.assertIn("helsinki", answer)
+            self.assertIn("madrid", answer)
+
+    def test_default_temperature_runner_handles_unavailable_state(self):
+        fake = [
+            {"entity_id": "sensor.zonen_tokio_temperatur_celsius", "state": "unavailable"},
+        ]
+        with unittest.mock.patch.object(bridge, "_ha_states", return_value=fake):
+            self.assertIn("keinen Temperaturwert",
+                bridge._default_temperature_runner({"room": "Tokio"}))
 
     def test_unknown_function_call_is_never_executed(self):
         calls = []
@@ -931,12 +1321,13 @@ class CliAndLoggingTests(unittest.TestCase):
     def test_default_tts_is_a_calm_male_jarvis_voice(self):
         self.assertEqual("Charon", bridge.DEFAULT_TTS_VOICE)
 
-    def test_tts_prompt_forces_natural_german_pronunciation(self):
+    def test_tts_speaks_only_the_answer_with_german_style_instruction(self):
         answer = "Auf Spotify läuft gerade ein Titel."
-        prompt = bridge._tts_prompt(answer)
-        self.assertIn("natürlicher deutscher Aussprache", prompt)
-        self.assertIn("ruhigen, souveränen Männerstimme", prompt)
-        self.assertTrue(prompt.endswith(answer))
+        style, contents = bridge._tts_texts(answer)
+        self.assertEqual("Auf Spotify läuft gerade ein Titel.", contents)
+        self.assertIn("Deutsch", style)
+        self.assertIn("Männerstimme", style)
+        self.assertNotIn(answer, style)
 
     def test_tts_pcm_resamples_from_24khz_to_device_16khz(self):
         source = array("h", [i * 1000 for i in range(24)]).tobytes()
@@ -1003,11 +1394,185 @@ class CliAndLoggingTests(unittest.TestCase):
         self.assertEqual(1, client.models.calls)
         sleep.assert_not_called()
 
+    def test_tts_model_incompatible_with_style_is_retried_without_it(self):
+        class Err(Exception):
+            code = 400
+
+        calls = []
+
+        class Models:
+            def generate_content(self, model, contents, config):
+                calls.append((model, contents, config))
+                if getattr(config, "system_instruction", None):
+                    raise Err("system_instruction rejected")
+                return "spoken"
+
+        client = SimpleNamespace(models=Models())
+        style = SimpleNamespace(system_instruction="deutsch")
+        plain = SimpleNamespace(system_instruction=None)
+        engine = bridge.GeminiTurnEngine(GEMINI_KEY_MARKER)
+        result = engine._generate(client, ("m",), "text", style, retry_config=plain)
+        self.assertEqual(("m", "spoken"), result)
+        self.assertEqual(2, len(calls), "same model must be retried without style")
+        self.assertIsNone(calls[1][2].system_instruction)
+
     def test_every_model_has_a_fallback_chain(self):
         self.assertIn(bridge.DEFAULT_MODEL, bridge.FALLBACK_CHAT_MODELS)
         self.assertIn(bridge.DEFAULT_TTS_MODEL, bridge.FALLBACK_TTS_MODELS)
         self.assertGreater(len(bridge.FALLBACK_CHAT_MODELS), 1)
         self.assertGreater(len(bridge.FALLBACK_TTS_MODELS), 1)
+
+    def test_second_gemini_key_rotates_on_quota_errors(self):
+        class Err(Exception):
+            code = 429
+
+        keys = ("first", "second", "third")
+        engine = bridge.GeminiTurnEngine(keys)
+        self.assertEqual("first", engine.current_key())
+        self.assertTrue(engine._rotate_key())
+        self.assertEqual("second", engine.current_key())
+        self.assertTrue(engine._rotate_key())
+        self.assertEqual("third", engine.current_key())
+        self.assertFalse(engine._rotate_key(), "no rotation past the last key")
+        self.assertEqual("third", engine.current_key())
+
+    def test_rotation_helper_retries_turn_on_quota_only(self):
+        class Quota(Exception):
+            code = 429
+
+        class Broken(Exception):
+            pass
+
+        engine = bridge.GeminiTurnEngine(("a", "b", "c"))
+        seen = []
+
+        def flaky(key):
+            seen.append(key)
+            if len(seen) < 3:
+                raise Quota("quota")
+            return "ok"
+
+        self.assertEqual("ok", engine._turn_with_key_rotation(flaky))
+        self.assertEqual(["a", "b", "c"], seen)
+
+        engine2 = bridge.GeminiTurnEngine(("a",))
+        seen2 = []
+
+        def always_quota(key):
+            seen2.append(key)
+            raise Quota("quota")
+
+        with self.assertRaises(Quota):
+            bridge.GeminiTurnEngine._turn_with_key_rotation(engine2, always_quota)
+        self.assertEqual(["a"], seen2)
+
+        engine3 = bridge.GeminiTurnEngine(("a", "b"))
+        with self.assertRaises(Broken):
+            bridge.GeminiTurnEngine._turn_with_key_rotation(
+                engine3, lambda key: (_ for _ in ()).throw(Broken())
+            )
+
+    def test_rotation_also_skips_unauthenticated_keys(self):
+        class Unauthenticated(Exception):
+            code = 401
+
+        engine = bridge.GeminiTurnEngine(("dead", "alive"))
+        self.assertEqual(
+            "ok",
+            bridge.GeminiTurnEngine._turn_with_key_rotation(
+                engine, lambda key: "ok" if key == "alive" else (_ for _ in ()).throw(Unauthenticated())
+            ),
+        )
+
+    def test_rotation_ignores_plain_model_errors(self):
+        class Incompatible(Exception):
+            def __str__(self):
+                return "INVALID_ARGUMENT: model cannot do that"
+
+        engine = bridge.GeminiTurnEngine(("a", "b"))
+        with self.assertRaises(Incompatible):
+            bridge.GeminiTurnEngine._turn_with_key_rotation(
+                engine, lambda key: (_ for _ in ()).throw(Incompatible())
+            )
+
+    def test_tts_key_rotation_never_repeats_the_chat_side_effect(self):
+        """A quota failure while synthesising must not re-run the answer turn."""
+        calls = {"answer": 0, "speech": 0}
+
+        class Quota(Exception):
+            code = 429
+
+        class Engine(bridge.GeminiTurnEngine):
+            def _answer_on_key(self, genai, mic_pcm):
+                calls["answer"] += 1
+                return "Antwort mit Seiteneffekt"
+
+            def _speech_on_key(self, genai, answer):
+                calls["speech"] += 1
+                if calls["speech"] == 1:
+                    raise Quota("429 quota")
+                return REPLY_PCM
+
+        engine = Engine(("first", "second"))
+        stub = unittest.mock.MagicMock()
+        with unittest.mock.patch.dict(
+            sys.modules,
+            {"google": stub, "google.genai": stub},
+        ):
+            answer, pcm = asyncio.run(engine.turn(b"\x01\x00" * 8))
+
+        self.assertEqual("Antwort mit Seiteneffekt", answer)
+        self.assertEqual(REPLY_PCM, pcm)
+        self.assertEqual(1, calls["answer"], "chat/side effects must run exactly once")
+        self.assertEqual(2, calls["speech"], "speech retries on the next key")
+
+    def test_unauthenticated_key_rotates_before_any_side_effect(self):
+        calls = []
+
+        class Unauthenticated(Exception):
+            code = 401
+
+        class Engine(bridge.GeminiTurnEngine):
+            def _answer_on_key(self, genai, mic_pcm):
+                calls.append(self.current_key())
+                if self.current_key() == "dead":
+                    raise Unauthenticated("API key not valid")
+                return "ok"
+
+            def _speech_on_key(self, genai, answer):
+                return b"\x00\x00"
+
+        engine = Engine(("dead", "alive"))
+        stub = unittest.mock.MagicMock()
+        with unittest.mock.patch.dict(
+            sys.modules, {"google": stub, "google.genai": stub}
+        ):
+            answer, _pcm = asyncio.run(engine.turn(b"\x01\x00" * 8))
+
+        self.assertEqual("ok", answer)
+        self.assertEqual(["dead", "alive"], calls, "an unauthenticated key is skipped")
+
+    def test_extra_gemini_key_files_extend_the_key_ring(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            primary = tmp_path / "gemini-key.txt"
+            extra = tmp_path / "gemini-key-2.txt"
+            missing = tmp_path / "gemini-key-3.txt"
+            for path, marker in ((primary, "KEY-A"), (extra, "KEY-B")):
+                path.write_text(marker + "\n")
+                os.chmod(path, 0o600)
+            keys = bridge.load_gemini_keys(primary, [extra, missing])
+            self.assertEqual(("KEY-A", "KEY-B"), keys)
+            self.assertEqual(("KEY-A",), bridge.load_gemini_keys(primary, []))
+
+    def test_extra_gemini_key_file_flag_is_repeatable(self):
+        args = bridge.build_arg_parser().parse_args(
+            [
+                "--relay-host", "h", "--key-file", "k", "--gemini-key-file", "g",
+                "--extra-gemini-key-file", "g2", "--extra-gemini-key-file", "g3",
+            ]
+        )
+        self.assertEqual(["g2", "g3"], args.extra_gemini_key_file)
 
     def test_engine_reuses_the_model_that_last_worked(self):
         engine = bridge.GeminiTurnEngine(GEMINI_KEY_MARKER)

@@ -1,0 +1,12 @@
+[Unit]
+Description=Poll the JARVIS learning queue
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=30s
+AccuracySec=5s
+Persistent=true
+Unit=jarvis-learning-dispatch.service
+
+[Install]
+WantedBy=timers.target

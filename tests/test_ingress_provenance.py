@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from core.device_credentials import DeviceCredentialStore
 from core.turn_provenance import (
     CHANNEL_CONTROL_WS_TEXT,
+    CHANNEL_ESP32_PCM,
     CHANNEL_HTTP_TEXT,
     CHANNEL_PHONE_PCM,
     IngressEnvelope,
@@ -102,6 +103,24 @@ class TestPhonePCMEnvelopeCarriesCaptureID(unittest.TestCase):
             self.assertEqual(pcm['envelope'].user_turn_id, end['envelope'].user_turn_id)
             self.assertEqual(pcm['envelope'].user_turn_id, pcm2['envelope'].user_turn_id)
             self.assertTrue(validate(pcm['envelope'], known_devices=_active_device_ids(store)))
+
+
+class TestESP32PCMEnvelopeCarriesCaptureID(unittest.TestCase):
+    def test_esp32_pcm_requires_stable_device_and_capture(self):
+        envelope = create_stable(
+            CHANNEL_ESP32_PCM,
+            stable_device_id="growroom-sprache-1",
+            auth_session_id="api-key-digest",
+            capture_id="conversation-1:turn-1",
+            final=True,
+        )
+        self.assertTrue(validate(envelope))
+        self.assertFalse(validate(create_stable(
+            CHANNEL_ESP32_PCM,
+            stable_device_id="growroom-sprache-1",
+            auth_session_id="api-key-digest",
+            final=True,
+        )))
 
 
 class TestRevokedDeviceRejected(unittest.TestCase):

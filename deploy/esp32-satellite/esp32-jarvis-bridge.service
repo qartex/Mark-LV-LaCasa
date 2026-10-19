@@ -1,0 +1,18 @@
+[Unit]
+Description=LaCasa ESP32 JARVIS voice bridge
+After=network-online.target pipewire.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/lacasa/Mark-LV-LaCasa
+Environment=PYTHONPATH=/home/lacasa/Mark-LV-LaCasa:/home/lacasa/Mark-LV-LaCasa/scripts
+EnvironmentFile=/home/lacasa/Mark-LV-LaCasa/deploy/cannanas/cannanas-adapter.credentials
+Environment=JARVIS_CANNANAS_ADAPTER_COMMAND=/home/lacasa/cannanas-adapter/venv/bin/cannanas-adapter
+Environment=JARVIS_CANNANAS_AUDIT_FILE=/home/lacasa/cannanas-adapter/audit/jarvis-write-audit.jsonl
+ExecStart=/home/lacasa/waveshare-va-test/venv/bin/python -m scripts.esp32_jarvis_bridge --relay-host growraum-sprache-1-home-test.local --api-key-file /home/lacasa/waveshare-va-test/api-key.txt --gemini-key-file /home/lacasa/waveshare-va-test/gemini-key.txt --extra-gemini-key-file /home/lacasa/waveshare-va-test/gemini-key-2.txt --extra-gemini-key-file /home/lacasa/waveshare-va-test/gemini-key-3.txt --extra-gemini-key-file /home/lacasa/waveshare-va-test/gemini-key-4.txt --device-id growroom-sprache-1 --learning-queue-dir /home/lacasa/waveshare-va-test/learning-queue
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target
