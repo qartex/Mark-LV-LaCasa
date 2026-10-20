@@ -107,7 +107,7 @@ class IntegrationFixture(unittest.TestCase):
         self.real_client = CannanasClient({
             'command': sys.executable,
             'args': [str(FIXTURE)],
-            'adapter_version': '2.3.0',
+            'adapter_version': '2.4.0',
             'artifact_sha256': 'a' * 64,
             'expected_tools': EXPECTED_TOOLS,
             'adapter_env': {},
@@ -174,7 +174,9 @@ class TestHostConfirmConsumesAtomicallyAndPostsOnce(IntegrationFixture):
         self.assertEqual(confirm_calls[0]['tool'], 'confirm_plant_create')
         binding = confirm_calls[0]['arguments']['binding']
         self.assertEqual(binding['prepared_turn_id'], str(13))
-        self.assertEqual(binding['adapter_boot_id'], self.host.boot_id())
+        # The fence carries the adapter's own boot id, not the host's.
+        self.assertEqual(binding['adapter_boot_id'], 'fake-boot-1')
+        self.assertNotEqual(binding['adapter_boot_id'], self.host.boot_id())
         self.assertEqual(self.host.coordinator.current('device-durable-1').state,
                          'consumed')
         audit_lines = [json.loads(line) for line in

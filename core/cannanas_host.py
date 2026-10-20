@@ -488,6 +488,29 @@ def _refusal_text(result) -> str:
     return f'Die Änderung wurde abgelehnt: {reason}'
 
 
+def _refuse_unsupported_create_fields(params: dict, args: dict) -> None:
+    """Refuse a spoken field the create path cannot carry.
+
+    The adapter's create tools know fewer fields than the update tools. A
+    spoken field that would be dropped must not vanish silently: the
+    grower gets told instead of believing the plant was created with it.
+    """
+    nested = params.get('fields')
+    spoken = dict(nested) if isinstance(nested, dict) else {}
+    for key in CANNANAS_SPOKEN_PARAMETERS:
+        if key in ('fields', 'action', 'query', 'count'):
+            continue
+        value = params.get(key)
+        if value not in (None, ''):
+            spoken.setdefault(key, value)
+    unsupported = sorted(name for name in spoken if name not in args)
+    if unsupported:
+        raise ValueError(
+            'Diese Angaben kann ich beim Anlegen nicht setzen: '
+            + ', '.join(unsupported)
+            + '. Bitte die Pflanze zuerst anlegen und danach aendern.')
+
+
 def prepare_tool_call(action: str, params: dict, binding: dict) -> 'tuple[str, dict]':
     """Map the closed prepare action to (adapter tool, args incl. binding)."""
     from core.cannanas_actions import CANNANAS_PREPARE_ACTIONS
@@ -528,6 +551,7 @@ def prepare_tool_call(action: str, params: dict, binding: dict) -> 'tuple[str, d
             args['is_mother'] = is_mother
         if spoken_plant_count is not None:
             args['plant_count'] = spoken_plant_count
+        _refuse_unsupported_create_fields(params, args)
         return action, {**args, 'binding': binding}
     if action == 'prepare_strain_create':
         args: dict = {'name': explicit_plant or strain, 'identifier': ''}
@@ -550,6 +574,7 @@ def prepare_tool_call(action: str, params: dict, binding: dict) -> 'tuple[str, d
         mother_plants = _spoken_value(params, 'mother_plants')
         if mother_plants is not None:
             args['mother_plants'] = mother_plants
+        _refuse_unsupported_create_fields(params, args)
         return action, {**args, 'binding': binding}
     if action == 'prepare_plant_update':
         extra = {}
@@ -607,6 +632,10 @@ def prepare_tool_call(action: str, params: dict, binding: dict) -> 'tuple[str, d
             args['plant'] = plant_target
         else:
             args['room'] = room
+        # The entry can carry its own date.
+        spoken_date = _spoken_value(params, 'date', params.get('written_at'))
+        if spoken_date is not None:
+            args['written_at'] = str(spoken_date).strip()
         return action, args
     if action == 'prepare_zone_update':
         zone_name = str(params.get('zone') or room or '').strip()
@@ -923,6 +952,18 @@ class CannanasHost:
                 'requires_confirmation': False,
                 'exact': bool(result.get('exact', True)),
             }
+        preview = result.get('preview') or {}
+        if not preview:
+            # Nothing to confirm: the grower must not be asked to approve a
+            # change that does not exist, and no pending may be stored.
+            return {
+                'ok': False,
+                'summary': ('Die Aenderung waere leer - es wurde nichts '
+                            'vorbereitet. Bitte nenne die Aenderung genauer.'),
+                'preview': {},
+                'requires_confirmation': False,
+                'exact': bool(result.get('exact', True)),
+            }
         club_id = str(self._env.get('CANNANAS_CLUB_ID') or 'club-bound')
         pending = PendingConfirmation(
             action=action.removeprefix('prepare_'),
@@ -933,7 +974,9 @@ class CannanasHost:
             stable_device_id=binding['stable_device_id'],
             auth_session_id=binding['auth_session_id'],
             prepared_turn_id=int(binding['prepared_turn_id']),
-            adapter_boot_id=self._boot,
+            # The confirm is checked against the adapter's own boot id, so
+            # the pending must carry that one — not the host's process id.
+            adapter_boot_id=binding['adapter_boot_id'],
             created_at=time.monotonic(),
             expires_at=time.monotonic() + DEFAULT_PENDING_TTL_SECONDS,
             state='pending',

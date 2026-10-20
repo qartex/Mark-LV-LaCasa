@@ -1,7 +1,7 @@
 # Cannanas-Funktionsliste für JARVIS (Stand 2026-10-20)
 
 Diese Liste zeigt, was JARVIS über Sprache mit Cannanas kann — und was noch fehlt.
-Adapter-Stand: `cannanas-mcp-adapter` 2.0.0 (34 Werkzeuge), Mark-LV auf `feat/esp32-satellite-phase1`.
+Adapter-Stand: `cannanas-mcp-adapter` 2.4.0 (34 Werkzeuge), Mark-LV auf `feat/esp32-satellite-phase1`.
 
 **So funktioniert jede Änderung:** JARVIS liest den Zustand, berechnet eine Vorschau und
 spricht sie vor. Erst nach deinem gesprochenen **„ja“** wird geschrieben. „Abbrechen“
@@ -22,7 +22,7 @@ verwirft die Vorschau. Ohne bestätigte Vorschau passiert **nie** ein Schreibvor
 | Pflanze als **Mutterpflanze** markieren | ✅ | „Mach Ztilton #3 zur Mutterpflanze“ |
 | Pflanze von einer **Mutterpflanze** ableiten (parent_id) | ✅ | „Neue Pflanze Ztilton #8, Mutter Ztilton #3“ |
 | **Sorte** anlegen (wenn sie fehlt) | ✅ | „Die Sorte Pineapple Cake gibt es noch nicht — leg sie an“ |
-| Charge in eine **bestehende** Charge aufnehmen | 🟡 | API kann das (`existing_batch_id`), Sprache: noch offen |
+| Charge in eine **bestehende** Charge aufnehmen | ❌ | Nur im API-Fixture, im Adapter nicht umgesetzt |
 | Charge aus **Vermehrungsmaterial-Transaktion** buchen | 🟡 | Material-Buchung existiert, Sprachweg offen |
 | Anbau **planen** (Samen aussäen, Setzlinge stechen) | 🟡 | Nur Charge anlegen; kein „Aussaat-Datum pro Pflanze“ als Sprachablauf |
 
@@ -36,7 +36,8 @@ verwirft die Vorschau. Ohne bestätigte Vorschau passiert **nie** ein Schreibvor
 | Kultur-Daten setzen (Aussaat, Keimung, Steckling, Vegetation, Blüte, Ernte, Trocknung, Curing, Vernichtung) | ✅ | „Setz das Blütendatum auf den 5. Oktober“ |
 | Erwartetes **Erntedatum** | ✅ | „Ernte am 20. Oktober“ |
 | **Quarantäne** setzen | ✅ | „Ztilton #3 in Quarantäne“ |
-| Pflanze/Charge **archivieren** | 🟡 | `archived` technisch möglich, Sprache bewusst offen (Wirkung schwer rückgängig zu machen) |
+| Pflanze **archivieren** | 🟡 | `archived` technisch möglich, Sprache bewusst offen (Wirkung schwer rückgängig zu machen) |
+| Charge **archivieren** | ❌ | Der Adapter kennt dieses Feld bei Chargen nicht |
 
 ## 3. Umziehen und Räume
 
@@ -74,6 +75,7 @@ verwirft die Vorschau. Ohne bestätigte Vorschau passiert **nie** ein Schreibvor
 | **Übersicht** (Räume, Pflanzen, letzte Chargen) | ✅ | „Mach mir eine Übersicht“ |
 | **Zonen-Zusammenfassung** (Chargen, Pflanzen, Stadium, letzter Eintrag) | ✅ | „Wie steht's um die Räume?“ |
 | **Pflanzenstatus je Raum** (inkl. Mutterzählung) | ✅ | „Status von Madrid“ |
+| **Einzelne** Pflanze einer Charge ansprechen | 🟡 | Die 268 Pflanzen sind namenlos; eine Charge mit mehreren Pflanzen wird abgelehnt (siehe Vorschlag 5) |
 | **Mutterpflanzenliste** | ✅ | „Welche Mutterpflanzen habe ich?“ |
 | **Ernten** auflisten | ✅ | „Welche Ernten gab es?“ |
 | **Tagebücher** eines Raums | ✅ | „Zeig mir die letzten Einträge aus Madrid“ |
@@ -89,7 +91,7 @@ verwirft die Vorschau. Ohne bestätigte Vorschau passiert **nie** ein Schreibvor
 | Eintrag für eine **Pflanze** | ✅ | „Tagebucheintrag für Ztilton #6: Blätter kontrolliert“ |
 | Eintrag für eine **Charge** | ✅ | „Tagebucheintrag für die Charge Ztilton Woche 4: Schnitt ok“ |
 | **Messwerte** mit dem Eintrag (Temperatur, Luftfeuchte, pH, EC, Licht, Höhe, Blattzahl …) | ✅ | „Tagebucheintrag Madrid, Lufttemperatur 26 Grad, pH 6,2“ |
-| **Zeitpunkt** des Eintrags selbst bestimmen | ✅ | „Tagebucheintrag vom 1. Oktober: …“ |
+| **Zeitpunkt** des Eintrags selbst bestimmen | ✅ | „Tagebucheintrag vom 1. Oktober: …“ (seit Adapter 2.4.0) |
 | Gemessene Werte aus **Home Assistant** übernehmen | 🟡 | HA liefert die Werte, das Füllen ist offen |
 | **Fotos** an den Eintrag hängen | ❌ | Datei-Upload ist nicht per Sprache (bewusst) |
 | Eintrag **nachträglich ändern** | 🟡 | API vorhanden (`updateClubDiary`), Sprache offen |
@@ -99,7 +101,7 @@ verwirft die Vorschau. Ohne bestätigte Vorschau passiert **nie** ein Schreibvor
 
 | Funktion | Status | So sagst du es |
 |---|---|---|
-| **Ernte** vorbereiten (Pflanzen/Chargen, Datum, Notiz) | ✅ | „Ernte von Ztilton #6 und Charge Woche 4“ |
+| **Ernte** vorbereiten (Pflanzen/Chargen, Datum, Notiz) | ✅ | „Ernte von Ztilton #6 und Charge Woche 4“ (Charge-Label seit Adapter 2.2.0) |
 | **Verschmutzung** dokumentieren (Pflanzen/Chargen) | ✅ | „Ztilton #6 wurde vernichtet“ |
 | Ernte **abschließen** (Pflanzen/Chargen finalisieren) | ❌ | Bewusst ausgeschlossen: beendet den Bestand unwiderruflich |
 | Ernte-**Produkte** und **Trocknungsprotokoll** | ❌ | Compliance-relevant, nicht per Sprache |
@@ -129,6 +131,15 @@ verwirft die Vorschau. Ohne bestätigte Vorschau passiert **nie** ein Schreibvor
 | Finanzen, Mitglieder, Chat, Cart, Rollen, POS, Transport | Kein Grow-Bereich |
 | `grow-configs` ändern | Club-weit; ein Sprachbefehl dafür wäre zu global |
 
+## 9b. Was die Sprachsteuerung heute einschränkt
+
+| Grenze | Ursache |
+|---|---|
+| **Pflanzen sind nicht einzeln ansprechbar** | In Cannanas haben alle 268 Pflanzen `name = null`. Sie erben das Chargen-Label, deshalb ist „Ztilton #6" eine Charge. Eine Charge mit mehreren Pflanzen wird bewusst abgelehnt, damit nicht die falsche Pflanze geändert wird. |
+| **Beim Anlegen sind nur wenige Felder möglich** | Der Adapter bietet fürs Anlegen weniger Felder als fürs Ändern. Gesprochene Felder, die nicht gesetzt werden können, werden **abgelehnt** (der Gärtner hört es) statt stillschweigend verworfen. |
+| **Archivieren ist nicht Sprache** | Die Wirkung ist schwer rückgängig zu machen, daher bleibt es bewusst eine Handarbeit. |
+| **Ein leerer Tagebucheintrag wird nicht gespeichert** | Leere Texte würden eine Notiz löschen — das ist eine Löschung, keine Änderung, und wird abgelehnt. |
+
 ## 10. Meine Vorschläge für den nächsten Schritt
 
 1. **Chargen-Pflanzen-Zuordnung**: „Zieh die Charge Ztilton Woche 4 mit allen 12 Pflanzen nach Helsinki“ — heute zwei Ansagen, ein Wunsch.
@@ -143,8 +154,8 @@ verwirft die Vorschau. Ohne bestätigte Vorschau passiert **nie** ein Schreibvor
 
 ## Technischer Nachweis
 
-- Adapter 2.0.0: 34 Werkzeuge, Allowlist geschlossen (nur dokumentierte Pfade aus dem gepinnten OpenAPI-Fixture), 126 Tests grün.
-- Mark-LV: geschlossene Aktions-Enum mit 24 Aktionen, 685 Tests grün.
+- Adapter 2.4.0: 34 Werkzeuge, Allowlist geschlossen (nur dokumentierte Pfade aus dem gepinnten OpenAPI-Fixture), 158 Tests grün.
+- Mark-LV: geschlossene Aktions-Enum mit 24 Aktionen, 734 Tests grün.
 - Live gegen die echte API geprüft (nur lesend): Zonen, Chargen, Pflanzen, Tagebücher, Ernten, Grow-Einstellungen.
 - Live-Prepare geprüft (ohne Bestätigung, also ohne Schreibvorgang): Zonen-Update, Pflanzen-Update, Chargen-Update, Tagebuch, Ernte, Verschmutzung.
 - Jeder bestätigte Write: Audit-Eintrag **vor** dem POST, Bestätigung gegen die Boot-ID des Adapters, Rückgabe-ID wird verifiziert.

@@ -244,6 +244,93 @@ class TestPrepareStoresPendingAndReturnsPreview(PluginFixture):
             prepare_tool_call("prepare_zone_update", {"zone": "Madrid"},
                               {"stable_device_id": "esp32-1"})
 
+    def test_the_pending_carries_the_adapters_boot_id(self):
+        """The confirm is fenced on the adapter's boot id, not the host's.
+
+        The adapter compares the binding of a confirm against its own boot
+        id, so the pending confirmation must store that one. With the host's
+        process id every confirm would be refused as a restart.
+        """
+        self.client.results['get_adapter_info'] = {
+            'ok': True, 'config': {'boot_id': 'adapter-boot-1'}}
+        self.client.results['prepare_plant_update'] = {
+            'ok': True, 'requires_confirmation': True,
+            'confirmation_token': 'opaque-token-1',
+            'payload_hash': 'payload-hash-1',
+            'preview': {'status': 'FLOWERING'}, 'club_id': 'club-fixed'}
+        self.run_plugin({'action': 'prepare_plant_update',
+                         'plant_name': 'Ztilton #6', 'status': 'Blüte'})
+
+        pending = self.host.coordinator.current('device-durable-1')
+        self.assertIsNotNone(pending)
+        self.assertEqual('adapter-boot-1', pending.adapter_boot_id)
+        self.assertNotEqual(self.host.boot_id(), pending.adapter_boot_id,
+                            'the host boot id never stands in for the adapter')
+
+    def test_the_confirm_sends_the_adapters_boot_id(self):
+        """The id that reaches the adapter on confirm is the adapter's own."""
+        self.client.results['get_adapter_info'] = {
+            'ok': True, 'config': {'boot_id': 'adapter-boot-1'}}
+        self.client.results['prepare_plant_update'] = {
+            'ok': True, 'requires_confirmation': True,
+            'confirmation_token': 'opaque-token-1',
+            'payload_hash': 'payload-hash-1',
+            'preview': {'status': 'FLOWERING'}, 'club_id': 'club-fixed'}
+        self.client.results['confirm_plant_update'] = {
+            'ok': True, 'result_id': 'plant-42'}
+        self.run_plugin({'action': 'prepare_plant_update',
+                         'plant_name': 'Ztilton #6', 'status': 'Blüte'})
+
+        self.host.confirm(make_turn(user_turn_id=21))
+
+        confirms = [c for c in self.client.calls
+                    if c['tool'].startswith('confirm_')]
+        self.assertEqual(1, len(confirms))
+        self.assertEqual('adapter-boot-1',
+                         confirms[0]['arguments']['binding']['adapter_boot_id'])
+        self.assertNotEqual(self.host.boot_id(),
+                            confirms[0]['arguments']['binding']['adapter_boot_id'])
+
+    def test_a_plant_create_refuses_a_field_it_cannot_carry(self):
+        """A spoken field that would be dropped must be refused, not lost."""
+        from core.cannanas_host import prepare_tool_call
+
+        with self.assertRaises(ValueError) as caught:
+            prepare_tool_call(
+                "prepare_plant_create",
+                {"plant_name": "Ztilton #8", "room": "Madrid",
+                 "strain": "Ztilton", "status": "CUTTING",
+                 "fields": {"substrate": "Coco", "description": "Wichtig"}},
+                {"stable_device_id": "esp32-1"})
+        self.assertIn("substrate", str(caught.exception))
+        self.assertIn("description", str(caught.exception))
+
+    def test_a_plant_create_accepts_the_fields_it_can_carry(self):
+        from core.cannanas_host import prepare_tool_call
+
+        _tool, args = prepare_tool_call(
+            "prepare_plant_create",
+            {"plant_name": "Ztilton #8", "room": "Madrid",
+             "strain": "Ztilton", "status": "CUTTING",
+             "mother_plant": "Ztilton #3", "plant_count": 4,
+             "is_mother": True},
+            {"stable_device_id": "esp32-1"})
+        self.assertEqual("Ztilton #3", args["mother_plant"])
+        self.assertEqual(4, args["plant_count"])
+        self.assertEqual(True, args["is_mother"])
+
+    def test_a_batch_create_refuses_a_field_it_cannot_carry(self):
+        from core.cannanas_host import prepare_tool_call
+
+        with self.assertRaises(ValueError) as caught:
+            prepare_tool_call(
+                "prepare_batch_create",
+                {"room": "Madrid", "strain": "Ztilton", "plant_count": 5,
+                 "status": "CUTTING",
+                 "fields": {"cultivation_seed_date": "2026-10-01"}},
+                {"stable_device_id": "esp32-1"})
+        self.assertIn("cultivation_seed_date", str(caught.exception))
+
     def test_prepare_response_maps_to_adapter_and_stores_pending(self):
         self.client.results['prepare_plant_create'] = {
             'ok': True,
