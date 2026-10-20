@@ -5,17 +5,44 @@ from pathlib import Path
 
 FIXTURE = Path(__file__).resolve().parent / 'fixtures' / 'fake_adapter.py'
 
-EXPECTED_TOOLS = [
-    'get_adapter_info', 'get_cannanas_overview', 'find_zones', 'find_strains',
-    'find_plants', 'find_propagation_material', 'list_recent_batches',
-    'list_plants', 'count_plants_by_room', 'zone_growth_summary',
-    'prepare_plant_create', 'confirm_plant_create', 'prepare_strain_create',
-    'confirm_strain_create', 'prepare_batch_create', 'confirm_batch_create',
-    'prepare_plant_update', 'confirm_plant_update', 'prepare_batch_update',
-    'confirm_batch_update', 'prepare_diary_create', 'confirm_diary_create',
+EXPECTED_TOOLS = [    'get_adapter_info',
+    'get_cannanas_overview',
+    'find_zones',
+    'find_strains',
+    'find_plants',
+    'find_propagation_material',
+    'list_recent_batches',
+    'list_plants',
+    'count_plants_by_room',
+    'zone_growth_summary',
+    'list_mother_plants',
+    'list_diaries',
+    'list_plant_diaries',
+    'list_harvests',
+    'get_grow_config',
+    'zone_plant_status',
+    'prepare_plant_create',
+    'confirm_plant_create',
+    'prepare_strain_create',
+    'confirm_strain_create',
+    'prepare_batch_create',
+    'confirm_batch_create',
+    'prepare_plant_update',
+    'confirm_plant_update',
+    'prepare_batch_update',
+    'confirm_batch_update',
+    'prepare_diary_create',
+    'confirm_diary_create',
+    'prepare_zone_update',
+    'confirm_zone_update',
+    'prepare_harvest_create',
+    'confirm_harvest_create',
+    'prepare_waste_disposal_create',
+    'confirm_waste_disposal_create',
+
 ]
 
-PINNED_VERSION = '1.1.0'
+PINNED_VERSION = '2.0.0'
 PINNED_SHA = 'a' * 64
 
 
@@ -124,7 +151,7 @@ class TestVersionAndSHAPinned(ClientFixture):
         from core.cannanas_client import PINNED_ADAPTER_VERSION, PINNED_WHEEL_SHA256
         self.assertEqual(PINNED_ADAPTER_VERSION, PINNED_VERSION)
         self.assertEqual(PINNED_WHEEL_SHA256,
-                         'a38a0e0efa2081710e726ff1f9824e4da8c908b661107c59ff1eb42cbc12c595')
+                         'fc3246164516f965a69306b55f9e0722485d12dfc0ec4a0c71bf4af9f0fd7b51')
 
     def test_zone_summary_is_on_the_read_allowlist(self):
         from core.cannanas_client import MCP_READ_TOOLS

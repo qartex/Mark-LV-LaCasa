@@ -24,8 +24,8 @@ TOOL_BUDGET_SECONDS = 25.0
 RESTART_BACKOFF_SECONDS = 1.0
 
 # Pinned adapter release (paired with /home/lacasa15/services/cannanas-mcp/adapter/release).
-PINNED_ADAPTER_VERSION = '1.1.0'
-PINNED_WHEEL_SHA256 = 'a38a0e0efa2081710e726ff1f9824e4da8c908b661107c59ff1eb42cbc12c595'
+PINNED_ADAPTER_VERSION = '2.0.0'
+PINNED_WHEEL_SHA256 = 'fc3246164516f965a69306b55f9e0722485d12dfc0ec4a0c71bf4af9f0fd7b51'
 
 ADAPTER_ENV_KEYS = (
     'CANNANAS_API_KEY',
@@ -35,9 +35,24 @@ ADAPTER_ENV_KEYS = (
 )
 
 MCP_READ_TOOLS = frozenset({
-    'get_adapter_info', 'get_cannanas_overview', 'find_zones', 'find_strains',
-    'find_plants', 'find_propagation_material', 'list_recent_batches',
-    'list_plants', 'count_plants_by_room', 'zone_growth_summary',
+    # get_adapter_info is a read: the host reads the adapter's boot id
+    # from it before it can bind a write.
+    'get_adapter_info',
+    'get_cannanas_overview',
+    'find_zones',
+    'find_strains',
+    'find_plants',
+    'find_propagation_material',
+    'list_recent_batches',
+    'list_plants',
+    'count_plants_by_room',
+    'zone_growth_summary',
+    'list_mother_plants',
+    'list_diaries',
+    'list_plant_diaries',
+    'list_harvests',
+    'get_grow_config',
+    'zone_plant_status',
 })
 
 
@@ -50,30 +65,42 @@ def _confirm_tools() -> frozenset:
 
 
 def ADAPTER_TOOLS() -> list:
-    """The frozen adapter tool surface (22 tools, release 1.1.0)."""
-    return [
-        'get_adapter_info',
-        'get_cannanas_overview',
-        'find_zones',
-        'find_strains',
-        'find_plants',
-        'find_propagation_material',
-        'list_recent_batches',
-        'list_plants',
-        'count_plants_by_room',
-        'zone_growth_summary',
-        'prepare_plant_create',
-        'confirm_plant_create',
-        'prepare_strain_create',
-        'confirm_strain_create',
-        'prepare_batch_create',
-        'confirm_batch_create',
-        'prepare_plant_update',
-        'confirm_plant_update',
-        'prepare_batch_update',
-        'confirm_batch_update',
-        'prepare_diary_create',
-        'confirm_diary_create',
+    """The frozen adapter tool surface (34 tools, release 2.0.0)."""
+    return [    'get_adapter_info',
+    'get_cannanas_overview',
+    'find_zones',
+    'find_strains',
+    'find_plants',
+    'find_propagation_material',
+    'list_recent_batches',
+    'list_plants',
+    'count_plants_by_room',
+    'zone_growth_summary',
+    'list_mother_plants',
+    'list_diaries',
+    'list_plant_diaries',
+    'list_harvests',
+    'get_grow_config',
+    'zone_plant_status',
+    'prepare_plant_create',
+    'confirm_plant_create',
+    'prepare_strain_create',
+    'confirm_strain_create',
+    'prepare_batch_create',
+    'confirm_batch_create',
+    'prepare_plant_update',
+    'confirm_plant_update',
+    'prepare_batch_update',
+    'confirm_batch_update',
+    'prepare_diary_create',
+    'confirm_diary_create',
+    'prepare_zone_update',
+    'confirm_zone_update',
+    'prepare_harvest_create',
+    'confirm_harvest_create',
+    'prepare_waste_disposal_create',
+    'confirm_waste_disposal_create',
+
     ]
 
 
