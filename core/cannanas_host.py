@@ -13,6 +13,7 @@ machines and the MCP client imports its SDK only when the child starts.
 from __future__ import annotations
 
 import os
+import re
 import threading
 import time
 import uuid
@@ -362,6 +363,93 @@ def _spoken_count(value):
     return None
 
 
+# ── spoken durations ("seit 3 Wochen") ──────────────────────────────────
+#
+# The gardener says how long a phase has been going, not on which day it
+# began: "Ztilton #3 ist seit 3 Wochen in Bluete". The spoken language
+# arrives here, in the host, so the host owns the conversion. The adapter
+# only ever sees days — and it owns the date arithmetic.
+#
+# The unit words are matched case-insensitively and with the umlaut
+# variants a voice transcript may carry ("Woche", "wochen").
+
+_SPOKEN_DURATION = re.compile(
+    r'(?:seit\s+)?(\d{1,3})\s*'
+    r'(tagen|tage|tag|wochen|woche|monaten|monats|monate|monat|'
+    r'jahren|jahre|jahr)',
+    re.IGNORECASE)
+
+# The spoken word "seit einem Jahr" carries no digit; it is a year all the
+# same. The other units always come with a number.
+_SPOKEN_YEAR = re.compile(r'seit\s+einem\s+jahr', re.IGNORECASE)
+
+_DURATION_UNIT_DAYS = {
+    'tag': 1, 'tage': 1, 'tagen': 1,
+    'woche': 7, 'wochen': 7,
+    'monat': 30, 'monate': 30, 'monaten': 30, 'monats': 30,
+    'jahr': 365, 'jahre': 365, 'jahren': 365,
+}
+
+
+def _spoken_since_days(value) -> int | None:
+    """Days from a spoken duration; None when there is no duration.
+
+    "seit 3 Wochen" is 21 days, "seit 10 Tagen" is 10 days, "seit 2
+    Monaten" is 60 days and "seit einem Jahr" is 365 days. A text without
+    a duration has no days: the status is then simply a status.
+    """
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    if _SPOKEN_YEAR.search(text):
+        return 365
+    match = _SPOKEN_DURATION.search(text)
+    if match is None:
+        return None
+    count = int(match.group(1))
+    unit = match.group(2).casefold()
+    days = count * _DURATION_UNIT_DAYS.get(unit, 0)
+    return days or None
+
+
+def _spoken_status_with_duration(value):
+    """The spoken status and the days it has been going.
+
+    "seit 3 Wochen in Bluete" is the word "Bluete" plus 21 days; "Bluete"
+    alone is just the word. The status word is taken as it was spoken —
+    the adapter owns the canonical status, so the host never invents one.
+    """
+    if not isinstance(value, str):
+        return value, None
+    days = _spoken_since_days(value)
+    if days is None:
+        return value.strip(), None
+    # The duration part is removed; what is left is the status word.
+    word = _SPOKEN_DURATION.sub(' ', value)
+    word = _SPOKEN_YEAR.sub(' ', word)
+    # The connective words around the status are not part of it.
+    word = re.sub(r'\b(?:seit|in|ist|schon|seitdem)\b', ' ', word,
+                  flags=re.IGNORECASE)
+    word = ' '.join(word.split()).strip(' ,.')
+    return word, days
+
+
+def _spoken_status_field(value):
+    """The status as the adapter understands it.
+
+    A plain status word stays a plain word. A spoken duration becomes a
+    dict: the status word as it was spoken plus the number of days. The
+    adapter owns the canonical status and the date that goes with it, so
+    the host only counts the days.
+    """
+    word, days = _spoken_status_with_duration(value)
+    if days is None:
+        return word
+    return {'status': word, 'since_days': days}
+
+
 # Host-internal names are never a spoken change. They belong to the host
 # bookkeeping (the club, the confirmation token, the payload hash) and must
 # never reach the adapter as a field of the changed object.
@@ -579,7 +667,7 @@ def prepare_tool_call(action: str, params: dict, binding: dict) -> 'tuple[str, d
     if action == 'prepare_plant_update':
         extra = {}
         if status:
-            extra['status'] = status
+            extra['status'] = _spoken_status_field(status)
         if notes:
             extra['notes'] = notes
         if room:
@@ -603,7 +691,7 @@ def prepare_tool_call(action: str, params: dict, binding: dict) -> 'tuple[str, d
     if action == 'prepare_batch_update':
         extra = {}
         if status:
-            extra['status'] = status
+            extra['status'] = _spoken_status_field(status)
         if notes:
             extra['notes'] = notes
         if room:

@@ -692,5 +692,94 @@ class TestCannabisStatusStillDenied(PluginFixture):
         self.assertFalse(registry.has('cannabis_status'))
 
 
+
+class TestSpokenDurationBecomesSinceDays(PluginFixture):
+    """A spoken duration becomes the day the phase began.
+
+    The gardener says "seit 3 Wochen in Bluete" — a duration, not a date.
+    The host owns the spoken language, so it turns the duration into days
+    and hands the adapter a dict; the adapter owns the date arithmetic.
+    """
+
+    BINDING = {"stable_device_id": "esp32-1"}
+
+    def test_a_spoken_duration_becomes_since_days(self):
+        from core.cannanas_host import prepare_tool_call
+
+        _tool, args = prepare_tool_call(
+            "prepare_plant_update",
+            {"plant_name": "Ztilton #3", "status": "seit 3 Wochen in Bluete"},
+            self.BINDING)
+        self.assertEqual(
+            {"status": "Bluete", "since_days": 21}, args["fields"]["status"])
+
+    def test_a_spoken_duration_keeps_the_spelled_status_word(self):
+        """The host sends the word; the adapter owns the canonical status."""
+        from core.cannanas_host import prepare_tool_call
+
+        _tool, args = prepare_tool_call(
+            "prepare_plant_update",
+            {"plant_name": "Ztilton #3", "status": "seit 10 Tagen in Blüte"},
+            self.BINDING)
+        self.assertEqual("Blüte", args["fields"]["status"]["status"])
+        self.assertEqual(10, args["fields"]["status"]["since_days"])
+
+    def test_every_spoken_unit_becomes_its_days(self):
+        from core.cannanas_host import _spoken_since_days
+
+        self.assertEqual(1, _spoken_since_days("seit 1 Tag"))
+        self.assertEqual(10, _spoken_since_days("seit 10 Tagen"))
+        self.assertEqual(21, _spoken_since_days("seit 3 Wochen"))
+        self.assertEqual(60, _spoken_since_days("seit 2 Monaten"))
+        self.assertEqual(90, _spoken_since_days("seit 3 Monate"))
+        self.assertEqual(365, _spoken_since_days("seit 1 Jahr"))
+        self.assertEqual(365, _spoken_since_days("seit einem Jahr"))
+
+    def test_a_spoken_duration_is_found_without_the_word_seit(self):
+        from core.cannanas_host import _spoken_since_days
+
+        self.assertEqual(21, _spoken_since_days("3 Wochen in Bluete"))
+
+    def test_a_spoken_duration_is_found_in_any_case(self):
+        from core.cannanas_host import _spoken_since_days
+
+        self.assertEqual(21, _spoken_since_days("SEIT 3 WOCHEN"))
+
+    def test_a_status_without_a_duration_stays_a_plain_string(self):
+        from core.cannanas_host import prepare_tool_call
+
+        _tool, args = prepare_tool_call(
+            "prepare_plant_update",
+            {"plant_name": "Ztilton #3", "status": "Bluete"},
+            self.BINDING)
+        self.assertEqual("Bluete", args["fields"]["status"])
+
+    def test_a_batch_update_uses_the_same_duration(self):
+        from core.cannanas_host import prepare_tool_call
+
+        _tool, args = prepare_tool_call(
+            "prepare_batch_update",
+            {"plant_name": "Ztilton #6", "status": "seit 3 Wochen in Bluete"},
+            self.BINDING)
+        self.assertEqual(
+            {"status": "Bluete", "since_days": 21}, args["fields"]["status"])
+
+    def test_a_text_without_a_duration_has_no_days(self):
+        from core.cannanas_host import _spoken_since_days
+
+        self.assertIsNone(_spoken_since_days("Bluete"))
+        self.assertIsNone(_spoken_since_days(""))
+
+    def test_the_status_word_is_separated_from_the_duration(self):
+        """'seit 3 Wochen in Bluete' is a status plus a duration."""
+        from core.cannanas_host import _spoken_status_with_duration
+
+        self.assertEqual(
+            ("Bluete", 21),
+            _spoken_status_with_duration("seit 3 Wochen in Bluete"))
+        self.assertEqual(
+            ("Bluete", None), _spoken_status_with_duration("Bluete"))
+
+
 if __name__ == '__main__':
     unittest.main()
