@@ -94,6 +94,7 @@ def ADAPTER_TOOLS() -> list:
     'confirm_plant_update',
     'prepare_batch_update',
     'confirm_batch_update',
+    'prepare_batch_plant_names',
     'prepare_diary_create',
     'confirm_diary_create',
     'prepare_zone_update',

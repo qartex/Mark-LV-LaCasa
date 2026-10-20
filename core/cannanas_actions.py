@@ -28,6 +28,7 @@ CANNANAS_PREPARE_ACTIONS = frozenset({
     'prepare_batch_create',
     'prepare_plant_update',
     'prepare_batch_update',
+    'prepare_batch_plant_names',
     'prepare_diary_create',
     'prepare_zone_update',
     'prepare_harvest_create',

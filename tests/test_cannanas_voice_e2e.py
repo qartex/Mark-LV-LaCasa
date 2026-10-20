@@ -91,6 +91,9 @@ class FakeAdapter:
             return {'plant': args.get('plant'), **fields}
         if tool == 'prepare_batch_update':
             return {'batch': args.get('batch'), **fields}
+        if tool == 'prepare_batch_plant_names':
+            return {'batch': args.get('batch'),
+                    'namen': [f'{args.get("prefix") or args.get("batch")} (1)']}
         if tool == 'prepare_zone_update':
             return {'zone': args.get('zone'), **fields}
         if tool == 'prepare_diary_create':
@@ -347,6 +350,28 @@ class TestVoicePrepareReachesTheAdapter(VoicePathFixture):
         args = self.prepare_arguments('prepare_waste_disposal_create')
         self.assertEqual('Ztilton #6', args['plants'])
 
+    def test_the_naming_reaches_the_adapter_with_the_batch(self):
+        """'Name the plants of the batch' travels with the batch label."""
+        self.call_cannanas({
+            'action': 'prepare_batch_plant_names',
+            'plant_name': 'Ztilton #6',
+        })
+        args = self.prepare_arguments('prepare_batch_plant_names')
+        self.assertEqual('Ztilton #6', args['batch'])
+        # Without a spoken word the batch label is the base of the names.
+        self.assertEqual('', args['prefix'])
+
+    def test_the_naming_takes_the_spoken_word_as_the_prefix(self):
+        """A spoken word becomes the base name of the new names."""
+        self.call_cannanas({
+            'action': 'prepare_batch_plant_names',
+            'plant_name': 'Ztilton #6',
+            'strain': 'Ztilton',
+        })
+        args = self.prepare_arguments('prepare_batch_plant_names')
+        self.assertEqual('Ztilton #6', args['batch'])
+        self.assertEqual('Ztilton', args['prefix'])
+
 
 class TestTheTargetNameSurvives(VoicePathFixture):
     """The name of the object to change is never lost on the way."""
@@ -569,6 +594,7 @@ class TestTheModelFacingContract(VoicePathFixture):
         # The count is derived: the enum grows with every new tool, a
         # written-down number would only be a race.
         self.assertEqual(len(CANNANAS_MODEL_ACTIONS), len(enum))
+        self.assertIn('prepare_batch_plant_names', enum)
         for forbidden in ('confirm_plant_update', 'confirm_diary_create',
                           'cancel_pending', 'delete_plant'):
             self.assertNotIn(forbidden, enum)

@@ -759,6 +759,13 @@ def prepare_tool_call(action: str, params: dict, binding: dict) -> 'tuple[str, d
         batch_target = _spoken_target(params, 'batch') or target_name
         return action, {'batch': batch_target, 'fields': fields,
                         'binding': binding}
+    if action == 'prepare_batch_plant_names':
+        # The batch is named as "batch" or as the generic target name; the
+        # spoken word (the strain) is the base of the new names. Without a
+        # word the adapter uses the label of the batch itself.
+        batch_target = _spoken_target(params, 'batch') or target_name
+        return action, {'batch': batch_target, 'prefix': spoken_strain,
+                        'binding': binding}
     if action == 'prepare_diary_create':
         measurements = _spoken_value(params, 'measurements')
         # The diary text is the spoken text — never the strain or the

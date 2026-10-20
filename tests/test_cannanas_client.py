@@ -32,6 +32,7 @@ EXPECTED_TOOLS = [    'get_adapter_info',
     'confirm_plant_update',
     'prepare_batch_update',
     'confirm_batch_update',
+    'prepare_batch_plant_names',
     'prepare_diary_create',
     'confirm_diary_create',
     'prepare_zone_update',
@@ -158,6 +159,12 @@ class TestVersionAndSHAPinned(ClientFixture):
         from core.cannanas_client import MCP_READ_TOOLS
 
         self.assertIn('zone_growth_summary', MCP_READ_TOOLS)
+
+    def test_the_batch_naming_is_on_the_prepare_allowlist(self):
+        """Without it the client refuses the tool as unknown."""
+        from core.cannanas_client import MCP_PREPARE_TOOLS
+
+        self.assertIn('prepare_batch_plant_names', MCP_PREPARE_TOOLS)
 
 
 class TestChildExitRestartsOnce(ClientFixture):
