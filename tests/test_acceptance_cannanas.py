@@ -85,7 +85,11 @@ PREPARE_RESULT = {
 
 
 class FakeClient:
-    """Recording stub of the persistent MCP client."""
+    """Recording stub of the persistent MCP client.
+
+    ``get_adapter_info`` reports the adapter's own boot id: the host reads it
+    to build the write fence and refuses a write without it.
+    """
 
     def __init__(self, results=None):
         self.calls = []
@@ -95,6 +99,8 @@ class FakeClient:
     def call(self, tool, arguments, budget=None):
         with self.lock:
             self.calls.append({'tool': tool, 'arguments': dict(arguments)})
+        if tool == 'get_adapter_info' and tool not in self.results:
+            return {'ok': True, 'config': {'boot_id': 'adapter-boot-1'}}
         return dict(self.results.get(tool, {'ok': True}))
 
 
@@ -334,14 +340,18 @@ class TestCriterion20ProvenanceThroughDispatch(AcceptanceFixture):
             finalized = finalize_turn(make_envelope(
                 channel, turn_id, stable_device_id=device,
                 auth_session_id=auth, capture_id='9:7'))
-            binding = prepare_binding_for(finalized)
+            binding = prepare_binding_for(finalized, 'adapter-boot-1')
             self.assertIsNotNone(binding, channel)
             self.assertEqual(binding['jarvis_session_id'],
                              binding['stable_device_id'])
             self.assertEqual(binding['stable_device_id'], device)
             self.assertEqual(binding['auth_session_id'], auth)
             self.assertEqual(binding['prepared_turn_id'], str(turn_id))
-            self.assertEqual(binding['adapter_boot_id'], self.host.boot_id())
+            self.assertEqual(binding['adapter_boot_id'], 'adapter-boot-1')
+            # Without the adapter's own boot id there is no fence, so no
+            # binding and therefore no write.
+            self.assertIsNone(prepare_binding_for(finalized, ''))
+            self.assertIsNone(prepare_binding_for(finalized, None))
             self.assertEqual(finalized.envelope.capture_id, '9:7')
             self.assertEqual(finalized.channel, channel)
             # A prepare executed from that channel's finalized turn stores the

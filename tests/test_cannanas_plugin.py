@@ -28,7 +28,11 @@ HOST_ENV = {
 
 
 class FakeClient:
-    """Recording stub of the persistent MCP client."""
+    """Recording stub of the persistent MCP client.
+
+    ``get_adapter_info`` reports the adapter's own boot id, because the host
+    reads it to build the write fence and refuses a write without it.
+    """
 
     def __init__(self, results=None, fail_on=None):
         self.calls = []
@@ -41,6 +45,8 @@ class FakeClient:
             self.calls.append({'tool': tool, 'arguments': dict(arguments)})
         if tool in self.fail_on:
             raise self.fail_on[tool]
+        if tool == 'get_adapter_info' and tool not in self.results:
+            return {'ok': True, 'config': {'boot_id': 'adapter-boot-1'}}
         return dict(self.results.get(tool, {'ok': True}))
 
 
@@ -260,8 +266,10 @@ class TestPrepareStoresPendingAndReturnsPreview(PluginFixture):
         binding = args['binding']
         self.assertEqual(binding['stable_device_id'], 'device-durable-1')
         self.assertEqual(binding['prepared_turn_id'], '20')
-        self.assertEqual(binding['adapter_boot_id'], self.host.boot_id(),
-                         'without an adapter report the host fence stays')
+        self.assertEqual(binding['adapter_boot_id'], 'adapter-boot-1',
+                         'the fence carries the adapter\'s own boot id')
+        self.assertNotEqual(binding['adapter_boot_id'], self.host.boot_id(),
+                            'the host boot id never stands in for the adapter')
         pending = self.host.coordinator.current('device-durable-1')
         self.assertIsNotNone(pending)
         self.assertEqual(pending.payload_hash, 'payload-hash-1')

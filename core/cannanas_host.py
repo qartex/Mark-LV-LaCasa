@@ -42,10 +42,16 @@ _ADAPTER_BOOT_ID = None
 
 
 def adapter_boot_id() -> str:
-    """Process-lifetime boot identity (uuid4), identical within one process."""
+    """The adapter's own boot identity, read from the adapter.
+
+    The adapter fences every confirm on the boot id it reported itself, so a
+    host-side value must never be sent in its place: a wrong id could pass a
+    fence the host does not own. When the adapter has not reported one, the
+    caller gets an empty string and the write is refused fail-closed.
+    """
     global _ADAPTER_BOOT_ID
     if _ADAPTER_BOOT_ID is None:
-        _ADAPTER_BOOT_ID = uuid.uuid4().hex
+        _ADAPTER_BOOT_ID = ''
     return _ADAPTER_BOOT_ID
 
 
@@ -135,18 +141,21 @@ def prepare_binding_for(turn, adapter_boot: str | None = None) -> dict | None:
     """The adapter binding from a finalized turn; None without a device.
 
     ``adapter_boot`` must be the adapter process's own boot id: the adapter
-    rejects a confirm whose binding carries any other one. The host process id
-    is only the last-resort fence when the adapter never reported its own.
+    rejects a confirm whose binding carries any other one. There is no
+    host-side fallback — without the adapter's own id the write is refused.
     """
     stable_device_id = getattr(turn, 'stable_device_id', None)
     if not stable_device_id:
+        return None
+    boot = str(adapter_boot or '').strip()
+    if not boot:
         return None
     return {
         'jarvis_session_id': stable_device_id,
         'stable_device_id': stable_device_id,
         'auth_session_id': getattr(turn, 'auth_session_id', ''),
         'prepared_turn_id': str(getattr(turn, 'user_turn_id', '')),
-        'adapter_boot_id': adapter_boot or adapter_boot_id(),
+        'adapter_boot_id': boot,
     }
 
 
@@ -892,8 +901,13 @@ class CannanasHost:
                 'Release-Verifizierung fehlgeschlagen.')
         binding = prepare_binding_for(turn, self._adapter_boot())
         if binding is None:
+            # No device, or the adapter did not report its own boot id: the
+            # confirm fence cannot be satisfied, so no write is prepared.
+            if not getattr(turn, 'stable_device_id', None):
+                raise CannanasUnavailable(
+                    'Cannanas-Änderungen sind nur für zugeordnete Geräte möglich.')
             raise CannanasUnavailable(
-                'Cannanas-Änderungen sind nur für zugeordnete Geräte möglich.')
+                'Cannanas ist derzeit nicht erreichbar. Bitte später erneut versuchen.')
         tool, arguments = prepare_tool_call(action, params, binding)
         client = self.require_client()
         result = client.call(tool, arguments)
