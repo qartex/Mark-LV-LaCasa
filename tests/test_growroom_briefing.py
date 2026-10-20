@@ -184,7 +184,7 @@ class BriefingRunnerTests(unittest.TestCase):
             self.calls.append((action, dict(params)))
             if self.fail:
                 raise RuntimeError("cannanas unavailable")
-            return {"ok": True, "zones": self.zones, "exact": True}
+            return {"ok": True, "records": self.zones, "exact": True}
 
     def test_runner_reads_the_zone_summary_once(self):
         host = self.Host([zone(" Madrid", status="FLOWERING", days_ago=3)])

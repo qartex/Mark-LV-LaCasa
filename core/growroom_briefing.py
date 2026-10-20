@@ -254,8 +254,11 @@ class GrowroomBriefing:
         zones: list[dict] = []
         try:
             result = self._host.call_read("zone_growth_summary", {"limit": 50})
-            zones = [entry for entry in result.get("zones") or []
-                     if isinstance(entry, dict)]
+            zones = [
+                entry
+                for entry in (result.get("records") or result.get("zones") or [])
+                if isinstance(entry, dict)
+            ]
         except Exception:
             # Cannanas down: the briefing still greets and lists the todos.
             zones = []
