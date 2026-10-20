@@ -185,6 +185,31 @@ class TestPrepareStoresPendingAndReturnsPreview(PluginFixture):
             mapped, _args, _prefix = read_tool_call(action, {})
             self.assertEqual(tool, mapped, action)
 
+    def test_plant_update_forwards_the_spoken_fields(self):
+        from core.cannanas_host import prepare_tool_call
+
+        binding = {"stable_device_id": "esp32-1"}
+        _tool, args = prepare_tool_call(
+            "prepare_plant_update",
+            {"plant_name": "Ztilton #3", "status": "Blüte",
+             "fields": {"is_mother": True, "notes": "Mutterpflanze"}},
+            binding)
+        self.assertEqual("Ztilton #3", args["plant"])
+        self.assertEqual("Blüte", args["fields"]["status"])
+        self.assertEqual(True, args["fields"]["is_mother"])
+        self.assertEqual("Mutterpflanze", args["fields"]["notes"])
+
+    def test_batch_update_forwards_the_spoken_room(self):
+        from core.cannanas_host import prepare_tool_call
+
+        _tool, args = prepare_tool_call(
+            "prepare_batch_update",
+            {"plant_name": "Ztilton #6", "room": "Madrid",
+             "status": "Blüte"},
+            {"stable_device_id": "esp32-1"})
+        self.assertEqual("Madrid", args["fields"]["room"])
+        self.assertEqual("Blüte", args["fields"]["status"])
+
     def test_new_prepare_actions_map_to_adapter_tools(self):
         from core.cannanas_host import prepare_tool_call
 
@@ -249,6 +274,255 @@ class TestPrepareStoresPendingAndReturnsPreview(PluginFixture):
         self.assertNotIn('payload-hash-1', rendered)
         self.assertIn('bitte bestätigen', result['summary'].lower())
         self.assertIsInstance(result['preview'], dict)
+
+
+class TestPrepareForwardsSpokenFields(PluginFixture):
+    """Every spoken change reaches the adapter — none is dropped silently.
+
+    The pinned adapter (2.0.0) owns the field whitelist: an unknown field
+    name rejects the whole prepare, so the host must forward exactly the
+    names the adapter understands.
+    """
+
+    BINDING = {"stable_device_id": "esp32-1"}
+
+    def test_plant_update_forwards_every_spoken_change_field(self):
+        from core.cannanas_host import prepare_tool_call
+
+        fields = {
+            'room': 'Helsinki',
+            'strain': 'Northern Lights',
+            'parent_plant': 'Mutter A',
+            'is_mother': True,
+            'description': 'Zweite Mutter',
+            'expected_yield': 120,
+            'actual_yield': 95,
+            'substrate': 'Coco',
+            'fertilizer': 'BioGrow',
+            'archived': False,
+            'expected_harvest_at': '2026-11-01',
+            'cultivation_flowering_date': '2026-10-20',
+        }
+        _tool, args = prepare_tool_call(
+            "prepare_plant_update",
+            {"plant_name": "Ztilton #3", "fields": fields},
+            self.BINDING)
+        self.assertEqual("Ztilton #3", args["plant"])
+        for key, value in fields.items():
+            self.assertEqual(value, args["fields"][key], key)
+
+    def test_plant_update_never_sends_a_name_field(self):
+        """The adapter rejects 'name' — the target name is not a change."""
+        from core.cannanas_host import prepare_tool_call
+
+        _tool, args = prepare_tool_call(
+            "prepare_plant_update",
+            {"plant_name": "Ztilton #3", "status": "Blüte"},
+            self.BINDING)
+        self.assertNotIn("name", args["fields"])
+        self.assertEqual("Blüte", args["fields"]["status"])
+
+    def test_plant_update_takes_room_and_strain_from_the_spoken_parameters(self):
+        from core.cannanas_host import prepare_tool_call
+
+        _tool, args = prepare_tool_call(
+            "prepare_plant_update",
+            {"plant_name": "Ztilton #3", "room": "Helsinki",
+             "strain": "Northern Lights", "text": "Umgezogen"},
+            self.BINDING)
+        self.assertEqual("Helsinki", args["fields"]["room"])
+        self.assertEqual("Northern Lights", args["fields"]["strain"])
+        self.assertEqual("Umgezogen", args["fields"]["notes"])
+
+    def test_plant_update_does_not_turn_the_search_term_into_a_strain(self):
+        """query == plant_name is the same plant, not a second field."""
+        from core.cannanas_host import prepare_tool_call
+
+        _tool, args = prepare_tool_call(
+            "prepare_plant_update",
+            {"plant_name": "Ztilton #3", "query": "Ztilton #3",
+             "status": "Blüte"},
+            self.BINDING)
+        self.assertNotIn("strain", args["fields"])
+
+    def test_plant_update_keeps_a_spoken_false_and_drops_an_empty_text(self):
+        from core.cannanas_host import prepare_tool_call
+
+        _tool, args = prepare_tool_call(
+            "prepare_plant_update",
+            {"plant_name": "Ztilton #3",
+             "fields": {"is_mother": False, "notes": "", "description": None}},
+            self.BINDING)
+        self.assertEqual(False, args["fields"]["is_mother"])
+        self.assertNotIn("notes", args["fields"])
+        self.assertNotIn("description", args["fields"])
+
+    def test_batch_update_forwards_room_and_notes_from_the_spoken_parameters(self):
+        from core.cannanas_host import prepare_tool_call
+
+        _tool, args = prepare_tool_call(
+            "prepare_batch_update",
+            {"plant_name": "Ztilton Woche 4", "room": "Helsinki",
+             "status": "Blüte", "text": "Charge umgezogen"},
+            self.BINDING)
+        self.assertEqual("Ztilton Woche 4", args["batch"])
+        self.assertEqual("Helsinki", args["fields"]["room"])
+        self.assertEqual("Blüte", args["fields"]["status"])
+        self.assertEqual("Charge umgezogen", args["fields"]["notes"])
+        self.assertNotIn("name", args["fields"])
+
+    def test_plant_create_forwards_the_mother_plant_and_the_plant_count(self):
+        from core.cannanas_host import prepare_tool_call
+
+        _tool, args = prepare_tool_call(
+            "prepare_plant_create",
+            {"plant_name": "Ztilton #8", "room": "Madrid",
+             "strain": "Ztilton", "status": "CUTTING", "count": 5,
+             "fields": {"mother_plant": "Ztilton #3", "is_mother": True}},
+            self.BINDING)
+        self.assertEqual("Ztilton #3", args["mother_plant"])
+        self.assertEqual(True, args["is_mother"])
+        self.assertEqual(5, args["plant_count"])
+        self.assertEqual("Ztilton", args["strain"])
+
+    def test_plant_create_omits_the_plant_count_when_none_was_spoken(self):
+        from core.cannanas_host import prepare_tool_call
+
+        _tool, args = prepare_tool_call(
+            "prepare_plant_create",
+            {"plant_name": "Ztilton #8", "room": "Madrid",
+             "strain": "Ztilton", "status": "CUTTING"},
+            self.BINDING)
+        self.assertNotIn("plant_count", args)
+
+    def test_batch_create_forwards_the_mother_plants_with_cutting_counts(self):
+        from core.cannanas_host import prepare_tool_call
+
+        mother_plants = [{"plant": "Mutter A", "cutting_count": 6},
+                         {"plant": "Mutter B", "cutting_count": 4}]
+        _tool, args = prepare_tool_call(
+            "prepare_batch_create",
+            {"room": "Madrid", "strain": "Ztilton", "count": 10,
+             "status": "CUTTING", "fields": {"mother_plants": mother_plants}},
+            self.BINDING)
+        self.assertEqual(mother_plants, args["mother_plants"])
+        self.assertEqual(10, args["plant_count"])
+
+    def test_batch_create_never_clamps_a_spoken_plant_count(self):
+        """A spoken count is never silently lowered; the adapter validates."""
+        from core.cannanas_host import prepare_tool_call
+
+        _tool, args = prepare_tool_call(
+            "prepare_batch_create",
+            {"room": "Madrid", "strain": "Ztilton", "count": 300,
+             "status": "CUTTING"},
+            self.BINDING)
+        self.assertEqual(300, args["plant_count"])
+
+    def test_an_impossible_spoken_count_is_not_replaced_by_a_usable_one(self):
+        """Zero plants is not silently turned into one plant."""
+        from core.cannanas_host import prepare_tool_call
+
+        _tool, args = prepare_tool_call(
+            "prepare_batch_create",
+            {"room": "Madrid", "strain": "Ztilton", "count": 0,
+             "status": "CUTTING"},
+            self.BINDING)
+        self.assertEqual(0, args["plant_count"])
+
+        _tool, args = prepare_tool_call(
+            "prepare_plant_create",
+            {"plant_name": "Ztilton #8", "room": "Madrid", "strain": "Ztilton",
+             "status": "CUTTING", "count": 0},
+            self.BINDING)
+        self.assertEqual(0, args["plant_count"])
+
+    def test_harvest_create_takes_the_plants_and_the_batches(self):
+        from core.cannanas_host import prepare_tool_call
+
+        _tool, args = prepare_tool_call(
+            "prepare_harvest_create",
+            {"plant_name": "Ztilton #3, Ztilton #4", "batch": "Ztilton Woche 4",
+             "text": "Ernte 1", "date": "2026-10-20"},
+            self.BINDING)
+        self.assertEqual("Ztilton #3, Ztilton #4", args["plants"])
+        self.assertEqual("Ztilton Woche 4", args["batches"])
+        self.assertEqual("Ernte 1", args["notes"])
+        self.assertEqual("2026-10-20", args["harvested_at"])
+
+    def test_waste_disposal_create_takes_the_plants_and_the_batches(self):
+        from core.cannanas_host import prepare_tool_call
+
+        _tool, args = prepare_tool_call(
+            "prepare_waste_disposal_create",
+            {"plant_name": "Ztilton #3", "batch": "Ztilton Woche 4"},
+            self.BINDING)
+        self.assertEqual("Ztilton #3", args["plants"])
+        self.assertEqual("Ztilton Woche 4", args["batches"])
+
+    def test_diary_create_for_a_batch_target(self):
+        from core.cannanas_host import prepare_tool_call
+
+        _tool, args = prepare_tool_call(
+            "prepare_diary_create",
+            {"batch": "Ztilton Woche 4", "text": "Schnitt ok"},
+            self.BINDING)
+        self.assertEqual("Ztilton Woche 4", args["batch"])
+        self.assertEqual("Schnitt ok", args["text"])
+        self.assertNotIn("room", args)
+
+
+class TestRefusedPrepareNeverBecomesAPending(PluginFixture):
+    """A refused prepare is spoken as a refusal — never as 'unverändert'."""
+
+    def test_refused_prepare_says_why_and_stores_no_pending(self):
+        self.client.results['prepare_plant_update'] = {
+            'ok': False, 'error': "Unbekanntes Feld 'name'"}
+        result = self.run_plugin({
+            'action': 'prepare_plant_update',
+            'plant_name': 'Ztilton #3', 'status': 'Blüte'})
+        self.assertFalse(result.get('ok', True), result)
+        self.assertIn('abgelehnt', result['summary'].lower())
+        self.assertNotIn('Eintrag unverändert', result['summary'])
+        # No pending may survive a refused prepare.
+        self.assertIsNone(self.host.coordinator.current('device-durable-1'))
+        self.assertFalse(result.get('requires_confirmation', False))
+
+    def test_refused_prepare_never_reaches_a_confirm(self):
+        class GuardedClient(FakeClient):
+            def call(self, tool, arguments, budget=None):
+                if tool.startswith('confirm_'):
+                    raise AssertionError(f'POST attempted: {tool}')
+                return super().call(tool, arguments, budget)
+
+        client = GuardedClient(results={'prepare_plant_update': {
+            'ok': False, 'error': 'Unbekanntes Feld'}})
+        host = make_host(self.root, client=client)
+        self.run_plugin({'action': 'prepare_plant_update',
+                         'plant_name': 'Ztilton #3', 'status': 'Blüte'},
+                        host=host)
+        self.assertEqual([c['tool'] for c in client.calls],
+                         ['get_adapter_info', 'prepare_plant_update'])
+
+    def test_refused_prepare_writes_no_prepared_audit_entry(self):
+        client = FakeClient(results={'prepare_plant_update': {
+            'ok': False, 'error': 'Unbekanntes Feld'}})
+        host = make_host(self.root, client=client)
+        self.run_plugin({'action': 'prepare_plant_update',
+                         'plant_name': 'Ztilton #3', 'status': 'Blüte'},
+                        host=host)
+        audit_file = self.root / 'host-audit.jsonl'
+        written = audit_file.read_text() if audit_file.exists() else ''
+        self.assertNotIn('"prepared"', written)
+
+    def test_a_refusal_reason_never_leaks_internals(self):
+        self.client.results['prepare_plant_update'] = {
+            'ok': False, 'error': 'x' * 400}
+        result = self.run_plugin({
+            'action': 'prepare_plant_update',
+            'plant_name': 'Ztilton #3', 'status': 'Blüte'})
+        self.assertFalse(result.get('ok', True), result)
+        self.assertLessEqual(len(result['summary']), 400)
 
 
 class TestPrepareZeroPOSTs(PluginFixture):

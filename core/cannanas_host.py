@@ -280,6 +280,93 @@ def read_tool_call(action: str, params: dict) -> 'tuple[str, dict, str]':
     raise ValueError(f'unknown read action: {action}')
 
 
+# ── spoken values (host → adapter) ────────────────────────────────────────
+#
+# The pinned adapter owns the field whitelist: it rejects an unknown field
+# name and it resolves the spoken names "room", "strain" and "parent_plant"
+# to canonical ids itself. The host therefore forwards the spoken names
+# unchanged, keeps every set value and never invents a field the adapter
+# does not know.
+
+
+def _is_spoken_value(value) -> bool:
+    """A set spoken value: not None, not empty text, not an empty container.
+
+    A spoken False or 0 is a value and stays — "is_mother: false" is a
+    change, not an absence.
+    """
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, tuple, dict)):
+        return bool(value)
+    return True
+
+
+def _spoken_value(params: dict, key: str, default=None):
+    """One spoken value: the flat parameter first, then the nested fields."""
+    value = params.get(key)
+    if not _is_spoken_value(value):
+        nested = params.get('fields')
+        if isinstance(nested, dict):
+            value = nested.get(key)
+    return value if _is_spoken_value(value) else default
+
+
+def _spoken_count(value):
+    """A spoken count as an int; never silently changed.
+
+    The adapter validates the range (1–100 plants, 1–1000 batch plants) and
+    refuses an impossible count. Lowering or replacing it here would change
+    what the grower said without telling anyone, so the number travels as
+    spoken and the adapter decides.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _spoken_update_fields(params: dict, extra: dict | None = None) -> dict:
+    """Every spoken change field: the flat parameters and the nested fields.
+
+    Only set values are taken — never None, never an empty text, never an
+    empty list. Nothing is dropped silently: what was spoken is forwarded
+    under the name the adapter knows, and the adapter refuses a field it
+    does not know. The nested "fields" object is the explicit change list
+    and wins over the flat convenience parameters.
+    """
+    fields: dict = {}
+    for key, value in (extra or {}).items():
+        if _is_spoken_value(value):
+            fields[key] = value
+    nested = params.get('fields')
+    if isinstance(nested, dict):
+        for key, value in nested.items():
+            if _is_spoken_value(value):
+                fields[str(key)] = value
+    return fields
+
+
+def _refusal_text(result) -> str:
+    """One bounded German line for a refused prepare; no internals."""
+    reason = str(result.get('error') or '').strip()
+    if not reason:
+        reason = 'Die Angaben passen nicht zu dieser Aktion.'
+    if len(reason) > 160:
+        reason = reason[:160].rstrip() + '…'
+    return f'Die Änderung wurde abgelehnt: {reason}'
+
+
 def prepare_tool_call(action: str, params: dict, binding: dict) -> 'tuple[str, dict]':
     """Map the closed prepare action to (adapter tool, args incl. binding)."""
     from core.cannanas_actions import CANNANAS_PREPARE_ACTIONS
@@ -287,9 +374,18 @@ def prepare_tool_call(action: str, params: dict, binding: dict) -> 'tuple[str, d
     plant_name = str(params.get('plant_name') or '').strip()
     room = str(params.get('room') or '').strip()
     status = str(params.get('status') or '').strip()
-    strain = str(params.get('query') or '').strip()
-    notes = str(params.get('text') or '').strip()
-    count = _int_param(params, 'count', 1)
+    # The create actions take the strain from the spoken "strain" or from
+    # the search term; the update actions never read the search term as a
+    # strain — there it is the name of the plant to change.
+    strain = str(_spoken_value(params, 'strain', params.get('query')) or '').strip()
+    spoken_strain = str(params.get('strain') or '').strip()
+    notes = str(_spoken_value(params, 'notes', params.get('text')) or '').strip()
+    spoken_date = str(params.get('date') or '').strip()
+    # The spoken count travels as spoken: a missing count means one, an
+    # impossible count is the adapter's to refuse.
+    spoken_plant_count = _spoken_count(_spoken_value(params, 'plant_count',
+                                                     params.get('count')))
+    count = spoken_plant_count if spoken_plant_count is not None else 1
     if action not in CANNANAS_PREPARE_ACTIONS:
         raise ValueError(f'unknown prepare action: {action}')
     if action == 'prepare_plant_create':
@@ -297,64 +393,111 @@ def prepare_tool_call(action: str, params: dict, binding: dict) -> 'tuple[str, d
                 'status': status}
         if notes:
             args['notes'] = notes
+        mother_plant = _spoken_value(params, 'mother_plant')
+        if mother_plant is not None:
+            args['mother_plant'] = str(mother_plant).strip()
+        is_mother = _spoken_value(params, 'is_mother')
+        if is_mother is not None:
+            args['is_mother'] = is_mother
+        if spoken_plant_count is not None:
+            args['plant_count'] = spoken_plant_count
         return action, {**args, 'binding': binding}
     if action == 'prepare_strain_create':
-        args: dict = {'name': plant_name, 'identifier': ''}
+        args: dict = {'name': plant_name or strain, 'identifier': ''}
         if notes:
             args['notes'] = notes
+        description = _spoken_value(params, 'description')
+        if description is not None:
+            args['description'] = str(description).strip()
         return action, {**args, 'binding': binding}
     if action == 'prepare_batch_create':
         args = {'room': room, 'strain': strain, 'plant_count': count,
                 'status': status}
         if notes:
             args['notes'] = notes
+        for key in ('parent_plant', 'propagation_material',
+                    'expected_harvest_at', 'cultivation_vegetative_date'):
+            value = _spoken_value(params, key)
+            if value is not None:
+                args[key] = str(value).strip()
+        mother_plants = _spoken_value(params, 'mother_plants')
+        if mother_plants is not None:
+            args['mother_plants'] = mother_plants
         return action, {**args, 'binding': binding}
     if action == 'prepare_plant_update':
-        fields: dict = {}
+        extra = {}
         if status:
-            fields['status'] = status
+            extra['status'] = status
         if notes:
-            fields['notes'] = notes
-        if plant_name:
-            fields['name'] = plant_name
+            extra['notes'] = notes
+        if room:
+            extra['room'] = room
+        if spoken_strain:
+            extra['strain'] = spoken_strain
+        if spoken_date:
+            extra['expected_harvest_at'] = spoken_date
+        # The target name is not a change: the adapter rejects a "name"
+        # field, so it never goes into the fields.
+        fields = _spoken_update_fields(params, extra)
         return action, {'plant': plant_name, 'fields': fields,
                         'binding': binding}
     if action == 'prepare_batch_update':
-        fields = {}
+        extra = {}
         if status:
-            fields['status'] = status
+            extra['status'] = status
         if notes:
-            fields['notes'] = notes
-        if strain:
-            fields['name'] = strain
+            extra['notes'] = notes
+        if room:
+            extra['room'] = room
+        if spoken_date:
+            extra['expected_harvest_at'] = spoken_date
+        fields = _spoken_update_fields(params, extra)
         return action, {'batch': plant_name, 'fields': fields,
                         'binding': binding}
     if action == 'prepare_diary_create':
-        args = {'text': strain or notes, 'measurements': None,
+        measurements = _spoken_value(params, 'measurements')
+        args = {'text': notes or strain, 'measurements': measurements,
                 'binding': binding}
-        if plant_name:
-            args['plant_or_batch'] = plant_name
+        batch_target = str(_spoken_value(params, 'batch') or '').strip()
+        plant_target = str(_spoken_value(params, 'plant') or '').strip()
+        if not plant_target:
+            plant_target = plant_name
+        if batch_target:
+            args['batch'] = batch_target
+        elif plant_target:
+            args['plant'] = plant_target
         else:
             args['room'] = room
         return action, args
     if action == 'prepare_zone_update':
         zone_name = str(params.get('zone') or room or '').strip()
-        fields = params.get('fields')
-        if not isinstance(fields, dict) or not fields:
+        extra = {}
+        if notes:
+            extra['notes'] = notes
+        fields = _spoken_update_fields(params, extra)
+        if not fields:
             raise ValueError('für eine Raumänderung wird ein Feld gebraucht')
         return action, {'zone': zone_name, 'fields': fields, 'binding': binding}
     if action == 'prepare_harvest_create':
+        plants = str(_spoken_value(params, 'plants', plant_name) or '').strip()
+        batches = str(_spoken_value(params, 'batches',
+                                    params.get('batch')) or '').strip()
+        harvested_at = str(_spoken_value(params, 'harvested_at',
+                                         params.get('date')) or '').strip()
         return action, {
-            'plants': plant_name,
-            'batches': str(params.get('batch') or ''),
+            'plants': plants,
+            'batches': batches,
             'notes': notes,
-            'harvested_at': str(params.get('date') or ''),
+            'harvested_at': harvested_at,
             'binding': binding,
         }
     if action == 'prepare_waste_disposal_create':
+        plants = str(_spoken_value(params, 'plants', plant_name) or '').strip()
+        batches = str(_spoken_value(params, 'batches',
+                                    params.get('batch')) or '').strip()
         return action, {
-            'plants': plant_name,
-            'batches': str(params.get('batch') or ''),
+            'plants': plants,
+            'batches': batches,
             'notes': notes,
             'binding': binding,
         }
@@ -599,6 +742,18 @@ class CannanasHost:
         tool, arguments = prepare_tool_call(action, params, binding)
         client = self.require_client()
         result = client.call(tool, arguments)
+        if not result.get('ok', True):
+            # The adapter refused the change (unknown field, unresolvable
+            # name, impossible count). Nothing was prepared and nothing may
+            # be confirmed: speak the reason, store no pending, write no
+            # "prepared" audit entry. Never report a refusal as a preview.
+            return {
+                'ok': False,
+                'summary': _refusal_text(result),
+                'preview': {},
+                'requires_confirmation': False,
+                'exact': bool(result.get('exact', True)),
+            }
         club_id = str(self._env.get('CANNANAS_CLUB_ID') or 'club-bound')
         pending = PendingConfirmation(
             action=action.removeprefix('prepare_'),
