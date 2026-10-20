@@ -1051,9 +1051,9 @@ class CannanasHost:
                            else f'Insgesamt {total} Pflanzen.')
             payload['summary'] = summary
             payload['records'] = []
-        self._audit_read(action)
         if action == 'watering_intervals':
             payload.update(_watering_payload(result))
+        self._audit_read(action)
         return payload
 
     def _audit_read(self, action: str) -> None:
