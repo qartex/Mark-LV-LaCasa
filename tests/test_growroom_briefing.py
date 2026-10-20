@@ -95,6 +95,14 @@ class ComposeTests(unittest.TestCase):
         )
         self.assertTrue(spoken.startswith("Guten Morgen, Gärtner Björn."), spoken)
 
+    def test_technical_probes_are_not_spoken_as_rooms(self):
+        now = datetime(2026, 10, 20, 7, 30, tzinfo=timezone.utc)
+        spoken = compose_briefing(
+            speaker="Lukas", title="Head of Grow", todos=[], zones=[],
+            temperatures={"Draussen": 7.5, "Madrid": 20.4}, now=now,
+        )
+        self.assertNotIn("Draussen", spoken)
+
     def test_briefing_is_bounded_even_with_many_rooms_and_todos(self):
         zones = [zone(f"Raum{i}", status="FLOWERING", days_ago=i + 1)
                  for i in range(12)]

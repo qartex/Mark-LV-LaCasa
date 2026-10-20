@@ -27,6 +27,9 @@ STAGE_LABELS = {
     "SEED": "Saat",
 }
 
+# Technical probes that are not grow rooms: never greet a gardener with them.
+NON_GROW_ROOMS = frozenset({"draussen", "luftkanal", "aussen", "außen", "garten"})
+
 
 def greeting_for(moment: datetime) -> str:
     """German time-of-day greeting for one local moment."""
@@ -147,7 +150,12 @@ def compose_briefing(
             joined = ", ".join(spoken_todos[:-1]) + " und " + spoken_todos[-1]
         sentences.append(f"Auf dem Zettel: {joined}.")
 
-    entries = [entry for entry in zones if isinstance(entry, dict)]
+    entries = [
+        entry for entry in zones
+        if isinstance(entry, dict)
+        and " ".join(str(entry.get("name") or "").split()).casefold()
+        not in NON_GROW_ROOMS
+    ]
     for entry in entries[:MAX_ZONES]:
         name = " ".join(str(entry.get("name") or "").split())
         sentences.append(_zone_sentence(entry, temperatures.get(name), moment))
@@ -262,6 +270,7 @@ class GrowroomBriefing:
                 {"name": room, "batch_count": 0, "plant_count": 0,
                  "stages": [], "last_diary": None}
                 for room in sorted(temperatures)
+                if room.strip().casefold() not in NON_GROW_ROOMS
             ]
         return compose_briefing(
             speaker=speaker.name,

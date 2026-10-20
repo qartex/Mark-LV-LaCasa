@@ -50,7 +50,7 @@ def _confirm_tools() -> frozenset:
 
 
 def ADAPTER_TOOLS() -> list:
-    """The frozen 21-tool Release-1 adapter surface."""
+    """The frozen adapter tool surface (22 tools, release 1.1.0)."""
     return [
         'get_adapter_info',
         'get_cannanas_overview',
@@ -61,6 +61,7 @@ def ADAPTER_TOOLS() -> list:
         'list_recent_batches',
         'list_plants',
         'count_plants_by_room',
+        'zone_growth_summary',
         'prepare_plant_create',
         'confirm_plant_create',
         'prepare_strain_create',
