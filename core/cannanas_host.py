@@ -314,6 +314,23 @@ def _spoken_value(params: dict, key: str, default=None):
     return value if _is_spoken_value(value) else default
 
 
+def _spoken_target(params: dict, *keys: str) -> str:
+    """The name of the object to change: the first spoken name that fits.
+
+    The model may name the target as "plant_name", "plant", "batch",
+    "plants" or "query" — the search term is the same object for an
+    update, not a second field. Every spoken name is taken, so the target
+    never goes missing on the way to the adapter.
+    """
+    for key in keys:
+        value = params.get(key)
+        if _is_spoken_value(value) and isinstance(value, str):
+            spoken = value.strip()
+            if spoken:
+                return spoken
+    return ''
+
+
 def _spoken_count(value):
     """A spoken count as an int; never silently changed.
 
@@ -336,6 +353,31 @@ def _spoken_count(value):
     return None
 
 
+# Host-internal names are never a spoken change. They belong to the host
+# bookkeeping (the club, the confirmation token, the payload hash) and must
+# never reach the adapter as a field of the changed object.
+_HOST_INTERNAL_NAMES = frozenset({
+    'club_id',
+    'confirmation_token',
+    'confirm_token',
+    'opaque_mcp_token',
+    'payload_hash',
+    'binding',
+    'prepared_turn_id',
+    'stable_device_id',
+    'auth_session_id',
+    'jarvis_session_id',
+    'adapter_boot_id',
+    'action',
+    'behavior',
+})
+
+
+def _is_host_internal_name(name) -> bool:
+    """True for a name the host owns and the adapter must never see."""
+    return str(name).strip().lower() in _HOST_INTERNAL_NAMES
+
+
 def _spoken_update_fields(params: dict, extra: dict | None = None) -> dict:
     """Every spoken change field: the flat parameters and the nested fields.
 
@@ -344,17 +386,87 @@ def _spoken_update_fields(params: dict, extra: dict | None = None) -> dict:
     under the name the adapter knows, and the adapter refuses a field it
     does not know. The nested "fields" object is the explicit change list
     and wins over the flat convenience parameters.
+
+    A host-internal name (a club id, a confirmation token, a payload hash)
+    is never a change: it is not a field of the object, so it is dropped
+    here and can never travel to the adapter.
     """
     fields: dict = {}
     for key, value in (extra or {}).items():
-        if _is_spoken_value(value):
+        if _is_spoken_value(value) and not _is_host_internal_name(key):
             fields[key] = value
     nested = params.get('fields')
     if isinstance(nested, dict):
         for key, value in nested.items():
-            if _is_spoken_value(value):
-                fields[str(key)] = value
+            name = str(key)
+            if _is_spoken_value(value) and not _is_host_internal_name(name):
+                fields[name] = value
     return fields
+
+
+# ── model-facing spoken parameters (host → bridge function schema) ──────
+#
+# One source of truth: the bridge builds the model's function schema from
+# this tuple. So the model can never be offered a parameter the host does
+# not understand, and the host never silently drops a parameter the model
+# was allowed to send.
+
+CANNANAS_SPOKEN_PARAMETERS = (
+    'action',
+    'room',
+    'query',
+    'plant_name',
+    'plant',
+    'plants',
+    'batch',
+    'batches',
+    'strain',
+    'status',
+    'count',
+    'plant_count',
+    'text',
+    'notes',
+    'date',
+    'harvested_at',
+    'zone',
+    'is_mother',
+    'mother_plant',
+    'mother_plants',
+    'parent_plant',
+    'description',
+    'measurements',
+    'propagation_material',
+    'expected_harvest_at',
+    'expected_yield',
+    'actual_yield',
+    'substrate',
+    'fertilizer',
+    'archived',
+    'fields',
+)
+
+# Flat change fields a plant update may carry next to the nested "fields"
+# object. The pinned adapter owns the real whitelist and refuses a field it
+# does not know; these are the names the model may also speak directly.
+CANNANAS_PLANT_CHANGE_PARAMETERS = (
+    'is_mother',
+    'parent_plant',
+    'description',
+    'expected_harvest_at',
+    'expected_yield',
+    'actual_yield',
+    'substrate',
+    'fertilizer',
+    'archived',
+    'batch',
+)
+
+# The same for a zone: name and climate belong into the nested "fields"
+# object, these are the spoken conveniences.
+CANNANAS_ZONE_CHANGE_PARAMETERS = (
+    'description',
+    'notes',
+)
 
 
 def _refusal_text(result) -> str:
@@ -371,7 +483,13 @@ def prepare_tool_call(action: str, params: dict, binding: dict) -> 'tuple[str, d
     """Map the closed prepare action to (adapter tool, args incl. binding)."""
     from core.cannanas_actions import CANNANAS_PREPARE_ACTIONS
     params = params or {}
-    plant_name = str(params.get('plant_name') or '').strip()
+    # The named object. The create actions need an explicit plant name —
+    # their "query" is the strain, not a plant. The update actions may also
+    # name the target with the search term: there it IS the plant to
+    # change, never a second field.
+    explicit_plant = _spoken_target(params, 'plant_name', 'plant', 'plants')
+    target_name = _spoken_target(params, 'plant_name', 'plant', 'plants',
+                                 'query')
     room = str(params.get('room') or '').strip()
     status = str(params.get('status') or '').strip()
     # The create actions take the strain from the spoken "strain" or from
@@ -389,7 +507,7 @@ def prepare_tool_call(action: str, params: dict, binding: dict) -> 'tuple[str, d
     if action not in CANNANAS_PREPARE_ACTIONS:
         raise ValueError(f'unknown prepare action: {action}')
     if action == 'prepare_plant_create':
-        args = {'plant_name': plant_name, 'room': room, 'strain': strain,
+        args = {'plant_name': explicit_plant, 'room': room, 'strain': strain,
                 'status': status}
         if notes:
             args['notes'] = notes
@@ -403,7 +521,7 @@ def prepare_tool_call(action: str, params: dict, binding: dict) -> 'tuple[str, d
             args['plant_count'] = spoken_plant_count
         return action, {**args, 'binding': binding}
     if action == 'prepare_strain_create':
-        args: dict = {'name': plant_name or strain, 'identifier': ''}
+        args: dict = {'name': explicit_plant or strain, 'identifier': ''}
         if notes:
             args['notes'] = notes
         description = _spoken_value(params, 'description')
@@ -436,10 +554,17 @@ def prepare_tool_call(action: str, params: dict, binding: dict) -> 'tuple[str, d
             extra['strain'] = spoken_strain
         if spoken_date:
             extra['expected_harvest_at'] = spoken_date
+        # The flat change parameters are spoken changes too: without them
+        # they would be lost between the model and the adapter. The nested
+        # "fields" object still wins over the flat convenience parameters.
+        for key in CANNANAS_PLANT_CHANGE_PARAMETERS:
+            value = _spoken_value(params, key)
+            if value is not None:
+                extra[key] = value
         # The target name is not a change: the adapter rejects a "name"
         # field, so it never goes into the fields.
         fields = _spoken_update_fields(params, extra)
-        return action, {'plant': plant_name, 'fields': fields,
+        return action, {'plant': target_name, 'fields': fields,
                         'binding': binding}
     if action == 'prepare_batch_update':
         extra = {}
@@ -452,16 +577,21 @@ def prepare_tool_call(action: str, params: dict, binding: dict) -> 'tuple[str, d
         if spoken_date:
             extra['expected_harvest_at'] = spoken_date
         fields = _spoken_update_fields(params, extra)
-        return action, {'batch': plant_name, 'fields': fields,
+        # The batch is named as "batch" or as the generic target name.
+        batch_target = _spoken_target(params, 'batch') or target_name
+        return action, {'batch': batch_target, 'fields': fields,
                         'binding': binding}
     if action == 'prepare_diary_create':
         measurements = _spoken_value(params, 'measurements')
-        args = {'text': notes or strain, 'measurements': measurements,
+        # The diary text is the spoken text — never the strain or the
+        # search term. A diary without text is refused by the adapter.
+        spoken_text = str(_spoken_value(params, 'text', notes) or '').strip()
+        args = {'text': spoken_text, 'measurements': measurements,
                 'binding': binding}
         batch_target = str(_spoken_value(params, 'batch') or '').strip()
         plant_target = str(_spoken_value(params, 'plant') or '').strip()
         if not plant_target:
-            plant_target = plant_name
+            plant_target = explicit_plant
         if batch_target:
             args['batch'] = batch_target
         elif plant_target:
@@ -474,12 +604,18 @@ def prepare_tool_call(action: str, params: dict, binding: dict) -> 'tuple[str, d
         extra = {}
         if notes:
             extra['notes'] = notes
+        # The spoken zone changes are changes too: without them they would
+        # be lost between the model and the adapter.
+        for key in CANNANAS_ZONE_CHANGE_PARAMETERS:
+            value = _spoken_value(params, key)
+            if value is not None:
+                extra[key] = value
         fields = _spoken_update_fields(params, extra)
         if not fields:
             raise ValueError('für eine Raumänderung wird ein Feld gebraucht')
         return action, {'zone': zone_name, 'fields': fields, 'binding': binding}
     if action == 'prepare_harvest_create':
-        plants = str(_spoken_value(params, 'plants', plant_name) or '').strip()
+        plants = str(_spoken_value(params, 'plants', explicit_plant) or '').strip()
         batches = str(_spoken_value(params, 'batches',
                                     params.get('batch')) or '').strip()
         harvested_at = str(_spoken_value(params, 'harvested_at',
@@ -492,7 +628,7 @@ def prepare_tool_call(action: str, params: dict, binding: dict) -> 'tuple[str, d
             'binding': binding,
         }
     if action == 'prepare_waste_disposal_create':
-        plants = str(_spoken_value(params, 'plants', plant_name) or '').strip()
+        plants = str(_spoken_value(params, 'plants', explicit_plant) or '').strip()
         batches = str(_spoken_value(params, 'batches',
                                     params.get('batch')) or '').strip()
         return action, {
@@ -601,6 +737,25 @@ class CannanasHost:
 
     def boot_id(self) -> str:
         return self._boot
+
+    def has_pending_for(self, turn) -> bool:
+        """True when this turn's device owns a prepared, unconfirmed preview.
+
+        The voice layer asks the host, not a workflow: a preview prepared
+        through the closed Cannanas action enum must be confirmable by the
+        spoken "ja" even when no other workflow is wired.
+        """
+        if turn is None:
+            return False
+        session_id = getattr(turn, 'stable_device_id', None) or ''
+        if not session_id:
+            return False
+        try:
+            pending = self.coordinator.current(session_id)
+        except Exception:
+            return False
+        return bool(pending is not None
+                    and getattr(pending, 'state', '') == 'pending')
 
     def mark_degraded(self, reason: str) -> None:
         with self._lock:

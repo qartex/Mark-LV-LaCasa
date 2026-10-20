@@ -54,6 +54,8 @@ import wave
 from pathlib import Path
 
 from esp32_api_acceptance import KeyFileError, load_api_key  # reused contract
+from core.cannanas_actions import CANNANAS_MODEL_ACTIONS
+from core.cannanas_host import CANNANAS_SPOKEN_PARAMETERS
 from core.turn_provenance import (
     CHANNEL_ESP32_PCM,
     IngressEnvelope,
@@ -162,10 +164,13 @@ DEFAULT_SYSTEM_INSTRUCTION = (
     "Wenn der Benutzer das Gespraech mit Formulierungen wie 'Mic muten', "
     "'Mikrofon stumm', 'sei stumm' oder 'hoer auf zuzuhoeren' beendet, rufe "
     "ausschliesslich die Mikrofon-Funktion mit action mute auf. "
-    "Fuer den Anbau nutze die Cannanas-Funktion: Status aendern, Pflanzen in "
-    "einen anderen Raum umziehen, eine Pflanze zur Mutterpflanze machen, eine "
-    "Charge mit Mutterpflanzen planen, einen Tagebucheintrag fuer Pflanze, "
-    "Charge oder Raum schreiben und eine Ernte vorbereiten. Jede Aenderung wird "
+    "Fuer den Anbau nutze die Cannanas-Funktion: den Status einer Pflanze "
+    "aendern, eine Pflanze in einen anderen Raum umziehen, eine Pflanze zur "
+    "Mutterpflanze machen, eine Charge mit Mutterpflanzen planen, einen "
+    "Tagebucheintrag fuer Pflanze, Charge oder Raum schreiben, eine Ernte "
+    "vorbereiten, eine Verschmutzung (Ausschuss) erfassen und die Zone eines "
+    "Raums pflegen (Name, Beschreibung, Notizen, Klima). "
+    "Jede Aenderung wird "
     "erst nach ausdruecklicher Bestaetigung gespeichert. "
     "Wenn ein ausdruecklicher Wunsch mit den vorhandenen Funktionen nicht "
     "erfuellbar ist, nutze die Lernfunktion genau einmal. Sage nicht, dass du "
@@ -226,57 +231,91 @@ BRIEFING_FUNCTION_SCHEMA = {
 }
 
 # The closed Cannanas action list the model may call. Confirm/cancel live
-# host-side and are never model-facing.
-CANNANAS_VOICE_ACTIONS = (
-    "overview",
-    "find_zones",
-    "find_strains",
-    "find_plants",
-    "find_propagation_material",
-    "list_recent_batches",
-    "list_plants",
-    "count_plants_by_room",
-    "zone_growth_summary",
-    "list_mother_plants",
-    "list_diaries",
-    "list_plant_diaries",
-    "list_harvests",
-    "get_grow_config",
-    "zone_plant_status",
-    "prepare_plant_create",
-    "prepare_strain_create",
-    "prepare_batch_create",
-    "prepare_plant_update",
-    "prepare_batch_update",
-    "prepare_diary_create",
-    "prepare_zone_update",
-    "prepare_harvest_create",
-    "prepare_waste_disposal_create",
+# host-side and are never model-facing. The list is the host's own enum
+# (core/cannanas_actions.py) — one source of truth, so the voice path can
+# never offer an action the host would refuse.
+CANNANAS_VOICE_ACTIONS = tuple(sorted(CANNANAS_MODEL_ACTIONS))
+
+# The spoken parameters the model may use. The host owns this list too
+# (core/cannanas_host.CANNANAS_SPOKEN_PARAMETERS): every parameter the
+# model is allowed to send is one the host actually reads, and every
+# parameter the host reads is one the model may send.
+CANNANAS_VOICE_PARAMETERS = {
+    "action": {
+        "type": "string",
+        "enum": list(CANNANAS_VOICE_ACTIONS),
+        "description": "Geschlossene Aktionsliste",
+    },
+    "room": {"type": "string", "description": "Raum/Zone"},
+    "query": {"type": "string", "description": "Suchbegriff (Pflanze/Charge/Sorte)"},
+    "plant_name": {"type": "string", "description": "Name der Pflanze/Charge"},
+    "plant": {"type": "string", "description": "Name der Pflanze"},
+    "plants": {"type": "string", "description": "Namen der Pflanzen (kommagetrennt)"},
+    "batch": {"type": "string", "description": "Charge"},
+    "batches": {"type": "string", "description": "Namen der Chargen (kommagetrennt)"},
+    "strain": {"type": "string", "description": "Sorte"},
+    "status": {"type": "string", "description": "Status (z. B. Bluete)"},
+    "count": {"type": "integer", "description": "Anzahl/Maximalwert"},
+    "plant_count": {"type": "integer", "description": "Anzahl der Pflanzen"},
+    "text": {"type": "string", "description": "Notizen/Tagebuchtext"},
+    "notes": {"type": "string", "description": "Notizen"},
+    "date": {"type": "string", "description": "Datum (YYYY-MM-DD)"},
+    "harvested_at": {"type": "string", "description": "Erntetag (YYYY-MM-DD)"},
+    "zone": {"type": "string", "description": "Raum/Zone fuer Aenderungen"},
+    "is_mother": {"type": "boolean", "description": "Pflanze ist eine Mutterpflanze"},
+    "mother_plant": {"type": "string", "description": "Mutterpflanze"},
+    "mother_plants": {
+        "type": "array",
+        "description": "Mutterpflanzen mit Schnittzahl je Pflanze",
+        "items": {
+            "type": "object",
+            "properties": {
+                "plant": {"type": "string"},
+                "cutting_count": {"type": "integer"},
+            },
+            "required": ["plant", "cutting_count"],
+        },
+    },
+    "parent_plant": {"type": "string", "description": "Elternpflanze"},
+    "description": {"type": "string", "description": "Beschreibung"},
+    "measurements": {
+        "type": "object",
+        "description": "Messwerte des Tagebuchs (Messschluessel und Zahl)",
+    },
+    "propagation_material": {"type": "string", "description": "Vermehrungsmaterial"},
+    "expected_harvest_at": {"type": "string", "description": "Erwartete Ernte (YYYY-MM-DD)"},
+    "fields": {
+        "type": "object",
+        "description": (
+            "Geaenderte Felder, z. B. status, room, notes, is_mother, "
+            "parent_plant, description. Werte sind gesprochen benannt."
+        ),
+    },
+    "expected_yield": {"type": "number", "description": "Erwartete Erntemenge"},
+    "actual_yield": {"type": "number", "description": "Tatsaechliche Erntemenge"},
+    "substrate": {"type": "string", "description": "Substrat"},
+    "fertilizer": {"type": "string", "description": "Düngung"},
+    "archived": {"type": "boolean", "description": "Archiviert"},
+}
+
+# The schema offers exactly the spoken parameters the host reads. A spoken
+# parameter without a schema entry would be a parameter the model may
+# send but the schema forbids — so the build fails instead of hiding it.
+_MISSING_SPOKEN_PARAMETERS = tuple(
+    name for name in CANNANAS_SPOKEN_PARAMETERS
+    if name not in CANNANAS_VOICE_PARAMETERS
 )
+if _MISSING_SPOKEN_PARAMETERS:  # pragma: no cover - build-time guard
+    raise RuntimeError(
+        'spoken Cannanas parameters without a schema entry: '
+        f'{", ".join(_MISSING_SPOKEN_PARAMETERS)}')
 
 CANNANAS_FUNCTION_SCHEMA = {
     "type": "object",
     "properties": {
-        "action": {
-            "type": "string",
-            "enum": list(CANNANAS_VOICE_ACTIONS),
-        },
-        "room": {"type": "string", "description": "Raum/Zone"},
-        "query": {"type": "string", "description": "Suchbegriff (Pflanze/Charge/Sorte)"},
-        "plant_name": {"type": "string", "description": "Name der Pflanze/Charge"},
-        "batch": {"type": "string", "description": "Charge"},
-        "strain": {"type": "string", "description": "Sorte"},
-        "status": {"type": "string", "description": "Status (z. B. Bluete)"},
-        "count": {"type": "integer", "description": "Anzahl/Maximalwert"},
-        "text": {"type": "string", "description": "Notizen/Tagebuchtext"},
-        "date": {"type": "string", "description": "Datum (YYYY-MM-DD)"},
-        "fields": {
-            "type": "object",
-            "description": (
-                "Geaenderte Felder, z. B. status, room, notes, is_mother, "
-                "parent_plant, description."
-            ),
-        },
+        name: CANNANAS_VOICE_PARAMETERS[name]
+        for name in CANNANAS_SPOKEN_PARAMETERS
+        if name in CANNANAS_VOICE_PARAMETERS
     },
     "required": ["action"],
     "additionalProperties": False,
@@ -457,6 +496,26 @@ async def _maybe_await(value):
     if inspect.isawaitable(value):
         return await value
     return value
+
+
+def _runner_accepts_turn(runner) -> bool:
+    """True when the runner takes the finalized turn as a second argument.
+
+    The turn carries the device, session and turn identity the host needs
+    to bind a preview. A runner that does not accept it is still usable for
+    the read actions; the host then refuses every write by itself.
+    """
+    if runner is None:
+        return False
+    try:
+        signature = inspect.signature(runner)
+    except (TypeError, ValueError):
+        return False
+    parameters = list(signature.parameters.values())
+    if any(p.kind is inspect.Parameter.VAR_POSITIONAL
+           for p in parameters):
+        return True
+    return len(parameters) >= 2
 
 
 def _inline_audio_bytes(value) -> bytes:
@@ -729,19 +788,77 @@ class GeminiTurnEngine:
         """Pin immutable provenance for every model-facing side effect."""
         self._turn_context = turn
 
+    def _run_cannanas(self, parameters: dict) -> str:
+        """Run the closed Cannanas action in the voice path.
+
+        The runner gets the finalized turn: the host binds the preview to
+        the device, the auth session and the turn id, and only a later
+        finalized turn may confirm it. A runner that does not accept the
+        turn (an older plugin wiring) still works for the read actions.
+        """
+        runner = self._cannanas_runner
+        turn = self._turn_context
+        if _runner_accepts_turn(runner):
+            return runner(parameters, turn)
+        return runner(parameters)
+
     def has_pending_confirmation(self) -> bool:
+        """True when this device owns a prepared, unconfirmed preview.
+
+        The host owns the pending state, not a workflow: a preview that
+        the closed Cannanas action enum prepared must be confirmable by
+        the spoken "ja" even when no other workflow is wired.
+        """
+        turn = self._turn_context
+        if turn is None:
+            return False
         workflow = self._diary_workflow
-        return bool(
-            workflow is not None
-            and self._turn_context is not None
-            and workflow.has_pending(self._turn_context)
-        )
+        if workflow is not None and workflow.has_pending(turn):
+            return True
+        host = self._cannanas_host()
+        if host is None:
+            return False
+        checker = getattr(host, 'has_pending_for', None)
+        if not callable(checker):
+            return False
+        try:
+            return bool(checker(turn))
+        except Exception:
+            return False
+
+    def _cannanas_host(self):
+        """The host of the process, if the Cannanas path is configured."""
+        try:
+            from core.cannanas_host import get_host
+
+            return get_host()
+        except Exception:
+            return None
 
     def evaluate_pending_confirmation(self, transcript: str) -> str | None:
-        workflow = self._diary_workflow
-        if workflow is None or self._turn_context is None:
+        """The host grammar decides: 'ja' confirms, 'abbrechen' cancels."""
+        turn = self._turn_context
+        if turn is None:
             return None
-        return workflow.evaluate_confirmation(self._turn_context, transcript)
+        workflow = self._diary_workflow
+        if workflow is not None:
+            outcome = workflow.evaluate_confirmation(turn, transcript)
+            if outcome is not None:
+                return outcome
+        host = self._cannanas_host()
+        if host is None:
+            return None
+        evaluate = getattr(host, 'evaluate', None)
+        if not callable(evaluate):
+            return None
+        try:
+            outcome = evaluate(turn, transcript)
+        except Exception:
+            return None
+        if not outcome.get('handled'):
+            return None
+        spoken = str(outcome.get('spoken') or '').strip()
+        return spoken or None
 
     def cancel_pending_confirmation(self) -> bool:
         """Fence a pending preview when the satellite connection goes away."""
@@ -929,7 +1046,10 @@ class GeminiTurnEngine:
                 elif name == "cannanas":
                     if self._cannanas_runner is None:
                         raise RuntimeError("cannanas unavailable")
-                    answer = self._cannanas_runner(parameters)
+                    # The turn context carries the device, session and turn
+                    # identity the host needs to bind the preview. Without it
+                    # every spoken change is refused as unassigned.
+                    answer = self._run_cannanas(parameters)
                 else:
                     raise RuntimeError("unsupported model function")
                 if not isinstance(answer, str) or not answer.strip():
@@ -1876,6 +1996,13 @@ def _optional_cannanas_runner():
 
     The runner goes through the plugin, so the closed action enum, the host
     confirmation grammar and the adapter's prepare/confirm fence all apply.
+
+    The runner is bound to one finalized turn: the host needs the turn's
+    device, session and turn identity to bind the preview, and a later
+    spoken "ja" can only confirm a preview that was prepared in an earlier
+    turn. Without the turn the host refuses every write ("nur fuer
+    zugeordnete Geraete"), so the voice path would silently lose every
+    spoken change.
     """
     try:
         from plugins import cannanas as cannanas_plugin
@@ -1884,9 +2011,9 @@ def _optional_cannanas_runner():
                   type(exc).__name__)
         return None
 
-    def run(parameters: dict) -> str:
+    def run(parameters: dict, turn=None) -> str:
         args = dict(parameters or {})
-        result = cannanas_plugin.run(args)
+        result = cannanas_plugin.run(args, session_memory=turn)
         summary = str(result.get("summary") or "").strip()
         if summary:
             return summary
