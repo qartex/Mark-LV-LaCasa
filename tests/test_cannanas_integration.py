@@ -109,7 +109,7 @@ class IntegrationFixture(unittest.TestCase):
         self.real_client = CannanasClient({
             'command': sys.executable,
             'args': [str(FIXTURE)],
-            'adapter_version': '2.4.0',
+            'adapter_version': '2.5.0',
             'artifact_sha256': 'a' * 64,
             'expected_tools': EXPECTED_TOOLS,
             'adapter_env': {},

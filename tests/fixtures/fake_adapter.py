@@ -53,7 +53,7 @@ BOOT_ID = ARGV_SETTINGS.get('FAKE_ADAPTER_BOOT_ID', BOOT_ID)
 ADAPTER_INFO = {
     'ok': True,
     'adapter_name': 'cannanas-fake-adapter',
-    'adapter_version': '2.4.0',
+    'adapter_version': '2.5.0',
     'artifact_sha256': 'a' * 64,
     'release_pinned': True,
     'config': {'club_id_bound': True, 'boot_id': BOOT_ID},
