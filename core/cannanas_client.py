@@ -67,8 +67,9 @@ def _confirm_tools() -> frozenset:
 
 
 def ADAPTER_TOOLS() -> list:
-    """The frozen adapter tool surface (34 tools, release 2.0.0)."""
-    return [    'get_adapter_info',
+    """The frozen adapter tool surface (38 tools, release 2.5.0)."""
+    return [
+    'get_adapter_info',
     'get_cannanas_overview',
     'find_zones',
     'find_strains',
@@ -84,6 +85,7 @@ def ADAPTER_TOOLS() -> list:
     'list_harvests',
     'get_grow_config',
     'zone_plant_status',
+    'mother_cutting_summary',
     'watering_intervals',
     'prepare_plant_create',
     'confirm_plant_create',
