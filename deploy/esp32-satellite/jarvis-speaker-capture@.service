@@ -1,0 +1,11 @@
+[Unit]
+Description=Capture a JARVIS voice sample for speaker enrollment
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/lacasa/Mark-LV-LaCasa-esp32
+Environment=PYTHONPATH=/home/lacasa/Mark-LV-LaCasa-esp32
+ExecStart=/home/lacasa/waveshare-va-test/venv/bin/python scripts/jarvis_speaker_capture.py --speaker %i --seconds 5 --timeout 75 --enroll
+StandardOutput=append:/home/lacasa/waveshare-va-test/logs/capture-%i.log
+StandardError=append:/home/lacasa/waveshare-va-test/logs/capture-%i.log
