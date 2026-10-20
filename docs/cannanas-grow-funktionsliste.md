@@ -1,7 +1,7 @@
 # Cannanas-Funktionsliste für JARVIS (Stand 2026-10-20)
 
 Diese Liste zeigt, was JARVIS über Sprache mit Cannanas kann — und was noch fehlt.
-Adapter-Stand: `cannanas-mcp-adapter` 2.4.0 (34 Werkzeuge), Mark-LV auf `feat/esp32-satellite-phase1`.
+Adapter-Stand: `cannanas-mcp-adapter` 2.5.0 (38 Werkzeuge), Mark-LV auf `feat/esp32-satellite-phase1`.
 
 **So funktioniert jede Änderung:** JARVIS liest den Zustand, berechnet eine Vorschau und
 spricht sie vor. Erst nach deinem gesprochenen **„ja“** wird geschrieben. „Abbrechen“
@@ -131,16 +131,51 @@ verwirft die Vorschau. Ohne bestätigte Vorschau passiert **nie** ein Schreibvor
 | Finanzen, Mitglieder, Chat, Cart, Rollen, POS, Transport | Kein Grow-Bereich |
 | `grow-configs` ändern | Club-weit; ein Sprachbefehl dafür wäre zu global |
 
+## 8b. Die sieben neuen Gärtner-Werkzeuge (Adapter 2.5.0)
+
+| Funktion | Status | So sagst du es |
+|---|---|---|
+| **Charge samt Pflanzen** in einen anderen Raum umziehen | ✅ | „Zieh die Charge Ztilton #6 mit allen Pflanzen nach Helsinki“ |
+| **Status aus dem Alter** ableiten (Blüte seit 3 Wochen) | ✅ | „Ztilton #3 ist seit 3 Wochen in Blüte“ — setzt Status **und** Blütendatum |
+| **Stecklingsbilanz** je Mutterpflanze | ✅ | „Wie viele Stecklinge habe ich von Mutter Ztilton #1?“ |
+| **Tagebuch mit Messwerten** aus Home Assistant | ✅ | „Tagebucheintrag Madrid“ — Temperatur und Feuchte kommen vom Sensor |
+| **Namenlose Pflanzen benennen** (mit Nummerierung) | ✅ | „Benenne alle Pflanzen der Charge Ztilton #6 mit Nummerierung“ → „Ztilton #6 (1)“, „Ztilton #6 (2)“ … |
+| **Mutterpflanze in Reserve** markieren | ✅ | „Ztilton #1 ist in Reserve“ — landet als Tag „reserve“ in der Pflanze |
+| **Gieß-Intervall** je Raum | ✅ | „Wie lange wurde Madrid nicht gegossen?“ |
+
+**Was die Datenlage ergänzt:** Im Club gibt es keine Charge, deren Pflanzen als
+Mutterpflanzen geführt sind (`mother_plants` ist überall leer). Die Stecklingsbilanz
+antwortet deshalb heute mit „keine Einträge“ — die Funktion ist bereit, aber es fehlen
+noch die Daten. Genau so ist es mit dem Gieß-Intervall: kein Tagebucheintrag erwähnt das
+Gießen, also sagen die Räume „unbekannt ohne Giessen“ statt einer erfundenen Zahl.
+
 ## 9b. Was die Sprachsteuerung heute einschränkt
 
 | Grenze | Ursache |
 |---|---|
-| **Pflanzen sind nicht einzeln ansprechbar** | In Cannanas haben alle 268 Pflanzen `name = null`. Sie erben das Chargen-Label, deshalb ist „Ztilton #6" eine Charge. Eine Charge mit mehreren Pflanzen wird bewusst abgelehnt, damit nicht die falsche Pflanze geändert wird. |
+| **Pflanzen sind nicht einzeln ansprechbar** | In Cannanas haben alle 268 Pflanzen `name = null`. Sie erben das Chargen-Label, deshalb ist ein Chargen-Label wie Ztilton #6 eine Charge. Eine Charge mit mehreren Pflanzen wird bewusst abgelehnt, damit nicht die falsche Pflanze geändert wird. **Abhilfe:** „Benenne alle Pflanzen der Charge Ztilton #6 mit Nummerierung“ — danach trägt jede Pflanze einen eigenen Namen. |
 | **Beim Anlegen sind nur wenige Felder möglich** | Der Adapter bietet fürs Anlegen weniger Felder als fürs Ändern. Gesprochene Felder, die nicht gesetzt werden können, werden **abgelehnt** (der Gärtner hört es) statt stillschweigend verworfen. |
 | **Archivieren ist nicht Sprache** | Die Wirkung ist schwer rückgängig zu machen, daher bleibt es bewusst eine Handarbeit. |
+| **Kein Gieß-Intervall ohne passende Einträge** | Ein Raum ohne Tagebucheintrag, der das Gießen erwähnt, meldet „unbekannt“ — nicht „lange nicht gegossen“. Unbekannt ist nicht „nie“. |
 | **Ein leerer Tagebucheintrag wird nicht gespeichert** | Leere Texte würden eine Notiz löschen — das ist eine Löschung, keine Änderung, und wird abgelehnt. |
 
 ## 10. Meine Vorschläge für den nächsten Schritt
+
+Die ersten sieben Vorschläge sind mit Adapter 2.5.0 umgesetzt (siehe Abschnitt 8b). Was
+noch offen ist, ist die **Datenlage** und nicht mehr der Code:
+
+1. **Mutterpflanzen in den Chargen führen** — solange `mother_plants` leer ist, bleibt die
+   Stecklingsbilanz leer. Einmal „Charge Ztilton #6 von Mutter Ztilton #1, 6 Stecklinge“
+   genügt, dann stimmt die Antwort.
+2. **Tagebücher um Gieß-Einträge ergänzen** — „Heute gegossen“ im Tagebuch macht das
+   Gieß-Intervall aussagekräftig.
+3. **Chargen-Pflanzen benennen** — einmal je Charge, danach sind Einzel-Pflanzen
+   ansprechbar und Status-Änderungen wirken auf genau eine Pflanze.
+4. **Namen für Einzel-Pflanzen vergeben** — 0 der 268 Pflanzen haben einen Namen, also sind
+   alle nur über ihre Charge erreichbar. Das Benennen geht bisher je Charge; ein Werkzeug
+   für eine einzelne Pflanze fehlt noch.
+5. **Chargen-Beschreibungen** — `description` und `notes` der Charge sind der natürliche Ort
+   für Sorten-Notizen wie „aus Phenom Hand #3“.
 
 1. **Chargen-Pflanzen-Zuordnung**: „Zieh die Charge Ztilton Woche 4 mit allen 12 Pflanzen nach Helsinki“ — heute zwei Ansagen, ein Wunsch.
 2. **Status aus dem Datum**: „Ztilton #3 ist seit drei Wochen in Blüte“ → Setzt `cultivation_flowering_date` und den Status automatisch.
@@ -154,8 +189,8 @@ verwirft die Vorschau. Ohne bestätigte Vorschau passiert **nie** ein Schreibvor
 
 ## Technischer Nachweis
 
-- Adapter 2.4.0: 34 Werkzeuge, Allowlist geschlossen (nur dokumentierte Pfade aus dem gepinnten OpenAPI-Fixture), 158 Tests grün.
-- Mark-LV: geschlossene Aktions-Enum mit 24 Aktionen, 734 Tests grün.
+- Adapter 2.5.0: 38 Werkzeuge, Allowlist geschlossen (nur dokumentierte Pfade aus dem gepinnten OpenAPI-Fixture), 205 Tests grün.
+- Mark-LV: geschlossene Aktions-Enum mit 30 Aktionen, 776 Tests grün.
 - Live gegen die echte API geprüft (nur lesend): Zonen, Chargen, Pflanzen, Tagebücher, Ernten, Grow-Einstellungen.
 - Live-Prepare geprüft (ohne Bestätigung, also ohne Schreibvorgang): Zonen-Update, Pflanzen-Update, Chargen-Update, Tagebuch, Ernte, Verschmutzung.
 - Jeder bestätigte Write: Audit-Eintrag **vor** dem POST, Bestätigung gegen die Boot-ID des Adapters, Rückgabe-ID wird verifiziert.
