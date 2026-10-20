@@ -1375,6 +1375,67 @@ class CliAndLoggingTests(unittest.TestCase):
         engine._answer_from_response(response)
         self.assertEqual(["bjoern"], seen)
 
+    def test_cannanas_tool_is_offered_with_the_closed_action_enum(self):
+        class FakeTypes:
+            class FunctionDeclaration:
+                def __init__(self, **kwargs):
+                    self.name = kwargs["name"]
+                    self.parameters_json_schema = kwargs.get("parameters_json_schema")
+
+            class Tool:
+                def __init__(self, function_declarations):
+                    self.function_declarations = function_declarations
+
+        engine = bridge.GeminiTurnEngine(GEMINI_KEY_MARKER, cannanas_runner=lambda a: "ok")
+        decls = {
+            d.name: d
+            for d in engine._chat_tools(FakeTypes)[0].function_declarations
+        }
+        self.assertIn("cannanas", decls)
+        enum = decls["cannanas"].parameters_json_schema["properties"]["action"]["enum"]
+        self.assertIn("prepare_zone_update", enum)
+        self.assertIn("prepare_harvest_create", enum)
+        self.assertNotIn("confirm_diary_create", enum)
+
+    def test_cannanas_runner_returns_the_host_summary(self):
+        runner = bridge._optional_cannanas_runner()
+        self.assertTrue(callable(runner))
+        # An unknown action is refused by the closed enum, never executed.
+        answer = runner({"action": "confirm_diary_create"})
+        self.assertIsInstance(answer, str)
+        self.assertTrue(answer.strip())
+
+    def test_cannanas_tool_is_absent_without_a_runner(self):
+        class FakeTypes:
+            class FunctionDeclaration:
+                def __init__(self, **kwargs):
+                    self.name = kwargs["name"]
+
+            class Tool:
+                def __init__(self, function_declarations):
+                    self.function_declarations = function_declarations
+
+        engine = bridge.GeminiTurnEngine(GEMINI_KEY_MARKER)
+        names = [d.name for d in engine._chat_tools(FakeTypes)[0].function_declarations]
+        self.assertNotIn("cannanas", names)
+
+    def test_cannanas_function_call_runs_the_host_runner(self):
+        seen = []
+        engine = bridge.GeminiTurnEngine(
+            GEMINI_KEY_MARKER,
+            cannanas_runner=lambda params: seen.append(params) or "Vorschau gelesen.",
+        )
+        response = SimpleNamespace(
+            text=None,
+            candidates=[SimpleNamespace(content=SimpleNamespace(parts=[
+                SimpleNamespace(function_call=SimpleNamespace(
+                    name="cannanas", args={"action": "prepare_zone_update"}
+                ))
+            ]))],
+        )
+        self.assertEqual("Vorschau gelesen.", engine._answer_from_response(response))
+        self.assertEqual([{"action": "prepare_zone_update"}], seen)
+
     def test_new_wake_word_conversation_clears_an_unspoken_mute_request(self):
         engine = bridge.GeminiTurnEngine(GEMINI_KEY_MARKER)
         response = SimpleNamespace(

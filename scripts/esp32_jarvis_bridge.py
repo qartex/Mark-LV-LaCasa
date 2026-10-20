@@ -162,6 +162,11 @@ DEFAULT_SYSTEM_INSTRUCTION = (
     "Wenn der Benutzer das Gespraech mit Formulierungen wie 'Mic muten', "
     "'Mikrofon stumm', 'sei stumm' oder 'hoer auf zuzuhoeren' beendet, rufe "
     "ausschliesslich die Mikrofon-Funktion mit action mute auf. "
+    "Fuer den Anbau nutze die Cannanas-Funktion: Status aendern, Pflanzen in "
+    "einen anderen Raum umziehen, eine Pflanze zur Mutterpflanze machen, eine "
+    "Charge mit Mutterpflanzen planen, einen Tagebucheintrag fuer Pflanze, "
+    "Charge oder Raum schreiben und eine Ernte vorbereiten. Jede Aenderung wird "
+    "erst nach ausdruecklicher Bestaetigung gespeichert. "
     "Wenn ein ausdruecklicher Wunsch mit den vorhandenen Funktionen nicht "
     "erfuellbar ist, nutze die Lernfunktion genau einmal. Sage nicht, dass du "
     "es kannst: JARVIS muss es erst lernen."
@@ -217,6 +222,63 @@ MICROPHONE_FUNCTION_SCHEMA = {
 BRIEFING_FUNCTION_SCHEMA = {
     "type": "object",
     "properties": {},
+    "additionalProperties": False,
+}
+
+# The closed Cannanas action list the model may call. Confirm/cancel live
+# host-side and are never model-facing.
+CANNANAS_VOICE_ACTIONS = (
+    "overview",
+    "find_zones",
+    "find_strains",
+    "find_plants",
+    "find_propagation_material",
+    "list_recent_batches",
+    "list_plants",
+    "count_plants_by_room",
+    "zone_growth_summary",
+    "list_mother_plants",
+    "list_diaries",
+    "list_plant_diaries",
+    "list_harvests",
+    "get_grow_config",
+    "zone_plant_status",
+    "prepare_plant_create",
+    "prepare_strain_create",
+    "prepare_batch_create",
+    "prepare_plant_update",
+    "prepare_batch_update",
+    "prepare_diary_create",
+    "prepare_zone_update",
+    "prepare_harvest_create",
+    "prepare_waste_disposal_create",
+)
+
+CANNANAS_FUNCTION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "action": {
+            "type": "string",
+            "enum": list(CANNANAS_VOICE_ACTIONS),
+        },
+        "room": {"type": "string", "description": "Raum/Zone"},
+        "query": {"type": "string", "description": "Suchbegriff (Pflanze/Charge/Sorte)"},
+        "plant_name": {"type": "string", "description": "Name der Pflanze/Charge"},
+        "batch": {"type": "string", "description": "Charge"},
+        "strain": {"type": "string", "description": "Sorte"},
+        "status": {"type": "string", "description": "Status (z. B. Bluete)"},
+        "count": {"type": "integer", "description": "Anzahl/Maximalwert"},
+        "text": {"type": "string", "description": "Notizen/Tagebuchtext"},
+        "date": {"type": "string", "description": "Datum (YYYY-MM-DD)"},
+        "fields": {
+            "type": "object",
+            "description": (
+                "Geaenderte Felder, z. B. status, room, notes, is_mother, "
+                "parent_plant, description."
+            ),
+        },
+    },
+    "required": ["action"],
     "additionalProperties": False,
 }
 
@@ -600,6 +662,7 @@ class GeminiTurnEngine:
         diary_workflow=None,
         learning_queue=None,
         briefing_runner=None,
+        cannanas_runner=None,
     ):
         self._gemini_keys = (
             (gemini_key,) if isinstance(gemini_key, str) else tuple(gemini_key)
@@ -615,6 +678,7 @@ class GeminiTurnEngine:
         self._diary_workflow = diary_workflow
         self._learning_queue = learning_queue
         self._briefing_runner = briefing_runner
+        self._cannanas_runner = cannanas_runner
         self._speaker: str | None = None
         self._turn_context = None
         self._history: list[dict] = []
@@ -862,6 +926,10 @@ class GeminiTurnEngine:
                     if self._briefing_runner is None:
                         raise RuntimeError("briefing unavailable")
                     answer = self._briefing_runner(self._speaker)
+                elif name == "cannanas":
+                    if self._cannanas_runner is None:
+                        raise RuntimeError("cannanas unavailable")
+                    answer = self._cannanas_runner(parameters)
                 else:
                     raise RuntimeError("unsupported model function")
                 if not isinstance(answer, str) or not answer.strip():
@@ -931,6 +999,18 @@ class GeminiTurnEngine:
                     "erfuellen kann, einmalig als Lernauftrag an Hermes weiter."
                 ),
                 parameters_json_schema=LEARNING_FUNCTION_SCHEMA,
+            ))
+        if self._cannanas_runner is not None:
+            declarations.append(types.FunctionDeclaration(
+                name="cannanas",
+                description=(
+                    "Cannanas-Grow: Raeume, Pflanzen, Sorten, Chargen, "
+                    "Mutterpflanzen, Tagebuecher und Ernten lesen sowie Status, "
+                    "Raum, Mutterpflanzen, Charge, Tagebucheintrag und Ernte "
+                    "vorbereiten. Jede Aenderung wird nur nach ausdruecklicher "
+                    "Bestaetigung geschrieben."
+                ),
+                parameters_json_schema=CANNANAS_FUNCTION_SCHEMA,
             ))
         if self._briefing_runner is not None:
             declarations.append(types.FunctionDeclaration(
@@ -1131,6 +1211,7 @@ class JarvisBridge:
         diary_workflow=None,
         learning_queue=None,
         briefing_runner=None,
+        cannanas_runner=None,
         speaker_identifier=None,
         default_speaker="",
         voice_client_factory=None,
@@ -1168,6 +1249,7 @@ class JarvisBridge:
             diary_workflow=diary_workflow,
             learning_queue=learning_queue,
             briefing_runner=briefing_runner,
+            cannanas_runner=cannanas_runner,
         )
         self._device_id = str(device_id).strip() or "growroom-sprache-1"
         self._key_digest = auth_session_id_of(api_key)
@@ -1789,6 +1871,32 @@ def _optional_voice_workflows(queue_dir):
     return diary, queue
 
 
+def _optional_cannanas_runner():
+    """Build the voice-side Cannanas runner: reads and prepared writes only.
+
+    The runner goes through the plugin, so the closed action enum, the host
+    confirmation grammar and the adapter's prepare/confirm fence all apply.
+    """
+    try:
+        from plugins import cannanas as cannanas_plugin
+    except Exception as exc:
+        _LOG.info("cannanas voice action unavailable status=disabled error_type=%s",
+                  type(exc).__name__)
+        return None
+
+    def run(parameters: dict) -> str:
+        args = dict(parameters or {})
+        result = cannanas_plugin.run(args)
+        summary = str(result.get("summary") or "").strip()
+        if summary:
+            return summary
+        if result.get("ok") is False:
+            return "Das hat Cannanas nicht ausgeführt."
+        return "Erledigt."
+
+    return run
+
+
 def _optional_briefing(speakers_path: str, speaker_key: str):
     """Build the host-owned briefing lazily; a failure only disables it."""
     try:
@@ -1891,6 +1999,7 @@ def main(argv=None) -> int:
         print(f"voice workflows unavailable: {type(exc).__name__}", file=sys.stderr)
         return 1
     briefing_runner = _optional_briefing(args.briefing_speakers, args.speaker)
+    cannanas_runner = _optional_cannanas_runner()
     speaker_identifier = _optional_speaker_id(
         args.speaker_profiles, args.speaker_model
     )
@@ -1913,6 +2022,7 @@ def main(argv=None) -> int:
         diary_workflow=diary_workflow,
         learning_queue=learning_queue,
         briefing_runner=briefing_runner,
+        cannanas_runner=cannanas_runner,
         speaker_identifier=speaker_identifier,
         default_speaker=args.speaker,
         ducking=ducking,
