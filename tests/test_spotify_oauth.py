@@ -95,6 +95,14 @@ class SpotifyOAuthStoreTests(unittest.TestCase):
             ),
         )
 
+    def test_default_store_path_can_be_overridden_for_isolated_deployment(self):
+        with mock.patch.dict(
+            os.environ,
+            {"JARVIS_SPOTIFY_OAUTH_FILE": str(self.store_path)},
+            clear=False,
+        ):
+            self.assertEqual(OAuthStore().path, self.store_path)
+
     def test_store_round_trip_is_private_and_six_calendar_months(self):
         store = OAuthStore(self.store_path)
         store.save(authorized_record())

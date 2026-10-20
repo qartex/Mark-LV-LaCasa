@@ -148,8 +148,10 @@ def _record_from_data(data: object) -> OAuthRecord:
 
 
 class OAuthStore:
-    def __init__(self, path: Path = Path(__file__).resolve().parents[1] / "config" / "spotify_oauth.json"):
-        self.path = Path(path)
+    def __init__(self, path: Path | None = None):
+        default_path = Path(__file__).resolve().parents[1] / "config" / "spotify_oauth.json"
+        configured_path = os.environ.get("JARVIS_SPOTIFY_OAUTH_FILE")
+        self.path = Path(path if path is not None else configured_path or default_path)
 
     @staticmethod
     def _directory_flags() -> int:

@@ -16,6 +16,14 @@ class ESP32VoiceDeploymentTests(unittest.TestCase):
         self.assertIn("--learning-queue-dir", unit)
         self.assertIn("growraum-sprache-1-home-test.local", unit)
         self.assertIn("--relay-port 6053", unit)
+        self.assertIn(
+            "JARVIS_SPOTIFY_OAUTH_FILE=/home/lacasa/Mark-LV-LaCasa/config/spotify_oauth.json",
+            unit,
+        )
+        self.assertIn(
+            "JARVIS_CANNANAS_ADAPTER_COMMAND=/home/lacasa/cannanas-adapter/venv/bin/cannanas-mcp-adapter",
+            unit,
+        )
         self.assertNotIn("API_KEY=", unit)
         self.assertNotIn("CANNANAS_API_KEY=", unit)
 
