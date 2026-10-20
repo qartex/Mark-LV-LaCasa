@@ -536,6 +536,65 @@ class ReplyStreamingTests(unittest.IsolatedAsyncioTestCase):
 class MultiTurnConversationTests(unittest.IsolatedAsyncioTestCase):
     """A question from JARVIS must keep the microphone open for the answer."""
 
+    async def test_morning_greeting_speaks_the_host_briefing(self):
+        """A greeting must not depend on the model calling the tool."""
+
+        class BriefingEngine(FakeTurnEngine):
+            def __init__(self, *args, **kwargs):
+                super().__init__(transcript="Guten Morgen!", *args, **kwargs)
+                self.spoken = []
+
+            async def speak(self, text):
+                self.spoken.append(text)
+                return REPLY_PCM
+
+        engine = BriefingEngine()
+        b = make_bridge(
+            engine=engine,
+            briefing_runner=lambda key: "Guten Morgen, Head of Grow. Madrid: Blüte Tag 15.",
+        )
+        client = FakeVoiceClient()
+        _task, (start, stop, audio) = await _session_with_handlers(b, client)
+        await start(CONVERSATION_ID, 1, None, "hey jarvis")
+        await audio(LOUD_PCM, None)
+        await stop(False)
+        self.assertTrue(await _wait_for(client.saw_run_end))
+        self.assertEqual(
+            ["Guten Morgen, Head of Grow. Madrid: Blüte Tag 15."], engine.spoken
+        )
+        intent = next(
+            op for op in client.ops
+            if op[0] == "event" and op[1].name == "VOICE_ASSISTANT_INTENT_END"
+        )
+        self.assertIn("Head of Grow", intent[2]["speech"])
+        client.hang_up()
+        await _task
+
+    async def test_ordinary_question_keeps_the_model_answer(self):
+        class BriefingEngine(FakeTurnEngine):
+            def __init__(self, *args, **kwargs):
+                super().__init__(transcript="Madrid hat 20 Grad.", *args, **kwargs)
+                self.spoken = []
+
+            async def speak(self, text):
+                self.spoken.append(text)
+                return REPLY_PCM
+
+        engine = BriefingEngine()
+        b = make_bridge(
+            engine=engine, briefing_runner=lambda key: "Guten Morgen, Head of Grow."
+        )
+        client = FakeVoiceClient()
+        _task, (start, stop, audio) = await _session_with_handlers(b, client)
+        await start(CONVERSATION_ID, 1, None, "hey jarvis")
+        await audio(LOUD_PCM, None)
+        await stop(False)
+        self.assertTrue(await _wait_for(client.saw_run_end))
+        self.assertEqual([], engine.spoken)
+        client.hang_up()
+        await _task
+
+
     async def test_voice_identification_sets_the_speaker_for_the_turn(self):
         class IdentifyingEngine(FakeTurnEngine):
             def __init__(self, *args, **kwargs):

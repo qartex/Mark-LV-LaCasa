@@ -508,6 +508,27 @@ def _listen_cue_pcm() -> bytes:
     return bytes(cue)
 
 
+def _wants_briefing(transcript: str) -> bool:
+    """True for a spoken greeting/briefing request, in the host's own words.
+
+    The model is asked to call the briefing tool, but a morning greeting must
+    not depend on the model's goodwill: the bridge recognises these phrasings
+    itself and speaks the host-composed briefing instead.
+    """
+    text = " ".join(str(transcript or "").casefold().split())
+    text = text.strip(" .,!?;:")
+    if not text:
+        return False
+    candidates = {
+        "guten morgen", "guten morgen jarvis", "morgen", "morgen jarvis",
+        "hallo jarvis guten morgen", "briefing", "das briefing",
+        "mein briefing", "morgen briefing", "morgenbriefing",
+        "was steht an", "was steht heute an", "was steht fuer heute an",
+        "was habe ich heute vor", "was gibt es heute",
+    }
+    return text in candidates
+
+
 def _wants_followup(answer: str) -> bool:
     """Always keep the microphone open after a reply.
 
@@ -738,6 +759,17 @@ class GeminiTurnEngine:
 
     async def turn(self, mic_pcm: bytes) -> tuple[str, bytes]:
         return await asyncio.to_thread(self._turn_sync, mic_pcm)
+
+    def _tts_sync(self, text: str) -> bytes:
+        from google import genai  # lazy, optional dependency
+
+        return self._turn_with_key_rotation(
+            lambda _key: self._speech_on_key(genai, text)
+        )
+
+    async def speak(self, text: str) -> bytes:
+        """Render host-composed text (briefing) with the same voice/quota path."""
+        return await asyncio.to_thread(self._tts_sync, text)
 
     @staticmethod
     def _call_with_retries(client, model: str, contents, config):
@@ -1167,6 +1199,7 @@ class JarvisBridge:
         self._window_peak_rms = 0
         self._speaker_identifier = speaker_identifier
         self._default_speaker = str(default_speaker or "").strip().lower()
+        self._briefing_runner = briefing_runner
         setter = getattr(self.engine, "set_speaker", None)
         if self._default_speaker and callable(setter):
             setter(self._default_speaker)
@@ -1461,6 +1494,22 @@ class JarvisBridge:
         if self._default_speaker:
             setter(self._default_speaker)
 
+    def _host_briefing(self, transcript: str) -> str | None:
+        """Host-composed briefing for a spoken greeting, else None."""
+        if not _wants_briefing(transcript):
+            return None
+        runner = self._briefing_runner
+        if runner is None:
+            return None
+        try:
+            text = runner(getattr(self.engine, "_speaker", None))
+        except Exception as exc:
+            _LOG.info("briefing failed status=model-answer error_type=%s",
+                      type(exc).__name__)
+            return None
+        text = str(text or "").strip()
+        return text or None
+
     async def _run_turn(self, voice) -> None:
         mic_pcm = b"".join(self._mic_chunks)
         self._mic_chunks = []  # take over the buffered audio for this one turn
@@ -1498,6 +1547,22 @@ class JarvisBridge:
                 await voice.send_voice_assistant_event(_voice_event("RUN_END"), {})
                 return
             transcript, reply_pcm = result
+            replacement = self._host_briefing(transcript)
+            if replacement is not None:
+                speak = getattr(self.engine, "speak", None)
+                if callable(speak):
+                    try:
+                        reply_pcm = await speak(replacement)
+                        transcript = replacement
+                        _LOG.info(
+                            "briefing spoken status=host-owned chars=%d",
+                            len(replacement),
+                        )
+                    except Exception as exc:
+                        _LOG.info(
+                            "briefing speak failed status=model-answer error_type=%s",
+                            type(exc).__name__,
+                        )
             if not self._stopped:
                 try:
                     consume_mute = getattr(self.engine, "consume_mute_request", None)
