@@ -74,20 +74,56 @@ class CannanasRoomDiaryWorkflow:
     Cannanas supports diaries linked directly to a zone. A spoken room therefore
     maps to that canonical zone in the adapter; only an explicitly named target
     uses the narrower plant/batch resolution path.
+
+    The measurements of the room come from the Home Assistant sensors, so the
+    gardener does not have to dictate them. The sensor source is a callable the
+    bridge injects; without it the entry is still written, only without values.
     """
 
-    def __init__(self, *, host=None) -> None:
+    def __init__(self, *, host=None, sensors=None) -> None:
         if host is None:
             from core.cannanas_host import get_host
 
             host = get_host()
         self.host = host
+        self._sensor_source = sensors
+
+    def use_sensors(self, source) -> None:
+        """Attach the callable that delivers the live grow sensors."""
+        self._sensor_source = source
+
+    def _sensors(self) -> dict:
+        """The live grow sensors; an unreadable source yields no sensors."""
+        if self._sensor_source is None:
+            return {}
+        try:
+            sensors = self._sensor_source()
+        except Exception:
+            # The measured values are a bonus, never a precondition: a broken
+            # sensor source must not cost the gardener his diary entry.
+            return {}
+        return dict(sensors) if isinstance(sensors, dict) else {}
+
+    def _measurements(self, room: str, spoken) -> dict:
+        """The measured values of the room, unless the gardener spoke his own.
+
+        Spoken values win: the gardener who dictates a value knows better than
+        a sensor that may lag behind.
+        """
+        if isinstance(spoken, dict) and spoken:
+            return dict(spoken)
+        if not room:
+            return {}
+        from core.growroom_measurements import room_measurements
+
+        return room_measurements(room, self._sensors())
 
     def prepare(self, parameters: dict, turn) -> str:
         parameters = dict(parameters or {})
         room = str(parameters.get("room") or "").strip()
         text = str(parameters.get("text") or "").strip()
         target = str(parameters.get("target") or "").strip()
+        spoken_measurements = parameters.get("measurements")
         if not room:
             return "Für welchen Raum soll ich einen Tagebucheintrag vorbereiten?"
         if not text:
@@ -95,17 +131,25 @@ class CannanasRoomDiaryWorkflow:
         if turn is None or not getattr(turn, "stable_device_id", None):
             return "Der Tagebucheintrag ist nur über ein zugeordnetes Gerät möglich."
         try:
-            return self._prepare_write(room=room, text=text, target=target, turn=turn)
+            return self._prepare_write(
+                room=room, text=text, target=target, turn=turn,
+                measurements=spoken_measurements,
+            )
         except Exception:
             # Availability and transport problems degrade to one bounded spoken
             # notice; upstream details never reach the model or the speaker.
             return _CANNANAS_UNAVAILABLE
 
-    def _prepare_write(self, *, room: str, text: str, target: str, turn) -> str:
+    def _prepare_write(self, *, room: str, text: str, target: str, turn,
+                       measurements=None) -> str:
         if not target:
+            values = self._measurements(room, measurements)
+            params = {"room": room, "text": text}
+            if values:
+                params["measurements"] = values
             result = self.host.prepare(
                 "prepare_diary_create",
-                {"room": room, "text": text},
+                params,
                 turn,
             )
             summary = str(result.get("summary") or "").strip()
@@ -175,9 +219,15 @@ class CannanasRoomDiaryWorkflow:
                 "Für welche Pflanze oder Charge soll der Eintrag gelten?"
             )
 
+        values = self._measurements(room, measurements)
         result = self.host.prepare(
             "prepare_diary_create",
-            {"room": room, "plant_name": selected, "text": text},
+            {
+                "room": room,
+                "plant_name": selected,
+                "text": text,
+                **({"measurements": values} if values else {}),
+            },
             turn,
         )
         summary = str(result.get("summary") or "").strip()

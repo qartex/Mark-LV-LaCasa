@@ -1976,6 +1976,11 @@ def _optional_voice_workflows(queue_dir):
     queue = None
     try:
         diary = workflows.CannanasRoomDiaryWorkflow()
+        # The diary entry takes its measured values from the same Home
+        # Assistant sensors the briefing reads.
+        attach = getattr(diary, "use_sensors", None)
+        if callable(attach):
+            attach(_home_assistant_sensors)
     except Exception as exc:
         _LOG.info(
             "voice workflow unavailable status=disabled workflow=cannanas error_type=%s",
@@ -2080,18 +2085,30 @@ def _optional_speaker_id(profiles_path: str, model_path: str):
 
 def _briefing_temperatures() -> dict:
     """Live room temperatures keyed by the spoken room name (Celsius)."""
-    zones: dict[str, float] = {}
-    for state in _ha_states(JARVIS_CONFIG_PATH):
-        entity_id = str(state.get("entity_id", ""))
-        if not (entity_id.startswith("sensor.zonen_")
-                and entity_id.endswith("_temperatur_celsius")):
-            continue
-        room = entity_id[len("sensor.zonen_"):-len("_temperatur_celsius")]
-        try:
-            zones[room.strip().title()] = float(state.get("state"))
-        except (TypeError, ValueError):
-            continue
-    return zones
+    from core.growroom_measurements import zone_temperatures
+
+    return zone_temperatures(_ha_states(JARVIS_CONFIG_PATH))
+
+
+def _home_assistant_sensors() -> dict:
+    """The live grow sensors, keyed by the sensor name without the domain.
+
+    The diary entry reads its measured values from this one source, so the
+    briefing and the diary speak the same number for the same room. A Home
+    Assistant that cannot be read yields no sensors: the diary entry is then
+    written without values instead of failing.
+    """
+    from core.growroom_measurements import zone_sensor_values
+
+    try:
+        states = _ha_states(JARVIS_CONFIG_PATH)
+    except Exception as exc:
+        _LOG.info(
+            "grow sensors unavailable status=disabled error_type=%s",
+            type(exc).__name__,
+        )
+        return {}
+    return zone_sensor_values(states)
 
 
 def main(argv=None) -> int:

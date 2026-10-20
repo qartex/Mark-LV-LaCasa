@@ -235,6 +235,117 @@ class DiaryWorkflowTests(unittest.TestCase):
         self.assertEqual([(turn, "ja")], host.evaluations)
 
 
+class DiaryMeasurementTests(unittest.TestCase):
+    """A room diary carries the measured values of that room."""
+
+    SENSORS = {
+        "zonen_madrid_temperatur_celsius": 24.2,
+        "zonen_madrid_luftfeuchte": 61.0,
+        "zonen_helsinki_temperatur_celsius": 19.8,
+    }
+
+    def _turn(self):
+        return SimpleNamespace(
+            stable_device_id="esp32-growroom-1",
+            auth_session_id="auth-digest",
+            capture_id="capture-1",
+            user_turn_id=7,
+        )
+
+    def test_a_room_diary_takes_the_measured_values(self):
+        from core.esp32_voice_workflows import CannanasRoomDiaryWorkflow
+
+        host = StubCannanasHost([])
+        workflow = CannanasRoomDiaryWorkflow(
+            host=host, sensors=lambda: dict(self.SENSORS)
+        )
+        answer = workflow.prepare(
+            {"room": "Madrid", "text": "Blätter kontrolliert."}, self._turn()
+        )
+        self.assertIn("Vorschau", answer)
+        params = host.prepares[0][1]
+        self.assertEqual(24.2, params["measurements"]["air_temperature"])
+        self.assertEqual(61.0, params["measurements"]["air_humidity"])
+
+    def test_a_diary_without_a_room_keeps_no_measurements(self):
+        from core.esp32_voice_workflows import CannanasRoomDiaryWorkflow
+
+        host = StubCannanasHost([])
+        workflow = CannanasRoomDiaryWorkflow(
+            host=host, sensors=lambda: dict(self.SENSORS)
+        )
+        workflow.prepare(
+            {"room": "Helsinki", "text": "Blätter kontrolliert."}, self._turn()
+        )
+        params = host.prepares[0][1]
+        self.assertEqual(19.8, params["measurements"]["air_temperature"])
+        self.assertNotIn("air_humidity", params["measurements"])
+
+    def test_a_diary_without_sensors_still_works(self):
+        from core.esp32_voice_workflows import CannanasRoomDiaryWorkflow
+
+        host = StubCannanasHost([])
+        workflow = CannanasRoomDiaryWorkflow(host=host)
+        answer = workflow.prepare(
+            {"room": "Madrid", "text": "Blätter kontrolliert."}, self._turn()
+        )
+        self.assertIn("Vorschau", answer)
+        self.assertNotIn("measurements", host.prepares[0][1])
+
+    def test_a_broken_sensor_source_does_not_fail_the_entry(self):
+        from core.esp32_voice_workflows import CannanasRoomDiaryWorkflow
+
+        def broken():
+            raise RuntimeError("sensor source down")
+
+        host = StubCannanasHost([])
+        workflow = CannanasRoomDiaryWorkflow(host=host, sensors=broken)
+        answer = workflow.prepare(
+            {"room": "Madrid", "text": "Blätter kontrolliert."}, self._turn()
+        )
+        self.assertIn("Vorschau", answer)
+        self.assertNotIn("measurements", host.prepares[0][1])
+
+    def test_spoken_measurements_win_over_the_measured_values(self):
+        from core.esp32_voice_workflows import CannanasRoomDiaryWorkflow
+
+        host = StubCannanasHost([])
+        workflow = CannanasRoomDiaryWorkflow(
+            host=host, sensors=lambda: dict(self.SENSORS)
+        )
+        workflow.prepare(
+            {
+                "room": "Madrid",
+                "text": "Blätter kontrolliert.",
+                "measurements": {"air_temperature": 30.0},
+            },
+            self._turn(),
+        )
+        measurements = host.prepares[0][1]["measurements"]
+        self.assertEqual(30.0, measurements["air_temperature"])
+        self.assertNotIn("air_humidity", measurements)
+
+    def test_a_plant_entry_in_a_room_keeps_the_measured_values(self):
+        from core.esp32_voice_workflows import CannanasRoomDiaryWorkflow
+
+        host = StubCannanasHost([
+            {"id": "plant-1", "name": "Helsinki #1"},
+        ])
+        workflow = CannanasRoomDiaryWorkflow(
+            host=host, sensors=lambda: dict(self.SENSORS)
+        )
+        workflow.prepare(
+            {
+                "room": "Helsinki",
+                "target": "Helsinki #1",
+                "text": "Blätter kontrolliert.",
+            },
+            self._turn(),
+        )
+        measurements = host.prepares[0][1]["measurements"]
+        self.assertEqual(19.8, measurements["air_temperature"])
+
+
 class LearningQueueTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
