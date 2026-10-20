@@ -127,6 +127,20 @@ class TestReadActionCallsAdapterAndProjects(PluginFixture):
 
 
 class TestPrepareStoresPendingAndReturnsPreview(PluginFixture):
+    def test_prepare_binding_uses_the_adapters_own_boot_id(self):
+        """The adapter fences writes on ITS boot id, not the host process id."""
+        self.client.results['get_adapter_info'] = {
+            'ok': True, 'config': {'boot_id': 'adapter-boot-1'}}
+        self.client.results['prepare_plant_create'] = {
+            'ok': True, 'requires_confirmation': True,
+            'confirmation_token': 'opaque-token-1', 'payload_hash': 'payload-hash-1',
+            'preview': {'plant_name': 'Brain Damage'}, 'club_id': 'club-fixed'}
+        self.run_plugin({'action': 'prepare_plant_create', 'plant_name':
+                         'Brain Damage', 'room': 'Madrid', 'status': 'SEED'})
+        args = self.client.calls[-1]['arguments']
+        self.assertEqual('adapter-boot-1', args['binding']['adapter_boot_id'])
+        self.assertNotEqual(self.host.boot_id(), args['binding']['adapter_boot_id'])
+
     def test_room_diary_maps_to_adapter_zone_argument(self):
         binding = {"stable_device_id": "esp32-growroom-1"}
         tool, args = prepare_tool_call(
@@ -154,13 +168,16 @@ class TestPrepareStoresPendingAndReturnsPreview(PluginFixture):
             'action': 'prepare_plant_create', 'plant_name': 'Brain Damage',
             'room': 'Madrid', 'status': 'SEED',
             'query': 'Brain Damage Strain'})
-        tool, args = self.client.calls[0]['tool'], self.client.calls[0]['arguments']
+        # The host first reads the adapter's own boot id for the write fence.
+        prepares = [c for c in self.client.calls if c['tool'] == 'prepare_plant_create']
+        tool, args = prepares[0]['tool'], prepares[0]['arguments']
         self.assertEqual(tool, 'prepare_plant_create')
         self.assertEqual(args['plant_name'], 'Brain Damage')
         binding = args['binding']
         self.assertEqual(binding['stable_device_id'], 'device-durable-1')
         self.assertEqual(binding['prepared_turn_id'], '20')
-        self.assertEqual(binding['adapter_boot_id'], self.host.boot_id())
+        self.assertEqual(binding['adapter_boot_id'], self.host.boot_id(),
+                         'without an adapter report the host fence stays')
         pending = self.host.coordinator.current('device-durable-1')
         self.assertIsNotNone(pending)
         self.assertEqual(pending.payload_hash, 'payload-hash-1')
@@ -190,7 +207,10 @@ class TestPrepareZeroPOSTs(PluginFixture):
                                   'plant_name': 'X', 'room': 'Madrid',
                                   'status': 'SEED'}, host=host)
         self.assertTrue(result['requires_confirmation'])
-        self.assertEqual([c['tool'] for c in client.calls], ['prepare_plant_create'])
+        # Only the boot-id read precedes the single prepare: still exactly one
+        # prepare and never a confirm.
+        self.assertEqual([c['tool'] for c in client.calls],
+                         ['get_adapter_info', 'prepare_plant_create'])
 
 
 class TestUnknownActionRefused(PluginFixture):

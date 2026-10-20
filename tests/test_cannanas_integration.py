@@ -93,6 +93,15 @@ class IntegrationFixture(unittest.TestCase):
 
 
 class TestHostConfirmConsumesAtomicallyAndPostsOnce(IntegrationFixture):
+    def test_prepare_binding_matches_the_live_adapter_boot_id(self):
+        turn = make_turn(user_turn_id=11)
+        self.host.prepare('prepare_diary_create',
+                          {'room': 'Madrid', 'text': 'Zonenbindung'}, turn)
+        prepare_calls = [c for c in self.client.calls if c['tool'] == 'prepare_diary_create']
+        self.assertTrue(prepare_calls, self.client.calls)
+        self.assertEqual('fake-boot-1',
+                         prepare_calls[-1]['arguments']['binding']['adapter_boot_id'])
+
     def prepare(self, turn):
         # Real prepare flow: adapter prepare → host stores the pending.
         self.host.prepare('prepare_plant_create', {

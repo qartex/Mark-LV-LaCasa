@@ -131,8 +131,13 @@ def _unavailability_text(missing) -> str:
     return _UNAVAILABLE
 
 
-def prepare_binding_for(turn) -> dict | None:
-    """The adapter binding from a finalized turn; None without a device."""
+def prepare_binding_for(turn, adapter_boot: str | None = None) -> dict | None:
+    """The adapter binding from a finalized turn; None without a device.
+
+    ``adapter_boot`` must be the adapter process's own boot id: the adapter
+    rejects a confirm whose binding carries any other one. The host process id
+    is only the last-resort fence when the adapter never reported its own.
+    """
     stable_device_id = getattr(turn, 'stable_device_id', None)
     if not stable_device_id:
         return None
@@ -141,7 +146,7 @@ def prepare_binding_for(turn) -> dict | None:
         'stable_device_id': stable_device_id,
         'auth_session_id': getattr(turn, 'auth_session_id', ''),
         'prepared_turn_id': str(getattr(turn, 'user_turn_id', '')),
-        'adapter_boot_id': adapter_boot_id(),
+        'adapter_boot_id': adapter_boot or adapter_boot_id(),
     }
 
 
@@ -412,7 +417,32 @@ class CannanasHost:
 
     def on_client_restart(self) -> None:
         """Client restart fence: adapter restart invalidates pending confirms."""
+        self._adapter_boot_cache = (None, '')
         self.coordinator.invalidate_all_on_adapter_restart()
+
+    def _adapter_boot(self) -> str:
+        """The live adapter's own boot id, cached per client generation.
+
+        The adapter fences every confirm on its own boot id, so the host
+        process uuid can never pass. If the id cannot be read, the host uuid
+        stays and the adapter refuses the confirm itself: fail closed, never a
+        wrong write.
+        """
+        client = self.require_client()
+        cached_client, cached_value = getattr(self, '_adapter_boot_cache', (None, ''))
+        if cached_client is client and cached_value:
+            return cached_value
+        value = ''
+        try:
+            info = client.call('get_adapter_info', {})
+            config = info.get('config') if isinstance(info, dict) else None
+            value = str((config or {}).get('boot_id') or '').strip()
+        except Exception:
+            value = ''
+        if value:
+            self._adapter_boot_cache = (client, value)
+            return value
+        return self._boot
 
     # ── client lifecycle ───────────────────────────────────────────────────
 
@@ -508,7 +538,7 @@ class CannanasHost:
             raise CannanasUnavailable(
                 'Cannanas-Schreibvorgänge sind deaktiviert: '
                 'Release-Verifizierung fehlgeschlagen.')
-        binding = prepare_binding_for(turn)
+        binding = prepare_binding_for(turn, self._adapter_boot())
         if binding is None:
             raise CannanasUnavailable(
                 'Cannanas-Änderungen sind nur für zugeordnete Geräte möglich.')

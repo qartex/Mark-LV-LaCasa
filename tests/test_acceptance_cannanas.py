@@ -515,8 +515,11 @@ class TestCriterion27RestartFencesPending(AcceptanceFixture):
         outcome = restarted_host.evaluate(later, 'ja')
         self.assertEqual(outcome['classification'], 'succeeded')
         self.assertEqual(self.client.calls[-1]['tool'], 'confirm_plant_create')
+        # One bounded read of the adapter's own boot id precedes the prepare:
+        # the write fence belongs to the adapter process, not to JARVIS.
         self.assertEqual(sorted(c['tool'] for c in self.client.calls),
-                         ['confirm_plant_create', 'prepare_plant_create'])
+                         ['confirm_plant_create', 'get_adapter_info',
+                          'prepare_plant_create'])
 
     def test_adapter_restart_invalidates_every_pending_preview(self):
         pending = self.prepare_pending()
