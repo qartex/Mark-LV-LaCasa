@@ -211,6 +211,52 @@ def build_read_summary(prefix, records, exact, truncated) -> str:
     return spoken
 
 
+# ── the watering interval (spoken) ───────────────────────────────────────
+#
+# The adapter answers with the days each room went without water and the
+# last entry of every room. The gardener hears one German sentence per
+# room; a room without a watering entry stays unknown and is not guessed.
+
+
+def _watering_payload(result: dict) -> dict:
+    """The spoken answer to "how long did each room go without water".
+
+    The rooms become the records of the read, and the summary names every
+    room with the days it went without water. A room whose interval is
+    unknown says so: "unbekannt" is an answer, a missing room is not.
+    """
+    raeume = result.get('raeume') or []
+    records = []
+    parts = []
+    for entry in raeume:
+        if not isinstance(entry, dict):
+            continue
+        raum = str(entry.get('raum') or '').strip()
+        if not raum:
+            continue
+        days = entry.get('tage_seit_letztem_gies')
+        if days is None:
+            spoken_days = 'unbekannt'
+        else:
+            try:
+                spoken_days = f'{int(days)} Tage'
+            except (TypeError, ValueError):
+                spoken_days = 'unbekannt'
+        records.append({
+            'raum': raum,
+            'tage_seit_letztem_gies': days,
+            'letzter_eintrag': str(entry.get('letzter_eintrag') or ''),
+        })
+        parts.append(f'{raum}: {spoken_days} ohne Giessen')
+    hints = (result.get('hints') or {}).get('giessen') or []
+    summary = ('Giess-Intervalle: ' + ', '.join(parts) + '.') if parts \
+        else 'Giess-Intervalle: keine Eintraege.'
+    if hints:
+        summary += ' Giessen noetig: ' + ', '.join(str(name) for name in hints) + '.'
+    return {'summary': summary, 'records': records,
+            'total_records': len(records)}
+
+
 def _record_payload(prefix, result, exact, truncated) -> dict:
     records = [_compact_record(record) for record in _result_records(result)]
     return {
@@ -241,6 +287,7 @@ def read_tool_call(action: str, params: dict) -> 'tuple[str, dict, str]':
     query = str(params.get('query') or '').strip()
     room = str(params.get('room') or '').strip()
     status = str(params.get('status') or '').strip()
+    plant_name = str(params.get('plant_name') or '').strip()
     if action == 'overview':
         return 'get_cannanas_overview', {}, 'Übersicht'
     if action == 'find_zones':
@@ -287,6 +334,12 @@ def read_tool_call(action: str, params: dict) -> 'tuple[str, dict, str]':
         return 'get_grow_config', {}, 'Grow-Einstellungen'
     if action == 'zone_plant_status':
         return 'zone_plant_status', {'room': room}, 'Pflanzenstatus'
+    if action == 'watering_intervals':
+        # The gardener names the room. The room may stand in the
+        # target slot the model chose, so every spoken name of the
+        # room is taken; the adapter resolves it to a zone.
+        return ('watering_intervals',
+                {'room': plant_name or room or query}, 'Giess-Intervall')
     raise ValueError(f'unknown read action: {action}')
 
 
@@ -992,6 +1045,8 @@ class CannanasHost:
             payload['summary'] = summary
             payload['records'] = []
         self._audit_read(action)
+        if action == 'watering_intervals':
+            payload.update(_watering_payload(result))
         return payload
 
     def _audit_read(self, action: str) -> None:

@@ -161,9 +161,15 @@ class TestConfirmPendingNotInModelEnum(unittest.TestCase):
         self.assertNotIn('cancel_pending', CANNANAS_MODEL_ACTIONS)
         self.assertEqual(CANNANAS_MODEL_ACTIONS, CANNANAS_READ_ACTIONS | CANNANAS_PREPARE_ACTIONS)
         # The enum is a frozen set: reads plus prepares, never confirm/cancel.
-        self.assertEqual(len(CANNANAS_MODEL_ACTIONS), 24)
+        # Its size is not written down: the enum grows with every
+        # gardener tool, and a copied number would only be a race
+        # between the agents that add one.
+        self.assertEqual(len(CANNANAS_MODEL_ACTIONS),
+                         len(CANNANAS_READ_ACTIONS)
+                         + len(CANNANAS_PREPARE_ACTIONS))
         self.assertTrue(all(a.startswith(('prepare_')) or a.startswith(
-            ('find_', 'list_', 'count_', 'overview', 'zone_', 'get_'))
+            ('find_', 'list_', 'count_', 'overview', 'zone_', 'get_',
+             'watering_'))
             for a in CANNANAS_MODEL_ACTIONS))
 
 

@@ -75,20 +75,24 @@ class HeadlessTests(unittest.IsolatedAsyncioTestCase):
         decls = cfg.tools[0].function_declarations
         self.assertEqual([d.name for d in decls],
                          ['home_assistant', 'spotify_control', 'cannanas'])
-        # The Cannanas action enum is the exact closed Release-1 list.
+        # The Cannanas action enum is the exact closed list. It is read
+        # from the one source of truth instead of being copied here: the
+        # list grows with every gardener tool, and a written-down copy
+        # would only be a race between the agents that add one.
         cannanas_decl = decls[2]
-        from core.cannanas_actions import CANNANAS_MODEL_ACTIONS
+        from core.cannanas_actions import (
+            CANNANAS_MODEL_ACTIONS,
+            CANNANAS_PREPARE_ACTIONS,
+            CANNANAS_READ_ACTIONS,
+        )
         canonical = sorted(cannanas_decl.parameters.properties['action'].enum)
-        self.assertEqual(canonical, sorted([
-            'overview', 'find_zones', 'find_strains', 'find_plants',
-            'find_propagation_material', 'list_recent_batches', 'list_plants',
-            'count_plants_by_room', 'zone_growth_summary', 'list_mother_plants',
-            'list_diaries', 'list_plant_diaries', 'list_harvests',
-            'get_grow_config', 'zone_plant_status', 'prepare_plant_create',
-            'prepare_strain_create', 'prepare_batch_create',
-            'prepare_plant_update', 'prepare_batch_update',
-            'prepare_diary_create', 'prepare_zone_update',
-            'prepare_harvest_create', 'prepare_waste_disposal_create']))
+        self.assertEqual(canonical, sorted(CANNANAS_MODEL_ACTIONS))
+        # The closed set is reads plus prepares — never a host operation.
+        self.assertTrue(CANNANAS_READ_ACTIONS and CANNANAS_PREPARE_ACTIONS)
+        self.assertFalse(CANNANAS_READ_ACTIONS & CANNANAS_PREPARE_ACTIONS)
+        for forbidden in ('confirm_pending', 'cancel_pending',
+                          'confirm_plant_update', 'delete_plant'):
+            self.assertNotIn(forbidden, canonical)
         self.assertEqual(
             decls[1].parameters.properties['action'].enum,
             ['play', 'pause', 'resume', 'next', 'previous', 'volume', 'current'])

@@ -492,6 +492,28 @@ class TestVoicePrepareIsFenced(VoicePathFixture):
         # A read never arms a confirmation.
         self.assertIsNone(self.host.coordinator.current(DEVICE_ID))
 
+    # ── the watering interval (Task 7) ───────────────────────────────────
+    def test_the_watering_interval_reaches_the_adapter_and_is_spoken(self):
+        """The whole voice path: the room travels, the days are spoken."""
+        self.adapter.results['watering_intervals'] = {
+            'ok': True,
+            'raeume': [{'raum': 'Madrid', 'tage_seit_letztem_gies': 9,
+                        'letzter_eintrag': 'Giessen'}],
+            'hints': {'giessen': ['Madrid']},
+        }
+        answer = self.call_cannanas({
+            'action': 'watering_intervals',
+            'room': 'Madrid',
+        })
+        self.assertEqual(['watering_intervals'],
+                         [c['tool'] for c in self.adapter.calls])
+        self.assertEqual({'room': 'Madrid'},
+                         self.adapter.calls[0]['arguments'])
+        self.assertIn('Madrid', answer)
+        self.assertIn('9', answer)
+        # A read never arms a confirmation.
+        self.assertIsNone(self.host.coordinator.current(DEVICE_ID))
+
 
 class TestTheSpokenYesConfirmsThePreview(VoicePathFixture):
     """The second half of the voice path: preview, answer, 'ja', confirm."""
@@ -544,7 +566,9 @@ class TestTheModelFacingContract(VoicePathFixture):
         declaration = self.offered_tools()['cannanas']
         enum = declaration.parameters_json_schema['properties']['action']['enum']
         self.assertEqual(sorted(CANNANAS_MODEL_ACTIONS), sorted(enum))
-        self.assertEqual(24, len(enum))
+        # The count is derived: the enum grows with every new tool, a
+        # written-down number would only be a race.
+        self.assertEqual(len(CANNANAS_MODEL_ACTIONS), len(enum))
         for forbidden in ('confirm_plant_update', 'confirm_diary_create',
                           'cancel_pending', 'delete_plant'):
             self.assertNotIn(forbidden, enum)

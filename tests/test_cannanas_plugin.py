@@ -139,6 +139,53 @@ class TestReadActionCallsAdapterAndProjects(PluginFixture):
         self.assertNotIn('closedresourceerror', result['summary'])
         self.assertIn('Cannanas', result['summary'])
 
+    # ── the watering interval (Task 7) ───────────────────────────────────
+    def test_the_watering_interval_read_forwards_the_room(self):
+        from core.cannanas_host import read_tool_call
+
+        tool, args, prefix = read_tool_call("watering_intervals", {"room": "Madrid"})
+        self.assertEqual("watering_intervals", tool)
+        self.assertEqual("Madrid", args["room"])
+        self.assertTrue(prefix)
+
+    def test_the_watering_interval_read_without_a_room_asks_for_every_room(self):
+        from core.cannanas_host import read_tool_call
+
+        tool, args, _prefix = read_tool_call("watering_intervals", {})
+        self.assertEqual("watering_intervals", tool)
+        self.assertEqual("", args["room"])
+
+    def test_the_watering_interval_read_accepts_the_room_as_the_search_term(self):
+        """The gardener names the room in the slot the model chose."""
+        from core.cannanas_host import read_tool_call
+
+        _tool, args, _prefix = read_tool_call("watering_intervals", {"query": "Madrid"})
+        self.assertEqual("Madrid", args["room"])
+
+    def test_the_watering_interval_is_a_model_action(self):
+        from core.cannanas_actions import (
+            CANNANAS_MODEL_ACTIONS,
+            CANNANAS_READ_ACTIONS,
+        )
+
+        self.assertIn("watering_intervals", CANNANAS_READ_ACTIONS)
+        self.assertIn("watering_intervals", CANNANAS_MODEL_ACTIONS)
+
+    def test_the_watering_interval_read_reaches_the_adapter(self):
+        self.client.results['watering_intervals'] = {
+            'ok': True,
+            'raeume': [{'raum': 'Madrid', 'tage_seit_letztem_gies': 9,
+                        'letzter_eintrag': 'Giessen'}],
+            'hints': {'giessen': ['Madrid']},
+        }
+        result = self.run_plugin({'action': 'watering_intervals', 'room': 'Madrid'})
+        self.assertEqual('watering_intervals', self.client.calls[0]['tool'])
+        self.assertEqual({'room': 'Madrid'}, self.client.calls[0]['arguments'])
+        self.assertTrue(result['ok'])
+        # The gardener hears the room and the days without water.
+        self.assertIn('Madrid', result['summary'])
+        self.assertIn('9', result['summary'])
+
 
 class TestPrepareStoresPendingAndReturnsPreview(PluginFixture):
     def test_prepare_binding_uses_the_adapters_own_boot_id(self):

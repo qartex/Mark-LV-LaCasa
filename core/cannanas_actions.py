@@ -19,6 +19,7 @@ CANNANAS_READ_ACTIONS = frozenset({
     'list_harvests',
     'get_grow_config',
     'zone_plant_status',
+    'watering_intervals',
 })
 
 CANNANAS_PREPARE_ACTIONS = frozenset({
