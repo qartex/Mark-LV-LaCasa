@@ -69,11 +69,11 @@ def _record_batch(record: dict) -> tuple[str, str] | None:
 
 
 class CannanasRoomDiaryWorkflow:
-    """Resolve a spoken room to one plant/batch, then prepare one diary write.
+    """Prepare a zone diary by default, with optional plant/batch targeting.
 
-    Cannanas diaries bind to a plant or batch, never directly to a room. A room
-    containing one shared batch resolves automatically. Ambiguous rooms are
-    read-only until the speaker names one of the listed plants/batches.
+    Cannanas supports diaries linked directly to a zone. A spoken room therefore
+    maps to that canonical zone in the adapter; only an explicitly named target
+    uses the narrower plant/batch resolution path.
     """
 
     def __init__(self, *, host=None) -> None:
@@ -102,6 +102,17 @@ class CannanasRoomDiaryWorkflow:
             return _CANNANAS_UNAVAILABLE
 
     def _prepare_write(self, *, room: str, text: str, target: str, turn) -> str:
+        if not target:
+            result = self.host.prepare(
+                "prepare_diary_create",
+                {"room": room, "text": text},
+                turn,
+            )
+            summary = str(result.get("summary") or "").strip()
+            if not summary:
+                return "Die Tagebuch-Vorschau konnte nicht erstellt werden."
+            return summary
+
         listing = self.host.call_read(
             "list_plants", {"room": room, "count": 25}
         )

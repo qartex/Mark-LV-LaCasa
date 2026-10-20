@@ -9,7 +9,7 @@ from types import SimpleNamespace as NS
 from core.cannanas_actions import CANNANAS_MODEL_ACTIONS
 from core.cannanas_client import CannanasUnavailable
 from core.cannanas_confirmation import ConfirmationCoordinator
-from core.cannanas_host import CannanasHost
+from core.cannanas_host import CannanasHost, prepare_tool_call
 from core.cannanas_audit import CannanasAudit
 from core.headless import tool_allowed, trusted_headless_registry
 from core.turn_provenance import CHANNEL_PHONE_PCM, IngressEnvelope
@@ -127,6 +127,19 @@ class TestReadActionCallsAdapterAndProjects(PluginFixture):
 
 
 class TestPrepareStoresPendingAndReturnsPreview(PluginFixture):
+    def test_room_diary_maps_to_adapter_zone_argument(self):
+        binding = {"stable_device_id": "esp32-growroom-1"}
+        tool, args = prepare_tool_call(
+            "prepare_diary_create",
+            {"room": "Madrid", "text": "Heute gegossen."},
+            binding,
+        )
+        self.assertEqual("prepare_diary_create", tool)
+        self.assertEqual("Madrid", args["room"])
+        self.assertEqual("Heute gegossen.", args["text"])
+        self.assertNotIn("plant_or_batch", args)
+        self.assertIs(binding, args["binding"])
+
     def test_prepare_response_maps_to_adapter_and_stores_pending(self):
         self.client.results['prepare_plant_create'] = {
             'ok': True,

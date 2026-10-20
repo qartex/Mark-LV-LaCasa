@@ -56,7 +56,7 @@ class DiaryWorkflowTests(unittest.TestCase):
             user_turn_id=7,
         )
 
-    def test_room_with_one_shared_batch_prepares_one_audited_diary(self):
+    def test_room_prepares_one_zone_diary_without_plant_lookup(self):
         from core.esp32_voice_workflows import CannanasRoomDiaryWorkflow
 
         host = StubCannanasHost([
@@ -81,13 +81,12 @@ class DiaryWorkflowTests(unittest.TestCase):
         )
 
         self.assertIn("Vorschau", answer)
-        self.assertEqual(
-            [("list_plants", {"room": "Helsinki", "count": 25})], host.reads
-        )
+        self.assertEqual([], host.reads)
         self.assertEqual(1, len(host.prepares))
         action, params, prepared_turn = host.prepares[0]
         self.assertEqual("prepare_diary_create", action)
-        self.assertEqual("batch-4", params["plant_name"])
+        self.assertEqual("Helsinki", params["room"])
+        self.assertNotIn("plant_name", params)
         self.assertEqual("Blätter heute kontrolliert.", params["text"])
         self.assertIs(turn, prepared_turn)
 
@@ -104,7 +103,7 @@ class DiaryWorkflowTests(unittest.TestCase):
         self.assertEqual([], host.reads)
         self.assertEqual([], host.prepares)
 
-    def test_ambiguous_room_asks_for_plant_or_batch_without_writing(self):
+    def test_room_with_many_plants_still_targets_the_zone(self):
         from core.esp32_voice_workflows import CannanasRoomDiaryWorkflow
 
         host = StubCannanasHost([
@@ -114,10 +113,9 @@ class DiaryWorkflowTests(unittest.TestCase):
         answer = CannanasRoomDiaryWorkflow(host=host).prepare(
             {"room": "Helsinki", "text": "Blätter kontrolliert."}, self._turn()
         )
-        self.assertIn("Brain Damage #1", answer)
-        self.assertIn("Ztilton #2", answer)
-        self.assertIn("welche Pflanze oder Charge", answer)
-        self.assertEqual([], host.prepares)
+        self.assertIn("Vorschau", answer)
+        self.assertEqual([], host.reads)
+        self.assertEqual("Helsinki", host.prepares[0][1]["room"])
 
     def test_explicit_target_must_belong_to_room(self):
         from core.esp32_voice_workflows import CannanasRoomDiaryWorkflow
@@ -180,7 +178,7 @@ class DiaryWorkflowTests(unittest.TestCase):
         self.assertIn("mehrere Ziele", answer)
         self.assertEqual([], host.prepares)
 
-    def test_incomplete_room_listing_never_guesses_write_target(self):
+    def test_zone_diary_does_not_depend_on_a_complete_plant_listing(self):
         from core.esp32_voice_workflows import CannanasRoomDiaryWorkflow
 
         host = StubCannanasHost(
@@ -189,14 +187,15 @@ class DiaryWorkflowTests(unittest.TestCase):
         answer = CannanasRoomDiaryWorkflow(host=host).prepare(
             {"room": "Helsinki", "text": "Blätter kontrolliert."}, self._turn()
         )
-        self.assertIn("nicht eindeutig", answer)
-        self.assertEqual([], host.prepares)
+        self.assertIn("Vorschau", answer)
+        self.assertEqual([], host.reads)
+        self.assertEqual("Helsinki", host.prepares[0][1]["room"])
 
     def test_cannanas_transport_failure_returns_bounded_spoken_notice(self):
         from core.esp32_voice_workflows import CannanasRoomDiaryWorkflow
 
         host = StubCannanasHost([])
-        host.call_read = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        host.prepare = lambda *_args, **_kwargs: (_ for _ in ()).throw(
             RuntimeError("secret upstream details")
         )
         answer = CannanasRoomDiaryWorkflow(host=host).prepare(
@@ -213,7 +212,12 @@ class DiaryWorkflowTests(unittest.TestCase):
             RuntimeError("secret upstream details")
         )
         answer = CannanasRoomDiaryWorkflow(host=host).prepare(
-            {"room": "Helsinki", "text": "Blätter kontrolliert."}, self._turn()
+            {
+                "room": "Helsinki",
+                "target": "Helsinki #1",
+                "text": "Blätter kontrolliert.",
+            },
+            self._turn(),
         )
         self.assertEqual("Cannanas ist derzeit nicht verfügbar. Bitte versuche es später erneut.", answer)
         self.assertNotIn("secret", answer)

@@ -578,7 +578,7 @@ class MultiTurnConversationTests(unittest.IsolatedAsyncioTestCase):
         client.hang_up()
         await _task
 
-    async def test_followup_start_gets_the_longer_window(self):
+    async def test_followup_start_gets_a_persistent_window(self):
         engine = FakeTurnEngine(transcript="Welcher Ort?")
         b = make_bridge(engine=engine, capture_window=0.05, followup_window=0.3)
         client = FakeVoiceClient()
@@ -591,8 +591,8 @@ class MultiTurnConversationTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(await _wait_for(client.saw_run_end))
             await start(CONVERSATION_ID, 1, None, "")
             self.assertTrue(
-                await _wait_for(lambda: any("idle_window=0.3" in l for l in logs)),
-                "a follow-up turn must wait longer for the user's answer",
+                await _wait_for(lambda: any("idle_window=persistent" in l for l in logs)),
+                "an active conversation must wait until the user speaks",
             )
         client.hang_up()
         await _task
@@ -631,7 +631,7 @@ class MultiTurnConversationTests(unittest.IsolatedAsyncioTestCase):
         client.hang_up()
         await _task
 
-    async def test_silent_followup_turn_ends_the_conversation(self):
+    async def test_silent_followup_turn_keeps_the_conversation_open(self):
         engine = FakeTurnEngine(transcript="Welcher Ort?")
         b = make_bridge(engine=engine, capture_window=0.05, followup_window=0.05)
         client = FakeVoiceClient()
@@ -653,7 +653,7 @@ class MultiTurnConversationTests(unittest.IsolatedAsyncioTestCase):
         client.hang_up()
         await _task
 
-    async def test_automatic_followup_with_repeated_wake_phrase_discards_room_noise(self):
+    async def test_automatic_followup_with_repeated_wake_phrase_waits_through_room_noise(self):
         engine = FakeTurnEngine(transcript="Was läuft gerade?")
         b = make_bridge(engine=engine, capture_window=0.03, followup_window=0.08)
         client = FakeVoiceClient()
@@ -670,15 +670,17 @@ class MultiTurnConversationTests(unittest.IsolatedAsyncioTestCase):
             # continue-conversation start, so pending state is authoritative.
             await start(CONVERSATION_ID, 1, None, "hey jarvis")
             await audio(b"\x01\x00" * 128, None)  # buffered room noise, no speech
-            self.assertTrue(await _wait_for(client.saw_run_end))
+            await asyncio.sleep(0.2)
 
         self.assertTrue(any("followup=True" in line for line in logs))
+        self.assertTrue(b._active)
+        self.assertFalse(client.saw_run_end())
         self.assertEqual(1, len(engine.calls), "room noise must not repeat the answer")
         client.hang_up()
         await _task
 
-    async def test_empty_followup_reopens_the_microphone_window(self):
-        """The user answers late: silent follow-ups must not close the talk."""
+    async def test_followup_waits_past_idle_window_until_the_user_speaks(self):
+        """Once woken, silence must not end the Mark-LV-style conversation."""
         engine = FakeTurnEngine(transcript="Welchen Raum?")
         b = make_bridge(engine=engine, capture_window=0.05, followup_window=0.05)
         client = FakeVoiceClient()
@@ -689,24 +691,51 @@ class MultiTurnConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await _wait_for(client.saw_run_end))
         self.assertEqual(1, len(engine.calls))
 
-        for _ in range(bridge.MAX_FOLLOWUP_EXTENSIONS):
-            client.ops.clear()
-            await start(CONVERSATION_ID, 1, None, "")
-            self.assertTrue(await _wait_for(client.saw_run_end))
-            client.ops.clear()
-
-        # After the last extension the conversation really closes.
         client.ops.clear()
         await start(CONVERSATION_ID, 1, None, "")
+        await asyncio.sleep(0.15)
+        self.assertTrue(b._active, "an active conversation must wait indefinitely")
+        self.assertFalse(client.saw_run_end())
+        self.assertEqual(1, len(engine.calls), "silence must never call the model")
+        client.hang_up()
+        await _task
+
+    async def test_silent_preroll_is_bounded_while_followup_waits(self):
+        b = make_bridge(followup_window=0.02)
+        client = FakeVoiceClient()
+        _task, (start, _stop, audio) = await _session_with_handlers(b, client)
+        b._followup_pending = True
+        await start(CONVERSATION_ID, 1, None, "")
+        quiet = b"\x01\x00" * 64
+        for _ in range(300):
+            await audio(quiet, None)
+        self.assertLessEqual(
+            sum(map(len, b._mic_chunks)),
+            bridge.DEFAULT_SAMPLE_RATE * 2,
+            "waiting forever must not grow the microphone buffer forever",
+        )
+        client.hang_up()
+        await _task
+
+    async def test_spoken_mute_request_returns_to_wake_word_only_mode(self):
+        class MutingEngine(FakeTurnEngine):
+            def consume_mute_request(self):
+                return True
+
+        engine = MutingEngine(transcript="Mikrofon ist stumm.")
+        b = make_bridge(engine=engine)
+        client = FakeVoiceClient()
+        _task, (start, stop, audio) = await _session_with_handlers(b, client)
+        await start(CONVERSATION_ID, 1, None, "hey jarvis")
+        await audio(LOUD_PCM, None)
         await stop(False)
         self.assertTrue(await _wait_for(client.saw_run_end))
-        run_end_ops = [op for op in client.ops
-                       if op[0] == "event" and op[1].name == "VOICE_ASSISTANT_RUN_END"]
-        intents = [op for op in client.ops
-                   if op[0] == "event" and op[1].name == "VOICE_ASSISTANT_INTENT_END"]
-        self.assertEqual(1, len(run_end_ops))
-        self.assertEqual(1, len(intents))
-        self.assertEqual("0", intents[0][2]["continue_conversation"])
+        intent = next(
+            op for op in client.ops
+            if op[0] == "event" and op[1].name == "VOICE_ASSISTANT_INTENT_END"
+        )
+        self.assertEqual("0", intent[2]["continue_conversation"])
+        self.assertFalse(b._followup_pending)
         client.hang_up()
         await _task
 
@@ -1142,6 +1171,7 @@ class CliAndLoggingTests(unittest.TestCase):
         self.assertIn("kurz", lowered)
         self.assertNotIn("tool", lowered)
         self.assertIn("tagebuch", lowered)
+        self.assertIn("zone", lowered)
         self.assertIn("lernen", lowered)
 
     def test_spotify_function_call_runs_the_narrow_controller(self):
@@ -1182,6 +1212,38 @@ class CliAndLoggingTests(unittest.TestCase):
         )
         self.assertEqual("Madrid 26,0 Grad.", engine._answer_from_response(response))
         self.assertEqual([{"room": "Madrid"}], calls)
+
+    def test_microphone_control_function_requests_host_owned_mute(self):
+        engine = bridge.GeminiTurnEngine(GEMINI_KEY_MARKER)
+        response = SimpleNamespace(
+            text=None,
+            candidates=[SimpleNamespace(content=SimpleNamespace(parts=[
+                SimpleNamespace(function_call=SimpleNamespace(
+                    name="microphone_control", args={"action": "mute"}
+                ))
+            ]))],
+        )
+        try:
+            answer = engine._answer_from_response(response)
+        except RuntimeError as exc:
+            self.fail(f"microphone_control must be a supported host action: {exc}")
+        self.assertEqual("Mikrofon ist stumm.", answer)
+        self.assertTrue(engine.consume_mute_request())
+        self.assertFalse(engine.consume_mute_request(), "the request is one-shot")
+
+    def test_new_wake_word_conversation_clears_an_unspoken_mute_request(self):
+        engine = bridge.GeminiTurnEngine(GEMINI_KEY_MARKER)
+        response = SimpleNamespace(
+            text=None,
+            candidates=[SimpleNamespace(content=SimpleNamespace(parts=[
+                SimpleNamespace(function_call=SimpleNamespace(
+                    name="microphone_control", args={"action": "mute"}
+                ))
+            ]))],
+        )
+        engine._answer_from_response(response)
+        engine.reset_conversation()
+        self.assertFalse(engine.consume_mute_request())
 
     def test_diary_prepare_function_runs_with_host_owned_turn_context(self):
         calls = []

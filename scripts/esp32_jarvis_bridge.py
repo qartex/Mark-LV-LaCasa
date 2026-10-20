@@ -106,7 +106,6 @@ FALLBACK_TTS_MODELS = (
     "gemini-3.8-flash-lite-tts",
 )
 RETRY_DELAYS_S = (2.0, 5.0)
-MAX_FOLLOWUP_EXTENSIONS = 2
 DEFAULT_TTS_VOICE = "Charon"
 DEFAULT_TURN_TIMEOUT_S = 60.0
 DEFAULT_CAPTURE_WINDOW_S = 5.0
@@ -121,6 +120,7 @@ DEFAULT_SILENCE_END_S = 1.2
 DEFAULT_MAX_UTTERANCE_S = 25.0
 DEFAULT_VOICE_LEVEL = 500  # RMS on the 16-bit scale; room noise stays below
 _LISTEN_POLL_S = 0.1
+PRE_SPEECH_BUFFER_S = 0.5
 REPLY_CHUNK_BYTES = 2048  # 1024 samples of 16-bit mono PCM per message
 
 # TTS_END must carry a non-empty url: the firmware ignores an empty one and
@@ -157,7 +157,11 @@ DEFAULT_SYSTEM_INSTRUCTION = (
     "Wenn jemand nach der Temperatur eines Raums fragt, nutze die "
     "Temperature-Funktion mit dem Raumnamen und nenne den gemessenen Wert. "
     "Wenn jemand einen Tagebucheintrag fuer einen Raum machen will, nutze die "
-    "Cannanas-Tagebuchfunktion; fehlt der Text, frage kurz danach. "
+    "Cannanas-Tagebuchfunktion: der Raum ist die Cannanas-Zone und braucht keine "
+    "Pflanzenangabe; fehlt der Text, frage kurz danach. "
+    "Wenn der Benutzer das Gespraech mit Formulierungen wie 'Mic muten', "
+    "'Mikrofon stumm', 'sei stumm' oder 'hoer auf zuzuhoeren' beendet, rufe "
+    "ausschliesslich die Mikrofon-Funktion mit action mute auf. "
     "Wenn ein ausdruecklicher Wunsch mit den vorhandenen Funktionen nicht "
     "erfuellbar ist, nutze die Lernfunktion genau einmal. Sage nicht, dass du "
     "es kannst: JARVIS muss es erst lernen."
@@ -200,6 +204,13 @@ LEARNING_FUNCTION_SCHEMA = {
         },
     },
     "required": ["request"],
+    "additionalProperties": False,
+}
+
+MICROPHONE_FUNCTION_SCHEMA = {
+    "type": "object",
+    "properties": {"action": {"type": "string", "enum": ["mute"]}},
+    "required": ["action"],
     "additionalProperties": False,
 }
 
@@ -580,6 +591,7 @@ class GeminiTurnEngine:
         self._chat_model_pref: str | None = None
         self._tts_model_pref: str | None = None
         self._announcement_job_id = ""
+        self._mute_requested = False
 
     def current_key(self) -> str:
         return self._gemini_keys[self._key_index]
@@ -608,6 +620,12 @@ class GeminiTurnEngine:
     def reset_conversation(self) -> None:
         """Drop the remembered dialogue (a new wake-word turn starts fresh)."""
         self._history = []
+        self._mute_requested = False
+
+    def consume_mute_request(self) -> bool:
+        """Consume one request to return the satellite to wake-word-only mode."""
+        requested, self._mute_requested = self._mute_requested, False
+        return requested
 
     def set_turn_context(self, turn) -> None:
         """Pin immutable provenance for every model-facing side effect."""
@@ -790,6 +808,11 @@ class GeminiTurnEngine:
                     if self._learning_queue is None or self._turn_context is None:
                         raise RuntimeError("learning queue unavailable")
                     answer = self._learning_queue.submit(parameters, self._turn_context)
+                elif name == "microphone_control":
+                    if parameters != {"action": "mute"}:
+                        raise RuntimeError("unsupported microphone action")
+                    self._mute_requested = True
+                    answer = "Mikrofon ist stumm."
                 else:
                     raise RuntimeError("unsupported model function")
                 if not isinstance(answer, str) or not answer.strip():
@@ -830,13 +853,24 @@ class GeminiTurnEngine:
                 ),
                 parameters_json_schema=TEMPERATURE_FUNCTION_SCHEMA,
             ),
+            types.FunctionDeclaration(
+                name="microphone_control",
+                description=(
+                    "Beendet den aktiven Dauerdialog und schaltet auf lokalen "
+                    "Wakeword-Betrieb zurueck. Bei Mic muten, Mikrofon stumm, "
+                    "sei stumm oder hoer auf zuzuhoeren immer allein aufrufen."
+                ),
+                parameters_json_schema=MICROPHONE_FUNCTION_SCHEMA,
+            ),
         ]
         if self._diary_workflow is not None:
             declarations.append(types.FunctionDeclaration(
                 name="cannanas_diary_prepare",
                 description=(
-                    "Bereitet einen Cannanas-Tagebucheintrag fuer einen Raum vor. "
-                    "Speichern erfolgt erst nach einer spaeteren gesprochenen Bestaetigung."
+                    "Bereitet einen Tagebucheintrag direkt fuer die genannte "
+                    "Cannanas-Zone vor. target nur setzen, wenn der Benutzer "
+                    "ausdruecklich eine Pflanze oder Charge nennt. Speichern "
+                    "erfolgt erst nach einer spaeteren gesprochenen Bestaetigung."
                 ),
                 parameters_json_schema=DIARY_FUNCTION_SCHEMA,
             ))
@@ -1092,10 +1126,11 @@ class JarvisBridge:
         # Multi-turn: the device re-enters the pipeline without a wake word
         # after an answer of ours that asked something.
         self._followup_pending = False
-        self._followup_extensions_left = 0
+        self._is_followup_turn = False
         self._conversation_id = ""
         self._heard_speech = False
         self._last_voice_at = 0.0
+        self._first_voice_at = 0.0
         self._window_peak_rms = 0
         if sleep is not None:
             self._sleep = sleep
@@ -1203,25 +1238,26 @@ class JarvisBridge:
         # continue-conversation callback. The bridge's pending state is the
         # authoritative signal that this is the follow-up turn.
         followup = bool(self._followup_pending)
+        self._is_followup_turn = followup
         self._followup_pending = False
         if not followup:
             self._reset_conversation()
-            self._followup_extensions_left = MAX_FOLLOWUP_EXTENSIONS
         if conversation_id:
             self._conversation_id = str(conversation_id)
         window = self._followup_window if followup else self._capture_window
         self._heard_speech = False
         self._last_voice_at = 0.0
+        self._first_voice_at = 0.0
         self._window_peak_rms = 0
         self._capture_task = asyncio.get_running_loop().create_task(
-            self._listen_until_done(window)
+            self._listen_until_done(None if followup else window)
         )
         _LOG.info(
             "assistant start flags=%s wake_word=%s followup=%s idle_window=%s",
             int(bool(flags)),
             bool(wake_word_phrase),
             followup,
-            window,
+            "persistent" if followup else window,
         )
         return 0
 
@@ -1231,7 +1267,7 @@ class JarvisBridge:
         if callable(reset):
             reset()
 
-    async def _listen_until_done(self, idle_window: float) -> None:
+    async def _listen_until_done(self, idle_window: float | None) -> None:
         """Keep listening while the user speaks; end after real silence.
 
         ``idle_window`` only bounds the wait for the FIRST speech; once speech
@@ -1251,13 +1287,13 @@ class JarvisBridge:
                         _LOG.info("listen ended status=silence")
                         self._finish_turn_request()
                         return
-                elif now - started >= idle_window:
+                    if now - self._first_voice_at >= self._max_utterance:
+                        _LOG.info("listen ended status=max-utterance")
+                        self._finish_turn_request()
+                        return
+                elif idle_window is not None and now - started >= idle_window:
                     _LOG.info("listen ended status=idle-timeout")
                     self._finish_turn_request(discard_if_silent=True)
-                    return
-                if now - started >= self._max_utterance:
-                    _LOG.info("listen ended status=max-utterance")
-                    self._finish_turn_request()
                     return
         finally:
             if self._capture_task is asyncio.current_task():
@@ -1274,15 +1310,21 @@ class JarvisBridge:
         if not data:  # empty chunk marks the end of the recording
             self._finish_turn_request()
             return
-        if _pcm_level(data) >= self._voice_level:
+        peak = _pcm_level(data)
+        if peak >= self._voice_level:
+            if not self._heard_speech:
+                self._first_voice_at = asyncio.get_running_loop().time()
             self._heard_speech = True
             self._last_voice_at = asyncio.get_running_loop().time()
-        peak = _pcm_level(data)
         if peak > self._window_peak_rms:
             self._window_peak_rms = peak
         self._mic_chunks.append(bytes(data))
         if data2:
             self._mic_chunks.append(bytes(data2))
+        if not self._heard_speech:
+            limit = max(2, int(self._device_sample_rate * 2 * PRE_SPEECH_BUFFER_S))
+            retained = b"".join(self._mic_chunks)[-limit:]
+            self._mic_chunks = [retained] if retained else []
 
     async def handle_stop(self, aborted: bool) -> None:
         if aborted:
@@ -1316,10 +1358,9 @@ class JarvisBridge:
             self._reset_turn()
             _LOG.info("turn empty status=skipped")
             if voice is not None:
-                if self._followup_extensions_left > 0:
-                    # The user answered late: hand out another quiet window
-                    # via an inaudible 1-sample reply that keeps the mic open.
-                    self._followup_extensions_left -= 1
+                if self._is_followup_turn:
+                    # ESPHome may end a silent stream on its side. Re-open it
+                    # without calling the model and keep the dialogue alive.
                     _LOG.info("followup extended status=listening")
                     self._turn_task = asyncio.get_running_loop().create_task(
                         self._stream_reply_pcm(
@@ -1395,11 +1436,16 @@ class JarvisBridge:
             transcript, reply_pcm = result
             if not self._stopped:
                 try:
+                    consume_mute = getattr(self.engine, "consume_mute_request", None)
+                    muted = bool(callable(consume_mute) and consume_mute())
+                    if muted:
+                        self._cancel_pending_confirmation()
+                        _LOG.info("conversation closed status=spoken-mute")
                     await self._stream_reply(
                         voice,
                         reply_pcm,
                         answer=transcript,
-                        continue_conversation=_wants_followup(transcript),
+                        continue_conversation=(not muted and _wants_followup(transcript)),
                     )
                 except Exception as exc:
                     # The announcement was claimed but never heard: release it

@@ -299,9 +299,13 @@ def prepare_tool_call(action: str, params: dict, binding: dict) -> 'tuple[str, d
         return action, {'batch': plant_name, 'fields': fields,
                         'binding': binding}
     if action == 'prepare_diary_create':
-        return action, {'plant_or_batch': plant_name or room,
-                        'text': strain or notes, 'measurements': None,
-                        'binding': binding}
+        args = {'text': strain or notes, 'measurements': None,
+                'binding': binding}
+        if plant_name:
+            args['plant_or_batch'] = plant_name
+        else:
+            args['room'] = room
+        return action, args
     raise ValueError(f'unknown prepare action: {action}')
 
 
