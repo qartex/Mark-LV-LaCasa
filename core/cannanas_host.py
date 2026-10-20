@@ -556,6 +556,9 @@ CANNANAS_PLANT_CHANGE_PARAMETERS = (
     'fertilizer',
     'archived',
     'batch',
+    # A mother plant that is kept but no longer cut. The host forwards the
+    # marker as spoken; the adapter turns it into the tag the API knows.
+    'in_reserve',
 )
 
 # The same for a zone: name and climate belong into the nested "fields"

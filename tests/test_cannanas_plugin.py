@@ -781,5 +781,46 @@ class TestSpokenDurationBecomesSinceDays(PluginFixture):
             ("Bluete", None), _spoken_status_with_duration("Bluete"))
 
 
+
+    def test_the_reserve_marker_is_forwarded_as_a_change(self):
+        """'In reserve' is a change the adapter knows: it must not be lost.
+
+        The host does not translate it — the adapter turns it into the tag
+        the API knows. A dropped marker would leave the grower believing
+        the plant is in reserve while nothing changed.
+        """
+        from core.cannanas_host import prepare_tool_call
+
+        _tool, args = prepare_tool_call(
+            "prepare_plant_update",
+            {"plant_name": "Ztilton #1", "fields": {"in_reserve": True}},
+            self.BINDING)
+        self.assertEqual(True, args["fields"]["in_reserve"])
+
+    def test_the_reserve_marker_is_also_spoken_as_a_flat_parameter(self):
+        from core.cannanas_host import prepare_tool_call
+
+        _tool, args = prepare_tool_call(
+            "prepare_plant_update",
+            {"plant_name": "Ztilton #1", "in_reserve": True},
+            self.BINDING)
+        self.assertEqual(True, args["fields"]["in_reserve"])
+
+    def test_a_plant_leaving_the_reserve_keeps_the_spoken_false(self):
+        """'false' is a change, not an absence: the marker must be removed."""
+        from core.cannanas_host import prepare_tool_call
+
+        _tool, args = prepare_tool_call(
+            "prepare_plant_update",
+            {"plant_name": "Ztilton #1", "fields": {"in_reserve": False}},
+            self.BINDING)
+        self.assertEqual(False, args["fields"]["in_reserve"])
+
+    def test_the_reserve_marker_is_a_spoken_plant_change_parameter(self):
+        """The model may only speak what the host forwards."""
+        from core.cannanas_host import CANNANAS_PLANT_CHANGE_PARAMETERS
+
+        self.assertIn("in_reserve", CANNANAS_PLANT_CHANGE_PARAMETERS)
+
 if __name__ == '__main__':
     unittest.main()
