@@ -103,6 +103,25 @@ class ComposeTests(unittest.TestCase):
         )
         self.assertNotIn("Draussen", spoken)
 
+    def test_quiet_rooms_come_last_and_stale_diaries_are_dropped(self):
+        now = datetime(2026, 10, 20, 7, 30, tzinfo=timezone.utc)
+        old_diary = (now - timedelta(days=1200)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        zones = [
+            {"name": "Mam Raum", "batch_count": 0, "plant_count": 0,
+             "stages": [], "last_diary": {"created_at": old_diary,
+                                          "text": "Zone bearbeitet."}},
+            zone(" Madrid", status="FLOWERING", days_ago=15, plants=102),
+            {"name": "Container", "batch_count": 0, "plant_count": 3,
+             "stages": [], "last_diary": None},
+        ]
+        spoken = compose_briefing(speaker="Lukas", title="Head of Grow",
+                                  todos=[], zones=zones,
+                                  temperatures={"Madrid": 20.4}, now=now)
+        self.assertIn("Madrid", spoken)
+        self.assertNotIn("Zone bearbeitet", spoken)
+        self.assertNotIn("Mam Raum", spoken,
+                         "a room with no plants, no batches and a stale diary is noise")
+
     def test_briefing_is_bounded_even_with_many_rooms_and_todos(self):
         zones = [zone(f"Raum{i}", status="FLOWERING", days_ago=i + 1)
                  for i in range(12)]

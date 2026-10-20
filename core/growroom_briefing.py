@@ -16,6 +16,7 @@ from pathlib import Path
 MAX_SPOKEN_CHARS = 900
 MAX_TODOS = 3
 MAX_ZONES = 4
+MAX_DIARY_AGE_DAYS = 30  # older entries are history, not a morning status
 DEFAULT_TITLE = "Gärtner"
 
 STAGE_LABELS = {
@@ -115,10 +116,12 @@ def _zone_sentence(entry: dict, temperature, now: datetime) -> str:
     sentence = f"{name}: " + ", ".join(parts) + "."
     diary = entry.get("last_diary")
     if isinstance(diary, dict) and diary.get("text"):
-        age = _diary_age(_parse_created(diary.get("created_at")), now)
-        text = str(diary["text"]).strip().rstrip(".")
-        prefix = f"Letzter Eintrag {age}" if age else "Letzter Eintrag"
-        sentence += f" {prefix}: {text}."
+        created = _parse_created(diary.get("created_at"))
+        if created is None or _day_count(created, now) <= MAX_DIARY_AGE_DAYS:
+            age = _diary_age(created, now)
+            text = str(diary["text"]).strip().rstrip(".")
+            prefix = f"Letzter Eintrag {age}" if age else "Letzter Eintrag"
+            sentence += f" {prefix}: {text}."
     return sentence
 
 
@@ -150,12 +153,28 @@ def compose_briefing(
             joined = ", ".join(spoken_todos[:-1]) + " und " + spoken_todos[-1]
         sentences.append(f"Auf dem Zettel: {joined}.")
 
+    def _room_key(entry: dict) -> str:
+        return " ".join(str(entry.get("name") or "").split()).casefold()
+
     entries = [
         entry for entry in zones
         if isinstance(entry, dict)
-        and " ".join(str(entry.get("name") or "").split()).casefold()
-        not in NON_GROW_ROOMS
+        and _room_key(entry) not in NON_GROW_ROOMS
+        # Report a room when it grows something or has a live measurement; an
+        # empty leftover zone is noise.
+        and (
+            entry.get("batch_count")
+            or entry.get("plant_count")
+            or temperatures.get(" ".join(str(entry.get("name") or "").split())) is not None
+        )
     ]
+    # Active cultivation first, loud rooms before quiet ones.
+    entries.sort(key=lambda entry: (
+        0 if _active_stage(entry) is not None else 1,
+        -int(entry.get("batch_count") or 0),
+        -int(entry.get("plant_count") or 0),
+        _room_key(entry),
+    ))
     for entry in entries[:MAX_ZONES]:
         name = " ".join(str(entry.get("name") or "").split())
         sentences.append(_zone_sentence(entry, temperatures.get(name), moment))
