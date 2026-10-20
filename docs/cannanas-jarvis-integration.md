@@ -1,8 +1,8 @@
 # Cannanas ↔ JARVIS integration (Mark-LV)
 
-Status: code complete and acceptance-tested; **live enablement on lacasa-server
-is still an operator step** (see "Operator runbook" — nothing is deployed and no
-credentials exist yet). The authoritative design is
+Status: **live on lacasa-server** (adapter 2.0.0, deployed and pinned). The
+current action surface is listed in `docs/cannanas-grow-funktionsliste.md`,
+which also names what is deliberately not voice-controllable. The authoritative design is
 `docs/superpowers/specs/2026-10-16-cannanas-jarvis-integration-design.md`, the
 adapter packaging plan is `docs/superpowers/plans/2026-10-16-cannanas-jarvis-integration.md`,
 and the deployment details live in `deploy/cannanas/README-DEPLOY.md`.
@@ -11,12 +11,19 @@ and the deployment details live in `deploy/cannanas/README-DEPLOY.md`.
 
 | Type | Model-facing actions |
 |---|---|
-| Reads | `overview`, `find_zones`, `find_strains`, `find_plants`, `find_propagation_material`, `list_recent_batches`, `list_plants`, `count_plants_by_room` |
-| Write preparation | `prepare_plant_create`, `prepare_strain_create`, `prepare_batch_create`, `prepare_plant_update`, `prepare_batch_update`, `prepare_diary_create` |
+| Reads | `overview`, `find_zones`, `find_strains`, `find_plants`, `find_propagation_material`, `list_recent_batches`, `list_plants`, `count_plants_by_room`, `zone_growth_summary`, `list_mother_plants`, `list_diaries`, `list_plant_diaries`, `list_harvests`, `get_grow_config`, `zone_plant_status` |
+| Write preparation | `prepare_plant_create`, `prepare_strain_create`, `prepare_batch_create`, `prepare_plant_update`, `prepare_batch_update`, `prepare_diary_create`, `prepare_zone_update`, `prepare_harvest_create`, `prepare_waste_disposal_create` |
 
-Writes are Release-1 only: no deletes, harvest or compliance transitions, no
-finance/member/chat/POS/transport domains, no arbitrary uploads. `find_propagation_material`
-is the only Inventory operation and is read-only.
+Read coverage includes mother plants, zone summaries, diary history per plant,
+harvest history and the club grow configuration. Write preparation covers
+planning a batch from mother plants with cutting counts, creating several
+plants at once, marking a plant as a mother plant, moving a plant or batch to
+another room, editing a room, and preparing a harvest or waste disposal.
+
+Still excluded by design: no deletes, no harvest finalization, no compliance
+transitions, no finance/member/chat/POS/transport domains, no arbitrary
+uploads. `find_propagation_material` is the only Inventory operation and is
+read-only.
 
 ## Architecture
 
@@ -33,7 +40,7 @@ Gemini  ⇄ single trusted tool "cannanas" (closed action enum, plugins/cannanas
         ▼
 core/cannanas_host.py (CannanasHost)
   ├─ persistent serialized MCP STDIO client (core/cannanas_client.py)
-  │    pinned release 1.0.1 + wheel SHA; boot verifies the exact tool set
+  │    pinned release 2.0.0 + wheel SHA; boot verifies the exact tool set
   ├─ ConfirmationCoordinator (core/cannanas_confirmation.py) — in-memory,
   │    one pending per device, atomic pending→executing consume
   ├─ host-only confirmation grammar (exact German forms, no fuzzy match)
