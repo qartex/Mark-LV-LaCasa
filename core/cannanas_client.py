@@ -53,6 +53,7 @@ MCP_READ_TOOLS = frozenset({
     'list_harvests',
     'get_grow_config',
     'zone_plant_status',
+    'mother_cutting_summary',
     'watering_intervals',
 })
 
@@ -95,6 +96,7 @@ def ADAPTER_TOOLS() -> list:
     'prepare_batch_update',
     'confirm_batch_update',
     'prepare_batch_plant_names',
+    'prepare_batch_move',
     'prepare_diary_create',
     'confirm_diary_create',
     'prepare_zone_update',

@@ -20,6 +20,7 @@ CANNANAS_READ_ACTIONS = frozenset({
     'get_grow_config',
     'zone_plant_status',
     'watering_intervals',
+    'mother_cutting_summary',
 })
 
 CANNANAS_PREPARE_ACTIONS = frozenset({
@@ -29,6 +30,7 @@ CANNANAS_PREPARE_ACTIONS = frozenset({
     'prepare_plant_update',
     'prepare_batch_update',
     'prepare_batch_plant_names',
+    'prepare_batch_move',
     'prepare_diary_create',
     'prepare_zone_update',
     'prepare_harvest_create',

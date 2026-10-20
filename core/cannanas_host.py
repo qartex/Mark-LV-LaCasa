@@ -340,6 +340,11 @@ def read_tool_call(action: str, params: dict) -> 'tuple[str, dict, str]':
         # room is taken; the adapter resolves it to a zone.
         return ('watering_intervals',
                 {'room': plant_name or room or query}, 'Giess-Intervall')
+    if action == 'mother_cutting_summary':
+        # The mother may be named as the target or as the query; an
+        # empty name asks for every mother.
+        return ('mother_cutting_summary',
+                {'mother': plant_name or query}, 'Stecklinge')
     raise ValueError(f'unknown read action: {action}')
 
 
@@ -766,6 +771,15 @@ def prepare_tool_call(action: str, params: dict, binding: dict) -> 'tuple[str, d
         batch_target = _spoken_target(params, 'batch') or target_name
         return action, {'batch': batch_target, 'prefix': spoken_strain,
                         'binding': binding}
+    if action == 'prepare_batch_move':
+        # The batch travels into the room; its plants travel with it, so
+        # the preview can name how many plants move along.
+        batch_target = _spoken_target(params, 'batch') or target_name
+        args = {'batch': batch_target, 'room': room, 'binding': binding}
+        with_plants = params.get('with_plants')
+        if with_plants is not None:
+            args['with_plants'] = bool(with_plants)
+        return action, args
     if action == 'prepare_diary_create':
         measurements = _spoken_value(params, 'measurements')
         # The diary text is the spoken text — never the strain or the

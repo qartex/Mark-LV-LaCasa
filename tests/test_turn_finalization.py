@@ -166,7 +166,7 @@ class TestConfirmPendingNotInModelEnum(unittest.TestCase):
                          + len(CANNANAS_PREPARE_ACTIONS))
         self.assertTrue(all(a.startswith(('prepare_')) or a.startswith(
             ('find_', 'list_', 'count_', 'overview', 'zone_', 'get_',
-             'watering_'))
+             'watering_', 'mother_'))
             for a in CANNANAS_MODEL_ACTIONS))
 
 
