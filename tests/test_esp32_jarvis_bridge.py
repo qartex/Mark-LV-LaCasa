@@ -1120,8 +1120,9 @@ class CliAndLoggingTests(unittest.TestCase):
         self.assertEqual(24000, args.sample_rate)
         self.assertEqual(30.0, args.turn_timeout)
         defaults = parser.parse_args(["--relay-host", "h", "--key-file", "k", "--gemini-key-file", "g"])
-        self.assertEqual("gemini-flash-latest", bridge.DEFAULT_MODEL)
+        self.assertEqual("gemini-3.1-flash-lite-preview", bridge.DEFAULT_MODEL)
         self.assertEqual(bridge.DEFAULT_MODEL, defaults.model)
+        self.assertEqual("gemini-3.8-flash-lite-tts", bridge.DEFAULT_TTS_MODEL)
         self.assertEqual(bridge.DEFAULT_TTS_MODEL, defaults.tts_model)
         self.assertEqual(bridge.DEFAULT_TTS_VOICE, defaults.tts_voice)
         self.assertEqual(bridge.DEFAULT_SAMPLE_RATE, defaults.sample_rate)
@@ -1360,7 +1361,7 @@ class CliAndLoggingTests(unittest.TestCase):
         self.assertEqual(24, len(pcm) // 2)
 
     def test_tts_default_model_is_a_quota_available_tts_model(self):
-        self.assertEqual("gemini-3.8-flash-tts", bridge.DEFAULT_TTS_MODEL)
+        self.assertEqual("gemini-3.8-flash-lite-tts", bridge.DEFAULT_TTS_MODEL)
 
     def test_provider_rate_limits_are_retryable_but_not_model_errors(self):
         class Err(Exception):

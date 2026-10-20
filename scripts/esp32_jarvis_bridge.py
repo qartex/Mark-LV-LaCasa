@@ -89,8 +89,8 @@ _LOG = logging.getLogger("esp32_jarvis_bridge")
 DEFAULT_RELAY_PORT = 16053
 DEFAULT_SAMPLE_RATE = 16000  # ESPHome voice-assistant microphone and speaker
 DEFAULT_TTS_SOURCE_SAMPLE_RATE = 24000  # Gemini TTS raw PCM output
-DEFAULT_MODEL = "gemini-flash-latest"
-DEFAULT_TTS_MODEL = "gemini-3.8-flash-tts"
+DEFAULT_MODEL = "gemini-3.1-flash-lite-preview"
+DEFAULT_TTS_MODEL = "gemini-3.8-flash-lite-tts"
 # Free-tier keys hit per-minute limits per model; the turn must survive a 429
 # instead of dropping the user's question.
 FALLBACK_CHAT_MODELS = (
