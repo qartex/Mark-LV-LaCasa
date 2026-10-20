@@ -167,7 +167,10 @@ def _compact_record(record) -> dict:
     return safe
 
 
-_RESULT_RECORD_KEYS = ('plants', 'zones', 'strains', 'batches', 'materials')
+_RESULT_RECORD_KEYS = (
+    'plants', 'zones', 'strains', 'batches', 'materials',
+    'diaries', 'harvests', 'mother_plants',
+)
 
 
 def _result_records(result) -> list:
@@ -254,6 +257,26 @@ def read_tool_call(action: str, params: dict) -> 'tuple[str, dict, str]':
     if action == 'zone_growth_summary':
         return ('zone_growth_summary',
                 {'limit': _int_param(params, 'count', 50, maximum=100)}, 'Räume')
+    if action == 'list_mother_plants':
+        return ('list_mother_plants',
+                {'room': room, 'limit': _int_param(params, 'count', 50)},
+                'Mutterpflanzen')
+    if action == 'list_diaries':
+        return ('list_diaries',
+                {'room': room, 'plant': query,
+                 'batch': str(params.get('batch') or ''),
+                 'limit': _int_param(params, 'count', 25)}, 'Tagebücher')
+    if action == 'list_plant_diaries':
+        return ('list_plant_diaries',
+                {'plant': query, 'limit': _int_param(params, 'count', 10)},
+                'Tagebuch')
+    if action == 'list_harvests':
+        return ('list_harvests',
+                {'limit': _int_param(params, 'count', 10)}, 'Ernten')
+    if action == 'get_grow_config':
+        return 'get_grow_config', {}, 'Grow-Einstellungen'
+    if action == 'zone_plant_status':
+        return 'zone_plant_status', {'room': room}, 'Pflanzenstatus'
     raise ValueError(f'unknown read action: {action}')
 
 
@@ -314,6 +337,27 @@ def prepare_tool_call(action: str, params: dict, binding: dict) -> 'tuple[str, d
         else:
             args['room'] = room
         return action, args
+    if action == 'prepare_zone_update':
+        zone_name = str(params.get('zone') or room or '').strip()
+        fields = params.get('fields')
+        if not isinstance(fields, dict) or not fields:
+            raise ValueError('für eine Raumänderung wird ein Feld gebraucht')
+        return action, {'zone': zone_name, 'fields': fields, 'binding': binding}
+    if action == 'prepare_harvest_create':
+        return action, {
+            'plants': plant_name,
+            'batches': str(params.get('batch') or ''),
+            'notes': notes,
+            'harvested_at': str(params.get('date') or ''),
+            'binding': binding,
+        }
+    if action == 'prepare_waste_disposal_create':
+        return action, {
+            'plants': plant_name,
+            'batches': str(params.get('batch') or ''),
+            'notes': notes,
+            'binding': binding,
+        }
     raise ValueError(f'unknown prepare action: {action}')
 
 

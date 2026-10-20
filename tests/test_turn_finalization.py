@@ -160,10 +160,11 @@ class TestConfirmPendingNotInModelEnum(unittest.TestCase):
         self.assertNotIn('confirm_pending', CANNANAS_MODEL_ACTIONS)
         self.assertNotIn('cancel_pending', CANNANAS_MODEL_ACTIONS)
         self.assertEqual(CANNANAS_MODEL_ACTIONS, CANNANAS_READ_ACTIONS | CANNANAS_PREPARE_ACTIONS)
-        # The enum is a frozen set of exactly the Release-1 vocabulary.
-        self.assertEqual(len(CANNANAS_MODEL_ACTIONS), 14)
-        self.assertTrue(all(a.startswith(('prepare_')) or a.startswith(('find_', 'list_',
-                          'count_', 'overview')) for a in CANNANAS_MODEL_ACTIONS))
+        # The enum is a frozen set: reads plus prepares, never confirm/cancel.
+        self.assertEqual(len(CANNANAS_MODEL_ACTIONS), 24)
+        self.assertTrue(all(a.startswith(('prepare_')) or a.startswith(
+            ('find_', 'list_', 'count_', 'overview', 'zone_', 'get_'))
+            for a in CANNANAS_MODEL_ACTIONS))
 
 
 if __name__ == '__main__':

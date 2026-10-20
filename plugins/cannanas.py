@@ -17,9 +17,10 @@ from core.cannanas_host import CannanasUnavailable, get_host
 PLUGIN = {
     'name': 'cannanas',
     'description': (
-        'Cannanas-Grow: Pflanzen, Räume, Sorten, Chargen und Vermehrungsmaterial '
-        'nachfragen. Neue Pflanzen, Sorten, Chargen oder Tagebucheinträge werden '
-        'nur nach ausdrücklicher Bestätigung angelegt.'),
+        'Cannanas-Grow: Räume, Pflanzen, Sorten, Chargen, Mutterpflanzen, '
+        'Tagebücher und Ernten nachfragen. Status ändern, umziehen, Pflanzen und '
+        'Chargen anlegen, Mutterpflanzen setzen, Tagebucheinträge und Ernten '
+        'werden nur nach ausdrücklicher Bestätigung geschrieben.'),
     'parameters': {
         'type': 'OBJECT',
         'properties': {
@@ -32,6 +33,17 @@ PLUGIN = {
             'plant_name': {'type': 'STRING', 'description': 'Name der Pflanze/Charge'},
             'count': {'type': 'INTEGER', 'description': 'Anzahl/Maximalwert'},
             'text': {'type': 'STRING', 'description': 'Notizen / Tagebuchtext'},
+            'zone': {'type': 'STRING', 'description': 'Raum/Zone fuer Aenderungen'},
+            'batch': {'type': 'STRING', 'description': 'Charge'},
+            'strain': {'type': 'STRING', 'description': 'Sorte'},
+            'date': {'type': 'STRING', 'description': 'Datum (YYYY-MM-DD)'},
+            'fields': {
+                'type': 'OBJECT',
+                'description': (
+                    'Geaenderte Felder, z. B. status, room, notes, is_mother, '
+                    'parent_plant, description. Werte sind gesprochen benannt.'
+                ),
+            },
         },
         'required': ['action'],
     },

@@ -171,6 +171,48 @@ class TestPrepareStoresPendingAndReturnsPreview(PluginFixture):
         )
         self.assertEqual("Tagebucheintrag Madrid: Heute gegossen.", spoken)
 
+    def test_new_read_actions_map_to_adapter_tools(self):
+        from core.cannanas_host import read_tool_call
+
+        for action, tool in (
+            ("list_mother_plants", "list_mother_plants"),
+            ("list_diaries", "list_diaries"),
+            ("list_harvests", "list_harvests"),
+            ("get_grow_config", "get_grow_config"),
+            ("list_plant_diaries", "list_plant_diaries"),
+            ("zone_plant_status", "zone_plant_status"),
+        ):
+            mapped, _args, _prefix = read_tool_call(action, {})
+            self.assertEqual(tool, mapped, action)
+
+    def test_new_prepare_actions_map_to_adapter_tools(self):
+        from core.cannanas_host import prepare_tool_call
+
+        binding = {"stable_device_id": "esp32-1"}
+        mapped, args = prepare_tool_call(
+            "prepare_zone_update",
+            {"zone": "Madrid", "fields": {"notes": "x"}}, binding)
+        self.assertEqual("prepare_zone_update", mapped)
+        self.assertEqual("Madrid", args["zone"])
+        self.assertEqual({"notes": "x"}, args["fields"])
+
+        mapped, args = prepare_tool_call(
+            "prepare_harvest_create", {"plant_name": "Ztilton #3"}, binding)
+        self.assertEqual("prepare_harvest_create", mapped)
+        self.assertEqual("Ztilton #3", args["plants"])
+
+        mapped, args = prepare_tool_call(
+            "prepare_waste_disposal_create", {"plant_name": "Ztilton #3"}, binding)
+        self.assertEqual("prepare_waste_disposal_create", mapped)
+        self.assertEqual("Ztilton #3", args["plants"])
+
+    def test_zone_update_without_fields_is_refused(self):
+        from core.cannanas_host import prepare_tool_call
+
+        with self.assertRaises(ValueError):
+            prepare_tool_call("prepare_zone_update", {"zone": "Madrid"},
+                              {"stable_device_id": "esp32-1"})
+
     def test_prepare_response_maps_to_adapter_and_stores_pending(self):
         self.client.results['prepare_plant_create'] = {
             'ok': True,

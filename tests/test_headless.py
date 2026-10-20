@@ -82,9 +82,13 @@ class HeadlessTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(canonical, sorted([
             'overview', 'find_zones', 'find_strains', 'find_plants',
             'find_propagation_material', 'list_recent_batches', 'list_plants',
-            'count_plants_by_room', 'prepare_plant_create', 'prepare_strain_create',
-            'prepare_batch_create', 'prepare_plant_update', 'prepare_batch_update',
-            'prepare_diary_create']))
+            'count_plants_by_room', 'zone_growth_summary', 'list_mother_plants',
+            'list_diaries', 'list_plant_diaries', 'list_harvests',
+            'get_grow_config', 'zone_plant_status', 'prepare_plant_create',
+            'prepare_strain_create', 'prepare_batch_create',
+            'prepare_plant_update', 'prepare_batch_update',
+            'prepare_diary_create', 'prepare_zone_update',
+            'prepare_harvest_create', 'prepare_waste_disposal_create']))
         self.assertEqual(
             decls[1].parameters.properties['action'].enum,
             ['play', 'pause', 'resume', 'next', 'previous', 'volume', 'current'])
