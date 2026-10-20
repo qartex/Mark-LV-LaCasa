@@ -536,6 +536,33 @@ class ReplyStreamingTests(unittest.IsolatedAsyncioTestCase):
 class MultiTurnConversationTests(unittest.IsolatedAsyncioTestCase):
     """A question from JARVIS must keep the microphone open for the answer."""
 
+    async def test_voice_identification_sets_the_speaker_for_the_turn(self):
+        class IdentifyingEngine(FakeTurnEngine):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.speakers = []
+
+            def set_speaker(self, key):
+                self.speakers.append(key)
+
+        class Identifier:
+            def identify(self, pcm):
+                return "bjoern"
+
+        engine = IdentifyingEngine()
+        b = make_bridge(engine=engine, speaker_identifier=Identifier(),
+                        default_speaker="lukas")
+        client = FakeVoiceClient()
+        _task, (start, stop, audio) = await _session_with_handlers(b, client)
+        await start(CONVERSATION_ID, 1, None, "hey jarvis")
+        await audio(LOUD_PCM, None)
+        await stop(False)
+        self.assertTrue(await _wait_for(client.saw_run_end))
+        self.assertEqual("bjoern", engine.speakers[-1])
+        client.hang_up()
+        await _task
+
+
     async def test_question_answer_keeps_the_conversation_open(self):
         engine = FakeTurnEngine(transcript="Welcher Ort?")
         b = make_bridge(engine=engine)
@@ -1234,7 +1261,7 @@ class CliAndLoggingTests(unittest.TestCase):
     def test_briefing_function_returns_the_host_composed_text(self):
         engine = bridge.GeminiTurnEngine(
             GEMINI_KEY_MARKER,
-            briefing_runner=lambda: "Guten Morgen, Head of Grow. Madrid: Blüte Tag 45.",
+            briefing_runner=lambda _key: "Guten Morgen, Head of Grow. Madrid: Blüte Tag 45.",
         )
         response = SimpleNamespace(
             text=None,
@@ -1264,12 +1291,30 @@ class CliAndLoggingTests(unittest.TestCase):
         self.assertNotIn("growroom_briefing", names)
 
         with_runner = bridge.GeminiTurnEngine(
-            GEMINI_KEY_MARKER, briefing_runner=lambda: "x")
+            GEMINI_KEY_MARKER, briefing_runner=lambda _key: "x")
         names = [
             d.name
             for d in with_runner._chat_tools(FakeTypes)[0].function_declarations
         ]
         self.assertIn("growroom_briefing", names)
+
+    def test_briefing_receives_the_identified_speaker(self):
+        seen = []
+        engine = bridge.GeminiTurnEngine(
+            GEMINI_KEY_MARKER,
+            briefing_runner=lambda key: seen.append(key) or "Guten Morgen.",
+        )
+        engine.set_speaker("Bjoern")
+        response = SimpleNamespace(
+            text=None,
+            candidates=[SimpleNamespace(content=SimpleNamespace(parts=[
+                SimpleNamespace(function_call=SimpleNamespace(
+                    name="growroom_briefing", args={}
+                ))
+            ]))],
+        )
+        engine._answer_from_response(response)
+        self.assertEqual(["bjoern"], seen)
 
     def test_new_wake_word_conversation_clears_an_unspoken_mute_request(self):
         engine = bridge.GeminiTurnEngine(GEMINI_KEY_MARKER)

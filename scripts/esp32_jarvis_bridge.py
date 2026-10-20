@@ -594,6 +594,7 @@ class GeminiTurnEngine:
         self._diary_workflow = diary_workflow
         self._learning_queue = learning_queue
         self._briefing_runner = briefing_runner
+        self._speaker: str | None = None
         self._turn_context = None
         self._history: list[dict] = []
         self._chat_model_pref: str | None = None
@@ -629,6 +630,10 @@ class GeminiTurnEngine:
         """Drop the remembered dialogue (a new wake-word turn starts fresh)."""
         self._history = []
         self._mute_requested = False
+
+    def set_speaker(self, key: str | None) -> None:
+        """Remember who is talking (voice identification or configured default)."""
+        self._speaker = str(key).strip().lower() if key else None
 
     def consume_mute_request(self) -> bool:
         """Consume one request to return the satellite to wake-word-only mode."""
@@ -824,7 +829,7 @@ class GeminiTurnEngine:
                 elif name == "growroom_briefing":
                     if self._briefing_runner is None:
                         raise RuntimeError("briefing unavailable")
-                    answer = self._briefing_runner()
+                    answer = self._briefing_runner(self._speaker)
                 else:
                     raise RuntimeError("unsupported model function")
                 if not isinstance(answer, str) or not answer.strip():
@@ -1094,6 +1099,8 @@ class JarvisBridge:
         diary_workflow=None,
         learning_queue=None,
         briefing_runner=None,
+        speaker_identifier=None,
+        default_speaker="",
         voice_client_factory=None,
         sleep=None,
         ducking=None,
@@ -1158,6 +1165,11 @@ class JarvisBridge:
         self._last_voice_at = 0.0
         self._first_voice_at = 0.0
         self._window_peak_rms = 0
+        self._speaker_identifier = speaker_identifier
+        self._default_speaker = str(default_speaker or "").strip().lower()
+        setter = getattr(self.engine, "set_speaker", None)
+        if self._default_speaker and callable(setter):
+            setter(self._default_speaker)
         if sleep is not None:
             self._sleep = sleep
         else:
@@ -1424,9 +1436,35 @@ class JarvisBridge:
         self._active = False
         self._listening_announced = False
 
+    def _identify_speaker(self, mic_pcm: bytes) -> None:
+        """Name the person from this turn's audio; keep the last known speaker.
+
+        An unknown voice must not erase a greeting that was already correct for
+        this conversation, so a failed match falls back to the remembered value
+        (or the configured default) instead of None.
+        """
+        setter = getattr(self.engine, "set_speaker", None)
+        if not callable(setter):
+            return
+        key = None
+        identifier = self._speaker_identifier
+        if identifier is not None:
+            try:
+                key = identifier.identify(mic_pcm)
+            except Exception as exc:
+                _LOG.info("speaker identify failed error_type=%s", type(exc).__name__)
+                key = None
+        if key:
+            setter(key)
+            _LOG.info("speaker identified status=known")
+            return
+        if self._default_speaker:
+            setter(self._default_speaker)
+
     async def _run_turn(self, voice) -> None:
         mic_pcm = b"".join(self._mic_chunks)
         self._mic_chunks = []  # take over the buffered audio for this one turn
+        self._identify_speaker(mic_pcm)
         try:
             try:
                 turn_id = self._turn_identity.issue()
@@ -1650,6 +1688,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default="",
         help="fixed speaker key when voice identification is not active",
     )
+    parser.add_argument(
+        "--speaker-profiles",
+        default="/home/lacasa/waveshare-va-test/speaker-profiles.json",
+        help="owner-only voice vectors (0600) for personal greetings",
+    )
+    parser.add_argument(
+        "--speaker-model",
+        default="/home/lacasa/waveshare-va-test/models/3dspeaker_eres2net.onnx",
+        help="sherpa-onnx speaker embedding model",
+    )
     return parser
 
 
@@ -1702,7 +1750,32 @@ def _optional_briefing(speakers_path: str, speaker_key: str):
     briefing = GrowroomBriefing(
         host=host, speakers=book, temperatures=temperatures
     )
-    return lambda: briefing.for_speaker(speaker_key)
+    return lambda key: briefing.for_speaker(key)
+
+
+def _optional_speaker_id(profiles_path: str, model_path: str):
+    """Voice identification; any problem keeps the configured default speaker."""
+    try:
+        from core.speaker_id import SpeakerIdentifier, SpeakerProfiles
+
+        profiles = SpeakerProfiles(profiles_path)
+        identifier = SpeakerIdentifier(
+            profiles=profiles, model_path=model_path or profiles.model
+        )
+        if not profiles.vectors:
+            _LOG.info("speaker identification status=disabled reason=no_profiles")
+            return None
+        _LOG.info(
+            "speaker identification status=enabled speakers=%d model=%s",
+            len(profiles.vectors),
+            "yes" if (model_path or profiles.model) else "no",
+        )
+        return identifier
+    except Exception as exc:
+        _LOG.info(
+            "speaker identification status=disabled error_type=%s", type(exc).__name__
+        )
+        return None
 
 
 def _briefing_temperatures() -> dict:
@@ -1753,6 +1826,9 @@ def main(argv=None) -> int:
         print(f"voice workflows unavailable: {type(exc).__name__}", file=sys.stderr)
         return 1
     briefing_runner = _optional_briefing(args.briefing_speakers, args.speaker)
+    speaker_identifier = _optional_speaker_id(
+        args.speaker_profiles, args.speaker_model
+    )
     satellite_bridge = JarvisBridge(
         relay_host=args.relay_host,
         relay_port=args.relay_port,
@@ -1772,6 +1848,8 @@ def main(argv=None) -> int:
         diary_workflow=diary_workflow,
         learning_queue=learning_queue,
         briefing_runner=briefing_runner,
+        speaker_identifier=speaker_identifier,
+        default_speaker=args.speaker,
         ducking=ducking,
     )
     try:
