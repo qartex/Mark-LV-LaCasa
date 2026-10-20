@@ -339,6 +339,13 @@ def set_host(host) -> None:
 def complete_preview_text(preview: dict) -> str:
     """Complete, deterministic German preview line from the adapter preview."""
     preview = preview if isinstance(preview, dict) else {}
+    if preview.get('referenz') and preview.get('typ'):
+        # Diary previews: speak one sentence instead of raw field names — this
+        # text is read aloud and stored in the audit unchanged.
+        reference = ' '.join(str(preview.get('referenz')).split())
+        text = ' '.join(str(preview.get('text') or '').split())
+        spoken = f'Tagebucheintrag {reference}'
+        return f'{spoken}: {text}' if text else spoken
     order = ('plant_name', 'name', 'room', 'strain', 'status',
              'plant_count', 'count', 'notes', 'identifier')
     parts = []

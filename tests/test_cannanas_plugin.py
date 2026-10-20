@@ -154,6 +154,15 @@ class TestPrepareStoresPendingAndReturnsPreview(PluginFixture):
         self.assertNotIn("plant_or_batch", args)
         self.assertIs(binding, args["binding"])
 
+    def test_room_diary_preview_is_spoken_as_a_sentence(self):
+        from core.cannanas_host import complete_preview_text
+
+        spoken = complete_preview_text(
+            {"referenz": " Madrid", "typ": "Raum/Zone",
+             "text": "Heute gegossen.", "messungen": {}}
+        )
+        self.assertEqual("Tagebucheintrag Madrid: Heute gegossen.", spoken)
+
     def test_prepare_response_maps_to_adapter_and_stores_pending(self):
         self.client.results['prepare_plant_create'] = {
             'ok': True,
