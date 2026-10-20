@@ -15,6 +15,7 @@ class ESP32VoiceDeploymentTests(unittest.TestCase):
         self.assertIn("-m scripts.esp32_jarvis_bridge", unit)
         self.assertIn("--learning-queue-dir", unit)
         self.assertIn("growraum-sprache-1-home-test.local", unit)
+        self.assertIn("--relay-port 6053", unit)
         self.assertNotIn("API_KEY=", unit)
         self.assertNotIn("CANNANAS_API_KEY=", unit)
 
