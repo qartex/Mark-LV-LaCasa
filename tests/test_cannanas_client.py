@@ -126,6 +126,11 @@ class TestVersionAndSHAPinned(ClientFixture):
         self.assertEqual(PINNED_WHEEL_SHA256,
                          'a38a0e0efa2081710e726ff1f9824e4da8c908b661107c59ff1eb42cbc12c595')
 
+    def test_zone_summary_is_on_the_read_allowlist(self):
+        from core.cannanas_client import MCP_READ_TOOLS
+
+        self.assertIn('zone_growth_summary', MCP_READ_TOOLS)
+
 
 class TestChildExitRestartsOnce(ClientFixture):
     def test_read_survives_single_restart_and_fails_second(self):

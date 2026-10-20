@@ -37,7 +37,7 @@ ADAPTER_ENV_KEYS = (
 MCP_READ_TOOLS = frozenset({
     'get_adapter_info', 'get_cannanas_overview', 'find_zones', 'find_strains',
     'find_plants', 'find_propagation_material', 'list_recent_batches',
-    'list_plants', 'count_plants_by_room',
+    'list_plants', 'count_plants_by_room', 'zone_growth_summary',
 })
 
 
