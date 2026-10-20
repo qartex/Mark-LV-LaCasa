@@ -1231,6 +1231,46 @@ class CliAndLoggingTests(unittest.TestCase):
         self.assertTrue(engine.consume_mute_request())
         self.assertFalse(engine.consume_mute_request(), "the request is one-shot")
 
+    def test_briefing_function_returns_the_host_composed_text(self):
+        engine = bridge.GeminiTurnEngine(
+            GEMINI_KEY_MARKER,
+            briefing_runner=lambda: "Guten Morgen, Head of Grow. Madrid: Blüte Tag 45.",
+        )
+        response = SimpleNamespace(
+            text=None,
+            candidates=[SimpleNamespace(content=SimpleNamespace(parts=[
+                SimpleNamespace(function_call=SimpleNamespace(
+                    name="growroom_briefing", args={}
+                ))
+            ]))],
+        )
+        self.assertEqual(
+            "Guten Morgen, Head of Grow. Madrid: Blüte Tag 45.",
+            engine._answer_from_response(response),
+        )
+
+    def test_briefing_is_offered_as_a_tool_only_when_configured(self):
+        class FakeTypes:
+            class FunctionDeclaration:
+                def __init__(self, **kwargs):
+                    self.name = kwargs["name"]
+
+            class Tool:
+                def __init__(self, function_declarations):
+                    self.function_declarations = function_declarations
+
+        without = bridge.GeminiTurnEngine(GEMINI_KEY_MARKER)
+        names = [d.name for d in without._chat_tools(FakeTypes)[0].function_declarations]
+        self.assertNotIn("growroom_briefing", names)
+
+        with_runner = bridge.GeminiTurnEngine(
+            GEMINI_KEY_MARKER, briefing_runner=lambda: "x")
+        names = [
+            d.name
+            for d in with_runner._chat_tools(FakeTypes)[0].function_declarations
+        ]
+        self.assertIn("growroom_briefing", names)
+
     def test_new_wake_word_conversation_clears_an_unspoken_mute_request(self):
         engine = bridge.GeminiTurnEngine(GEMINI_KEY_MARKER)
         response = SimpleNamespace(

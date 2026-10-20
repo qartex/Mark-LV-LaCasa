@@ -214,12 +214,12 @@ def _record_payload(prefix, result, exact, truncated) -> dict:
 
 # ── adapter tool mapping (read + prepare) ──────────────────────────────────
 
-def _int_param(params, key, default):
+def _int_param(params, key, default, maximum=MAX_RECORDS):
     try:
         value = int(params.get(key))
     except (TypeError, ValueError):
         return default
-    return max(1, min(value, MAX_RECORDS))
+    return max(1, min(value, maximum))
 
 
 def read_tool_call(action: str, params: dict) -> 'tuple[str, dict, str]':
@@ -251,6 +251,9 @@ def read_tool_call(action: str, params: dict) -> 'tuple[str, dict, str]':
                                'limit': _int_param(params, 'count', 50)}, 'Pflanzen'
     if action == 'count_plants_by_room':
         return 'count_plants_by_room', {'room': room}, 'Pflanzen je Raum'
+    if action == 'zone_growth_summary':
+        return ('zone_growth_summary',
+                {'limit': _int_param(params, 'count', 50, maximum=100)}, 'Räume')
     raise ValueError(f'unknown read action: {action}')
 
 

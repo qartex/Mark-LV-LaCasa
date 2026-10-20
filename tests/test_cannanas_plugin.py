@@ -96,6 +96,14 @@ class TestEnumClosedAtRegistry(PluginFixture):
 
 
 class TestReadActionCallsAdapterAndProjects(PluginFixture):
+    def test_zone_summary_read_maps_to_the_adapter_aggregate(self):
+        from core.cannanas_host import read_tool_call
+
+        tool, args, prefix = read_tool_call("zone_growth_summary", {})
+        self.assertEqual("zone_growth_summary", tool)
+        self.assertEqual({"limit": 50}, args)
+        self.assertTrue(prefix)
+
     def test_read_maps_to_adapter_tool_and_returns_bounded_german_payload(self):
         self.client.results['count_plants_by_room'] = {
             'ok': True, 'room': 'Madrid', 'plant_count': 26, 'exact': True}

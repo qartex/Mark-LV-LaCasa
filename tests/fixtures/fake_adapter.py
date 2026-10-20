@@ -53,7 +53,7 @@ BOOT_ID = ARGV_SETTINGS.get('FAKE_ADAPTER_BOOT_ID', BOOT_ID)
 ADAPTER_INFO = {
     'ok': True,
     'adapter_name': 'cannanas-fake-adapter',
-    'adapter_version': '1.0.2',
+    'adapter_version': '1.1.0',
     'artifact_sha256': 'a' * 64,
     'release_pinned': True,
     'config': {'club_id_bound': True, 'boot_id': BOOT_ID},
@@ -62,7 +62,7 @@ ADAPTER_INFO = {
 EXPECTED_TOOLS = [
     'get_adapter_info', 'get_cannanas_overview', 'find_zones', 'find_strains',
     'find_plants', 'find_propagation_material', 'list_recent_batches',
-    'list_plants', 'count_plants_by_room',
+    'list_plants', 'count_plants_by_room', 'zone_growth_summary',
     'prepare_plant_create', 'confirm_plant_create', 'prepare_strain_create',
     'confirm_strain_create', 'prepare_batch_create', 'confirm_batch_create',
     'prepare_plant_update', 'confirm_plant_update', 'prepare_batch_update',
@@ -99,8 +99,17 @@ async def _tool_payload(name: str, arguments: dict | None) -> dict:
     delay = float(ARGV_SETTINGS.get('FAKE_ADAPTER_TOOL_DELAY', '0'))
     if delay:
         await asyncio.sleep(delay)
-    if name.startswith('confirm_'):
+    if name.startswith("confirm_"):
         return {'ok': True, 'pid': PID, 'result_id': 'plant-1'}
+    if name == 'zone_growth_summary':
+        return {'ok': True, 'pid': PID, 'exact': True, 'zones': [
+            {'id': 'z-madrid', 'name': ' Madrid', 'batch_count': 1,
+             'plant_count': 0,
+             'stages': [{'status': 'FLOWERING', 'count': 1,
+                         'oldest_created_at': '2026-09-05T06:00:00Z'}],
+             'last_diary': {'id': 'd-1', 'created_at': '2026-10-18T06:00:00Z',
+                            'text': 'Blätter kontrolliert.'}},
+        ]}
     if name.startswith('prepare_'):
         return {'ok': True, 'pid': PID, 'preview': 'Vorschau des Eintrags',
                 'payload_hash': 'payload-hash-1', 'confirmation_token': 'opaque-token-1'}

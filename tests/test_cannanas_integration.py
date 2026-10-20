@@ -27,7 +27,7 @@ FIXTURE = Path(__file__).resolve().parent / 'fixtures' / 'fake_adapter.py'
 EXPECTED_TOOLS = [
     'get_adapter_info', 'get_cannanas_overview', 'find_zones', 'find_strains',
     'find_plants', 'find_propagation_material', 'list_recent_batches',
-    'list_plants', 'count_plants_by_room',
+    'list_plants', 'count_plants_by_room', 'zone_growth_summary',
     'prepare_plant_create', 'confirm_plant_create', 'prepare_strain_create',
     'confirm_strain_create', 'prepare_batch_create', 'confirm_batch_create',
     'prepare_plant_update', 'confirm_plant_update', 'prepare_batch_update',
@@ -80,7 +80,7 @@ class IntegrationFixture(unittest.TestCase):
         self.real_client = CannanasClient({
             'command': sys.executable,
             'args': [str(FIXTURE)],
-            'adapter_version': '1.0.2',
+            'adapter_version': '1.1.0',
             'artifact_sha256': 'a' * 64,
             'expected_tools': EXPECTED_TOOLS,
             'adapter_env': {},

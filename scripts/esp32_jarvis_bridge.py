@@ -214,6 +214,12 @@ MICROPHONE_FUNCTION_SCHEMA = {
     "additionalProperties": False,
 }
 
+BRIEFING_FUNCTION_SCHEMA = {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": False,
+}
+
 
 def _room_key(name: str) -> str:
     """Umlaut- and case-insensitive room identifier for matching."""
@@ -572,6 +578,7 @@ class GeminiTurnEngine:
         temperature_runner=None,
         diary_workflow=None,
         learning_queue=None,
+        briefing_runner=None,
     ):
         self._gemini_keys = (
             (gemini_key,) if isinstance(gemini_key, str) else tuple(gemini_key)
@@ -586,6 +593,7 @@ class GeminiTurnEngine:
         self._temperature_runner = temperature_runner or _default_temperature_runner
         self._diary_workflow = diary_workflow
         self._learning_queue = learning_queue
+        self._briefing_runner = briefing_runner
         self._turn_context = None
         self._history: list[dict] = []
         self._chat_model_pref: str | None = None
@@ -813,6 +821,10 @@ class GeminiTurnEngine:
                         raise RuntimeError("unsupported microphone action")
                     self._mute_requested = True
                     answer = "Mikrofon ist stumm."
+                elif name == "growroom_briefing":
+                    if self._briefing_runner is None:
+                        raise RuntimeError("briefing unavailable")
+                    answer = self._briefing_runner()
                 else:
                     raise RuntimeError("unsupported model function")
                 if not isinstance(answer, str) or not answer.strip():
@@ -882,6 +894,18 @@ class GeminiTurnEngine:
                     "erfuellen kann, einmalig als Lernauftrag an Hermes weiter."
                 ),
                 parameters_json_schema=LEARNING_FUNCTION_SCHEMA,
+            ))
+        if self._briefing_runner is not None:
+            declarations.append(types.FunctionDeclaration(
+                name="growroom_briefing",
+                description=(
+                    "Gibt das fertige Morgen-Briefing aus: Begruessung, eigene "
+                    "Aufgaben und pro Raum Bluemestadium, Temperatur und letzter "
+                    "Tagebucheintrag. Bei 'Briefing', 'Guten Morgen' oder 'was "
+                    "steht an' genau einmal aufrufen und den Text unveraendert "
+                    "vorlesen."
+                ),
+                parameters_json_schema=BRIEFING_FUNCTION_SCHEMA,
             ))
         return [types.Tool(function_declarations=declarations)]
 
@@ -1069,6 +1093,7 @@ class JarvisBridge:
         device_id: str = "growroom-sprache-1",
         diary_workflow=None,
         learning_queue=None,
+        briefing_runner=None,
         voice_client_factory=None,
         sleep=None,
         ducking=None,
@@ -1103,6 +1128,7 @@ class JarvisBridge:
             system_instruction=system_instruction,
             diary_workflow=diary_workflow,
             learning_queue=learning_queue,
+            briefing_runner=briefing_runner,
         )
         self._device_id = str(device_id).strip() or "growroom-sprache-1"
         self._key_digest = auth_session_id_of(api_key)
@@ -1614,6 +1640,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default="/home/lacasa/waveshare-va-test/learning-queue",
         help="owner-only durable JARVIS-to-Hermes queue",
     )
+    parser.add_argument(
+        "--briefing-speakers",
+        default="/home/lacasa/Mark-LV-LaCasa/config/briefing-speakers.json",
+        help="owner-only speaker file (0600): titles, todos, default speaker",
+    )
+    parser.add_argument(
+        "--speaker",
+        default="",
+        help="fixed speaker key when voice identification is not active",
+    )
     return parser
 
 
@@ -1638,6 +1674,51 @@ def _optional_voice_workflows(queue_dir):
             type(exc).__name__,
         )
     return diary, queue
+
+
+def _optional_briefing(speakers_path: str, speaker_key: str):
+    """Build the host-owned briefing lazily; a failure only disables it."""
+    try:
+        from core.cannanas_host import get_host
+        from core.growroom_briefing import GrowroomBriefing, SpeakerBook
+
+        book = SpeakerBook(speakers_path)
+    except Exception as exc:
+        _LOG.info(
+            "briefing unavailable status=disabled error_type=%s", type(exc).__name__
+        )
+        return None
+    try:
+        host = get_host()
+    except Exception as exc:
+        _LOG.info(
+            "briefing unavailable status=disabled workflow=cannanas error_type=%s",
+            type(exc).__name__,
+        )
+        host = None
+    if host is None:
+        return None
+    temperatures = _briefing_temperatures
+    briefing = GrowroomBriefing(
+        host=host, speakers=book, temperatures=temperatures
+    )
+    return lambda: briefing.for_speaker(speaker_key)
+
+
+def _briefing_temperatures() -> dict:
+    """Live room temperatures keyed by the spoken room name (Celsius)."""
+    zones: dict[str, float] = {}
+    for state in _ha_states(JARVIS_CONFIG_PATH):
+        entity_id = str(state.get("entity_id", ""))
+        if not (entity_id.startswith("sensor.zonen_")
+                and entity_id.endswith("_temperatur_celsius")):
+            continue
+        room = entity_id[len("sensor.zonen_"):-len("_temperatur_celsius")]
+        try:
+            zones[room.strip().title()] = float(state.get("state"))
+        except (TypeError, ValueError):
+            continue
+    return zones
 
 
 def main(argv=None) -> int:
@@ -1671,6 +1752,7 @@ def main(argv=None) -> int:
     except Exception as exc:
         print(f"voice workflows unavailable: {type(exc).__name__}", file=sys.stderr)
         return 1
+    briefing_runner = _optional_briefing(args.briefing_speakers, args.speaker)
     satellite_bridge = JarvisBridge(
         relay_host=args.relay_host,
         relay_port=args.relay_port,
@@ -1689,6 +1771,7 @@ def main(argv=None) -> int:
         device_id=args.device_id,
         diary_workflow=diary_workflow,
         learning_queue=learning_queue,
+        briefing_runner=briefing_runner,
         ducking=ducking,
     )
     try:

@@ -27,6 +27,13 @@ class ESP32VoiceDeploymentTests(unittest.TestCase):
         self.assertNotIn("API_KEY=", unit)
         self.assertNotIn("CANNANAS_API_KEY=", unit)
 
+    def test_bridge_unit_wires_the_owner_only_speaker_file(self):
+        unit = (DEPLOY / "esp32-jarvis-bridge.service").read_text()
+        self.assertIn("--briefing-speakers /home/lacasa/Mark-LV-LaCasa/config/briefing-speakers.json", unit)
+        self.assertIn("Environment=JARVIS_SPEAKER=lukas", unit)
+        self.assertIn("--speaker ${JARVIS_SPEAKER}", unit)
+        self.assertNotIn("todos", unit.lower(), "todos stay in the 0600 speaker file")
+
     def test_learning_dispatch_timer_is_bounded_and_persistent(self):
         service = (DEPLOY / "jarvis-learning-dispatch.service").read_text()
         timer = (DEPLOY / "jarvis-learning-dispatch.timer").read_text()
