@@ -144,10 +144,36 @@ esphome:
         # Apply the wake word cutoffs once the select and the slider hold
         # their restored values (their own on_value may fire before that).
         - script.execute: apply_wake_word_sensitivity
-        # Start local wake-word detection ("Hey Jarvis"). No audio leaves the
-        # board in this step; the voice assistant itself is never auto-started.
-        - micro_wake_word.start:
         - logger.log: "Phase-2: microphone active; hey_jarvis wake word listening locally"
+    # Start the local wake-word engine ("Hey Jarvis").
+    #
+    # This block has its OWN priority, later than the -100 block above, and
+    # later than micro_wake_word's own setup priority (AFTER_CONNECTION =
+    # 100 in ESPHome 2026.9.0). Both facts matter:
+    #
+    #   * on_boot automations are StartupTrigger components, and components
+    #     are sorted by setup priority, so this block runs during
+    #     Application::setup() at priority 50 - i.e. AFTER micro_wake_word's
+    #     setup() at 100. MicroWakeWord::start() therefore finds
+    #     is_ready() == true and the inference task actually starts.
+    #   * MicroWakeWord::start() has NO retry: if it is ever called before
+    #     the component is set up, it logs "Wake word detection can't start
+    #     as the component hasn't been setup yet" and the engine stays dead
+    #     for the whole boot. The repeat below is the belt to that braces:
+    #     it re-issues the start until the engine reports itself running, so
+    #     a lost race can never leave the board deaf until the next reboot.
+    - priority: 50
+      then:
+        - repeat:
+            count: 20
+            then:
+              - if:
+                  condition:
+                    lambda: return !id(mww).is_running();
+                  then:
+                    - micro_wake_word.start:
+              - delay: 500ms
+        - logger.log: "Phase-2: wake word engine started; hey_jarvis listening locally"
 
 esp32:
   board: esp32-s3-devkitc-1
@@ -825,31 +851,41 @@ globals:
 
 script:
   # Push the wake word cutoffs for the current "Wake word sensitivity" option.
-  # Cutoffs are quantised uint8 (255 = 1.0). The preset offsets follow the
-  # okay_nabu figures measured on the Dinner Party Corpus: 0.85 -> 0.000 FAPH,
-  # 0.69 -> 0.376 FAPH, 0.56 -> 0.751 FAPH (FAPH = false accepts per hour).
+  # Cutoffs are quantised uint8 (255 = 1.0).
+  #
+  # The "Wake word threshold" slider is the BASE value in EVERY position of
+  # the select. It used to be read only in the "Custom" position, while the
+  # other positions replaced it with the model's own default cutoff (0.97 ->
+  # 247). An operator who dialled the threshold down to 0.6 in Home Assistant
+  # therefore saw the number change and nothing else: the board kept running
+  # at 0.97 and never detected the wake word. The presets are now a RELATIVE
+  # adjustment on top of the operator's value, so the slider is always
+  # effective and the three presets keep their ordering.
+  #
+  # The preset offsets follow the okay_nabu figures measured on the Dinner
+  # Party Corpus: 0.85 -> 0.000 FAPH, 0.69 -> 0.376 FAPH, 0.56 -> 0.751 FAPH
+  # (FAPH = false accepts per hour).
   - id: apply_wake_word_sensitivity
     mode: restart
     then:
       - lambda: |-
           std::string opt = id(wake_word_sensitivity).current_option();
+          // The slider may not have published its restored value yet (the
+          // template number and the select restore independently). The boot
+          // path re-runs this script once both hold their values.
+          float t = id(wake_word_threshold).state;
+          if (std::isnan(t)) return;
           auto to_cutoff = [](float p) -> uint8_t {
             return (uint8_t) roundf(std::min(std::max(p, 0.0f), 1.0f) * 255.0f);
           };
-          auto preset = [&](micro_wake_word::WakeWordModel *m, int offset) {
-            m->set_probability_cutoff((uint8_t) std::max(64, (int) m->get_default_probability_cutoff() - offset));
-          };
-          if (opt == "Custom") {
-            // Slider not published yet (early in setup): on_boot re-runs this.
-            float t = id(wake_word_threshold).state;
-            if (std::isnan(t)) return;
-            // Every model gets it, so it follows the "Wake word" choice in HA.
-            for (auto *m : id(mww).get_wake_words()) m->set_probability_cutoff(to_cutoff(t));
-          } else {
-            int offset = 0;                                   // Slightly: model default
-            if (opt == "Moderately sensitive") offset = 40;   // about -0.16
-            else if (opt == "Very sensitive") offset = 75;    // about -0.29
-            for (auto *m : id(mww).get_wake_words()) preset(m, offset);
+          // Relative adjustment on top of the operator's threshold.
+          int offset = 0;                                   // Slightly: as set
+          if (opt == "Moderately sensitive") offset = 40;   // about -0.16
+          else if (opt == "Very sensitive") offset = 75;    // about -0.29
+          uint8_t base = to_cutoff(t);
+          // Every model gets it, so it follows the "Wake word" choice in HA.
+          for (auto *m : id(mww).get_wake_words()) {
+            m->set_probability_cutoff((uint8_t) std::max(64, (int) base - offset));
           }
           for (auto *m : id(mww).get_wake_words()) {
             ESP_LOGI("wake_word", "Sensitivity '%s': %s cutoff %u%s", opt.c_str(), m->get_wake_word().c_str(),
