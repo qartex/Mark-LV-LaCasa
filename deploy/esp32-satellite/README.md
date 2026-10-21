@@ -92,21 +92,28 @@ engine starting and detecting "Hey Jarvis" at 0.99.
 
 ### The flash (on the Mac, with the board on USB)
 
-The board's flash is only reachable over USB, so this runs on the Mac:
+The board's flash is only reachable over USB, so this runs on the Mac.
+**As of 2026-10-21 17:28 the firmware is already built with every fix**
+and waits on the Mac:
+
+| | |
+|---|---|
+| Firmware | `~/waveshare-va-test/config/esp32-satellite/.esphome/build/growraum-sprache-1-home-test/build/firmware.factory.bin` |
+| SHA-256 | `c62c377a92d12b37231af932a1cd9e4538eff83da1997d82cc22a9b019bce9db` |
+| Previous build (without the reconnect fix) | `64173e3d5c908ce65a06d0948caf1b14647da1144f42522174153b38e0966c51` |
+| `vendor/core.yaml` on the Mac | `52cddc1ea29a4225cd0778e97e723f146ce430855da7c37bf4e2050dd0bef23b` (same as the repository) |
+
+The vendor files were copied from the repository before the build, so the
+artifact contains the reconnect path that the previous build was missing.
+Check the artifact before flashing - it must be `c62c377a…`:
 
 ```sh
-# 1. the workspace and the secrets (owner-only, never in Git)
-cd ~/waveshare-va-test
-#    config/esp32-satellite/secrets.yaml holds wifi_ssid, wifi_password
-#    and api_encryption_key
+shasum -a 256 ~/waveshare-va-test/config/esp32-satellite/.esphome/build/growraum-sprache-1-home-test/build/firmware.factory.bin
+```
 
-# 2. build the firmware from the current repository state
-cd config/esp32-satellite
-#    waveshare-phase1.yaml + vendor/core.yaml are the reviewed sources;
-#    update them from the repository first (see below)
-~/waveshare-va-test/venv/bin/esphome compile waveshare-phase1.yaml
+Then plug the board into the Mac and run:
 
-# 3. flash it, guarded
+```sh
 sh ~/waveshare-va-test/flash-satellite.sh
 ```
 
