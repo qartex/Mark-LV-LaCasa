@@ -192,7 +192,7 @@ Gieß-Intervall je Raum.
 ## Technischer Nachweis
 
 - Adapter 2.7.0: 40 Werkzeuge, Allowlist geschlossen (nur dokumentierte Pfade aus dem gepinnten OpenAPI-Fixture), 241 Tests grün.
-- Mark-LV: geschlossene Aktions-Enum mit 28 Aktionen (17 Lesen + 11 Vorbereiten), 813 Tests grün.
+- Mark-LV: geschlossene Aktions-Enum mit 28 Aktionen (17 Lesen + 11 Vorbereiten), 819 Tests grün.
 - Live gegen die echte API geprüft (nur lesend): Zonen, Chargen, Pflanzen, Tagebücher, Ernten, Grow-Einstellungen.
 - Live-Prepare geprüft (ohne Bestätigung, also ohne Schreibvorgang): Zonen-Update, Pflanzen-Update, Chargen-Update, Tagebuch, Ernte, Verschmutzung.
 - Jeder bestätigte Write: Audit-Eintrag **vor** dem POST, Bestätigung gegen die Boot-ID des Adapters, Rückgabe-ID wird verifiziert.
