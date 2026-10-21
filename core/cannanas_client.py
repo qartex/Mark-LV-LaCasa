@@ -24,8 +24,8 @@ TOOL_BUDGET_SECONDS = 25.0
 RESTART_BACKOFF_SECONDS = 1.0
 
 # Pinned adapter release (paired with /home/lacasa15/services/cannanas-mcp/adapter/release).
-PINNED_ADAPTER_VERSION = '2.6.0'
-PINNED_WHEEL_SHA256 = '120c5bfb2561da68a3e67b7ccd88ee7fec195dbf07beefd86078d6335ad60ae2'
+PINNED_ADAPTER_VERSION = '2.7.0'
+PINNED_WHEEL_SHA256 = 'b6889eceff02ee46ca3a0e4d787a7162e31683c097e40b29b7f5dea459625a92'
 
 ADAPTER_ENV_KEYS = (
     'CANNANAS_API_KEY',
