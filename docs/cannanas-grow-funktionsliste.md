@@ -14,12 +14,12 @@ verwirft die Vorschau. Ohne bestätigte Vorschau passiert **nie** ein Schreibvor
 | Funktion | Status | So sagst du es |
 |---|---|---|
 | Neue **Charge** anlegen (Raum, Sorte, Pflanzenanzahl, Status) | ✅ | „Leg eine Charge Ztilton mit 10 Pflanzen in Madrid an, Status Blüte“ |
-| Charge aus **Mutterpflanzen** mit Schnittzahlen planen | ✅ | „Plan 10 Stecklinge von Mutter A: 6 Stück, von Mutter B: 4 Stück“ |
+| Charge aus **Mutterpflanzen** mit Schnittzahlen planen | 🟡 | „Plan 10 Stecklinge von Mutter A: 6 Stück, von Mutter B: 4 Stück“ |
 | Charge aus **Vermehrungsmaterial** (Inventory) | ✅ | „Neue Charge aus meinem Vermehrungsmaterial, 20 Pflanzen, Helsinki“ |
 | **Mutterpflanze** als Elternteil der Charge | ✅ | „Neue Charge von Mutter Ztilton #1“ |
 | Einzelne **Pflanze** anlegen | ✅ | „Leg eine Pflanze Ztilton #7 in Madrid an, Sorte Ztilton“ |
 | Mehrere Pflanzen **auf einmal** anlegen | ✅ | „Leg 5 Ztilton in Madrid an“ |
-| Pflanze als **Mutterpflanze** markieren | ✅ | „Mach Ztilton #3 zur Mutterpflanze“ |
+| Pflanze als **Mutterpflanze** markieren | 🟡 | „Mach Ztilton #3 zur Mutterpflanze“ |
 | Pflanze von einer **Mutterpflanze** ableiten (parent_id) | ✅ | „Neue Pflanze Ztilton #8, Mutter Ztilton #3“ |
 | **Sorte** anlegen (wenn sie fehlt) | ✅ | „Die Sorte Pineapple Cake gibt es noch nicht — leg sie an“ |
 | Charge in eine **bestehende** Charge aufnehmen | ❌ | Nur im API-Fixture, im Adapter nicht umgesetzt |
@@ -58,9 +58,9 @@ verwirft die Vorschau. Ohne bestätigte Vorschau passiert **nie** ein Schreibvor
 | Mutterpflanzen **auflisten** | ✅ | „Welche Mutterpflanzen habe ich?“ |
 | Mutterpflanzen **eines Raums** | ✅ | „Mutterpflanzen in Madrid“ |
 | Pflanze zur **Mutter** erklären | ✅ | „Mach Ztilton #3 zur Mutterpflanze“ |
-| Mutterpflanze als **Elternteil** setzen | ✅ | „Ztilton #8 ist ein Schnitt von Ztilton #3“ |
+| Mutterpflanze als **Elternteil** setzen | 🟡 | „Ztilton #8 ist ein Schnitt von Ztilton #3“ |
 | **Schnittanzahl** pro Mutter bei der Charge | ✅ | „6 Stecklinge von Mutter A“ |
-| Mutterpflanzen **mit Schnittzahlen** zählen | ✅ | „Wie viele Stecklinge habe ich von Mutter Ztilton #1?“ |
+| Mutterpflanzen **mit Schnittzahlen** zählen | 🟡 | „Wie viele Stecklinge habe ich von Mutter Ztilton #1?“ |
 
 ## 5. Pflanzen und Bestände lesen
 
@@ -137,17 +137,28 @@ verwirft die Vorschau. Ohne bestätigte Vorschau passiert **nie** ein Schreibvor
 |---|---|---|
 | **Charge samt Pflanzen** in einen anderen Raum umziehen | ✅ | „Zieh die Charge Ztilton #6 mit allen Pflanzen nach Helsinki“ |
 | **Status aus dem Alter** ableiten (Blüte seit 3 Wochen) | ✅ | „Ztilton #3 ist seit 3 Wochen in Blüte“ — setzt Status **und** Blütendatum |
-| **Stecklingsbilanz** je Mutterpflanze | ✅ | „Wie viele Stecklinge habe ich von Mutter Ztilton #1?“ |
+| **Stecklingsbilanz** je Mutterpflanze | 🟡 | „Wie viele Stecklinge habe ich von Mutter Ztilton #1?“ |
 | **Tagebuch mit Messwerten** aus Home Assistant | ✅ | „Tagebucheintrag Madrid“ — die Temperatur kommt vom Sensor des Raums. Gilt für beide Tagebuch-Wege: das Werkzeug `cannanas_diary_prepare` **und** die Aktion `prepare_diary_create` der geschlossenen Enum |
 | **Namenlose Pflanzen benennen** (mit Nummerierung) | ✅ | „Benenne alle Pflanzen der Charge Ztilton #6 mit Nummerierung“ → „Ztilton #6 (1)“, „Ztilton #6 (2)“ … |
 | **Mutterpflanze in Reserve** markieren | ✅ | „Ztilton #1 ist in Reserve“ — landet als Tag „reserve“ in der Pflanze. Das Modell darf den Marker als eigenen Parameter `in_reserve` setzen (auch innerhalb von `fields`) |
 | **Gieß-Intervall** je Raum | ✅ | „Wie lange wurde Madrid nicht gegossen?“ |
 
-**Was die Datenlage ergänzt:** Im Club gibt es keine Charge, deren Pflanzen als
-Mutterpflanzen geführt sind (`mother_plants` ist überall leer). Die Stecklingsbilanz
-antwortet deshalb heute mit „keine Einträge“ — die Funktion ist bereit, aber es fehlen
-noch die Daten. Genau so ist es mit dem Gieß-Intervall: kein Tagebucheintrag erwähnt das
-Gießen, also sagen die Räume „unbekannt ohne Giessen“ statt einer erfundenen Zahl.
+**Was die Datenlage ergänzt (gemessen am 2026-10-21 gegen die echte API):**
+
+| Geprüfft | Befund |
+|---|---|
+| 268 Pflanzen | **0** mit `is_mother`, **0** mit `parent_id`, **0** mit Tags |
+| 83 Chargen | keine führt ein `mother_plants`-Feld — das Feld existiert im Schema, wird aber nicht ausgeliefert |
+| 39 Stecklinge im Inventory | alle mit `quantity: 0`, `parent_id: null`, `source_inventory_ids: null` |
+
+Die Stecklingsbilanz antwortet deshalb heute mit „0 Stecklinge“ statt „keine Einträge“
+— die Funktion ist bereit und rechnet korrekt, es fehlen die Daten. Die Mutter hat noch
+nie eine Charge mit Mutter-Angabe angelegt, deshalb ist die Beziehung in der Datenbank
+nicht vorhanden. Sobald eine Charge mit „6 Stecklinge von Mutter Ztilton #1“ angelegt
+wird, greift die Bilanz ohne Codeänderung.
+
+Genau so ist es mit dem Gieß-Intervall: kein Tagebucheintrag erwähnt das Gießen, also
+sagen die Räume „unbekannt ohne Giessen“ statt einer erfundenen Zahl.
 
 **Was die Sensoren wirklich liefern:** Home Assistant hat je Growraum einen Temperatursensor
 (`sensor.zonen_<raum>_temperatur_celsius`). Die Luftfeuchte wird derzeit **nicht** von
