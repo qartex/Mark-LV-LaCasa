@@ -44,7 +44,7 @@ EXPECTED_TOOLS = [    'get_adapter_info',
 
 ]
 
-PINNED_VERSION = '2.5.0'
+PINNED_VERSION = '2.6.0'
 PINNED_SHA = 'a' * 64
 
 
@@ -153,7 +153,7 @@ class TestVersionAndSHAPinned(ClientFixture):
         from core.cannanas_client import PINNED_ADAPTER_VERSION, PINNED_WHEEL_SHA256
         self.assertEqual(PINNED_ADAPTER_VERSION, PINNED_VERSION)
         self.assertEqual(PINNED_WHEEL_SHA256,
-                         '6771df40b57cb86bb2f99cd20ded6bc8bab4458a322d5b9f393dcd7ca52e9ee5')
+                         '120c5bfb2561da68a3e67b7ccd88ee7fec195dbf07beefd86078d6335ad60ae2')
 
     def test_zone_summary_is_on_the_read_allowlist(self):
         from core.cannanas_client import MCP_READ_TOOLS

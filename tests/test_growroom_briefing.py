@@ -16,14 +16,18 @@ from core.growroom_briefing import (
 )
 
 
-def zone(name, *, status=None, days_ago=10, count=1, plants=0, diary=None):
+def zone(name, *, status=None, days_ago=10, count=1, plants=0, diary=None,
+         now=None):
+    # The reference point is explicit: a test that mixes "days ago" with a
+    # fixed "now" drifts by one every day it runs.
+    reference = now or datetime.now(timezone.utc)
     stages = []
     if status:
         stages.append({
             "status": status,
             "count": count,
             "oldest_created_at": (
-                datetime.now(timezone.utc) - timedelta(days=days_ago)
+                reference - timedelta(days=days_ago)
             ).strftime("%Y-%m-%dT%H:%M:%SZ"),
         })
     return {
@@ -54,14 +58,13 @@ class GreetingTests(unittest.TestCase):
 
 class ComposeTests(unittest.TestCase):
     def test_briefing_greets_by_name_and_reports_room_state(self):
-        zones = [
-            zone(" Madrid", status="FLOWERING", days_ago=45, plants=0,
-                 diary={"created_at": (datetime.now(timezone.utc)
-                                       - timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                        "text": "Blätter kontrolliert, alles gesund."}),
-            zone("Helsinki", status="VEGETATIVE", days_ago=12, plants=24),
-        ]
         now = datetime(2026, 10, 20, 7, 30, tzinfo=timezone.utc)
+        zones = [
+            zone(" Madrid", status="FLOWERING", days_ago=45, plants=0, now=now,
+                 diary={"created_at": (now - timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        "text": "Blätter kontrolliert, alles gesund."}),
+            zone("Helsinki", status="VEGETATIVE", days_ago=12, plants=24, now=now),
+        ]
         spoken = compose_briefing(
             speaker="Lukas", title="Head of Grow", todos=["Madrid gießen"],
             zones=zones, temperatures={"Madrid": 26.0, "Helsinki": 24.2},

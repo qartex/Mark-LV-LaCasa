@@ -24,8 +24,8 @@ TOOL_BUDGET_SECONDS = 25.0
 RESTART_BACKOFF_SECONDS = 1.0
 
 # Pinned adapter release (paired with /home/lacasa15/services/cannanas-mcp/adapter/release).
-PINNED_ADAPTER_VERSION = '2.5.0'
-PINNED_WHEEL_SHA256 = '6771df40b57cb86bb2f99cd20ded6bc8bab4458a322d5b9f393dcd7ca52e9ee5'
+PINNED_ADAPTER_VERSION = '2.6.0'
+PINNED_WHEEL_SHA256 = '120c5bfb2561da68a3e67b7ccd88ee7fec195dbf07beefd86078d6335ad60ae2'
 
 ADAPTER_ENV_KEYS = (
     'CANNANAS_API_KEY',
@@ -67,7 +67,7 @@ def _confirm_tools() -> frozenset:
 
 
 def ADAPTER_TOOLS() -> list:
-    """The frozen adapter tool surface (38 tools, release 2.5.0)."""
+    """The frozen adapter tool surface (40 tools, release 2.6.0)."""
     return [
     'get_adapter_info',
     'get_cannanas_overview',
@@ -99,6 +99,8 @@ def ADAPTER_TOOLS() -> list:
     'confirm_batch_update',
     'prepare_batch_plant_names',
     'prepare_batch_move',
+    'confirm_batch_move',
+    'confirm_batch_plant_names',
     'prepare_diary_create',
     'confirm_diary_create',
     'prepare_zone_update',
