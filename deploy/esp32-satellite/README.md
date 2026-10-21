@@ -41,3 +41,90 @@ Verify the controller listener is bound only to `127.0.0.1`, run encrypted API d
 Put backups, manifests, serial logs, build trees, and generated firmware under `local-output/`. Both that directory and `secrets.yaml` are ignored only at this deployment path. Keep private directories mode 0700 and secret or manifest files mode 0600.
 
 `vendor/startup.mp3` is retained byte-for-byte for source reproducibility even though the Phase-1 boot-sound switch is forced off. Hashes and all three source commits are in `vendor/provenance.json` and are checked by `tests/test_esp32_satellite_config.py`.
+
+## Pending flash: the wake word engine (2026-10-21)
+
+Two firmware defects made the satellite deaf, and both are fixed in the
+repository but **not yet on the board**:
+
+1. `apply_wake_word_sensitivity` ignored the "Wake word threshold"
+   slider in every position but "Custom" and replaced the model cutoff
+   with the model's own default (0.97 -> 247). Dialling the threshold
+   down to 0.6 changed the number and nothing else.
+2. The wake word engine was started only once, during boot.
+   `MicroWakeWord::start()` has no retry, so a start that lost the race
+   against the component setup left the board deaf for the whole uptime.
+   On the live board that happened after the restart of 2026-10-20
+   08:29; 43 later reconnects, every one of them logged as "satellite
+   connected", did not bring the wake word back.
+
+The fixes: the threshold is the effective cutoff in every position, the
+boot path runs at priority 50 (after `micro_wake_word.setup()`) and
+repeats the start until the engine reports itself running, and a client
+reconnect restarts a dead engine.
+
+### The board is healthy
+
+Measured over the encrypted API on 2026-10-21: board 192.168.1.192,
+SSID Eifelgreen, signal -47 dBm, gateway 192.168.1.1, TCP 6053 open.
+The guest network (10.217.222.205) is not reachable and has no route,
+so the board is in the home network. Microphone gain 24 dB, the mute
+switch is off, and the board's own serial log of 2026-10-19 shows the
+engine starting and detecting "Hey Jarvis" at 0.99.
+
+### The flash (on the Mac, with the board on USB)
+
+The board's flash is only reachable over USB, so this runs on the Mac:
+
+```sh
+# 1. the workspace and the secrets (owner-only, never in Git)
+cd ~/waveshare-va-test
+#    config/esp32-satellite/secrets.yaml holds wifi_ssid, wifi_password
+#    and api_encryption_key
+
+# 2. build the firmware from the current repository state
+cd config/esp32-satellite
+#    waveshare-phase1.yaml + vendor/core.yaml are the reviewed sources;
+#    update them from the repository first (see below)
+~/waveshare-va-test/venv/bin/esphome compile waveshare-phase1.yaml
+
+# 3. flash it, guarded
+sh ~/waveshare-va-test/flash-satellite.sh
+```
+
+The guarded flow (`scripts/esp32_flash_guard.py`) takes a full 16 MB
+backup before every write, binds the write to a one-use confirmation
+with a ten-minute lifetime, verifies the written range against the
+registered artifact hash before the chip is reset, and refuses a
+restore without a separate confirmation. The expected backup hash of
+the board as it stands is
+`ed881f10a6cd7afafa1e1520240056d00ea5731778f594b9e63b4f02382a5f56`.
+
+### Verifying the flash
+
+```sh
+~/waveshare-va-test/venv/bin/python ~/waveshare-va-test/satellite_wakeword_monitor.py 60
+```
+
+The expected line is
+
+```
+Sensitivity 'Slightly sensitive': Hey Jarvis cutoff 153
+```
+
+153 is 0.6 - the operator's threshold. 247 is the old model default and
+means the fix did not reach the board.
+
+The monitor is read-only: it only opens a log and a state subscription.
+It cannot see the boot lines at all (they are emitted before the Wi-Fi
+is up), so "no wake-word-related log lines" is a false negative and not
+evidence of a dead engine. What counts is the cutoff line and a
+`Detected 'Hey Jarvis'` line while a person says the wake word in front
+of the device.
+
+### After the flash
+
+A person has to say "Hey Jarvis" in front of the board for the final
+proof. With the engine running, the speaker enrollment follows:
+`systemctl --user start jarvis-speaker-capture@lukas` on
+lacasa-server, then "Hey Jarvis" and about four seconds of speech.
