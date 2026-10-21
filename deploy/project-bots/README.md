@@ -72,3 +72,26 @@ Ausgabe sendet gar nichts.
 Der Bot **flash't nicht**. Der ESP32 ist nur per USB am Mac erreichbar,
 und der Mac war tagelang offline. Der Bot sagt dir, dass der Flash offen
 ist, und gibt dir den Befehl — er führt ihn nicht aus.
+
+**Warum es keinen Weg am Flash vorbei gibt:** Das Board hat keinen
+OTA-Port (bewusst weggelassen, `ota:` steht in `vendor/core.yaml` nicht),
+der Mac liegt in einem anderen VLAN als das Board (192.168.178.x gegen
+192.168.1.x) und erreicht es nur über den Server als Jump-Host, und
+der Server hat kein USB. Ein Flash über WLAN würde eine neue
+Angriffsfläche öffnen — das wäre ein Verstoß gegen die Projektvorgabe
+(keine öffentlichen Ports, OTA deaktiviert).
+
+**Was der Bot stattdessen kann:** Die Firmware-Quellen auf dem Mac
+aktuell halten (`jarvis-firmware-sync.py`, Cronjob alle 2 Stunden). Der
+Mac baut dann mit dem Repository-Stand. Am 2026-10-21 hat genau das
+gefehlt: der Mac baute ein Artefakt ohne den Reconnect-Pfad, weil seine
+`vendor/core.yaml` vom 17.10. war.
+
+### Das Sprecher-Enrollment hängt am Flash
+
+Das Board streamt Mikrofon-Audio nur, wenn es **selbst** einen Turn
+startet — und das tut es nur mit laufender Wakeword-Engine. Der Capture
+wartet auf `handle_start`. Ferngesteuert starten liefert nichts:
+`set_voice_assistant_configuration(["hey_jarvis"])` wird vom Board
+angenommen (live geprüft am 2026-10-21), löst aber keinen Turn aus.
+Also: erst flashen, dann `systemctl --user start jarvis-speaker-capture@lukas`.

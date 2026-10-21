@@ -185,7 +185,9 @@ def main():
     check_checkouts()
     if findings:
         print('\n'.join(findings))
-        return 1
+    # Der Exitcode bleibt 0: die Meldung IST das Ergebnis, kein Fehler.
+    # Ein Exitcode 1 wuerde der Cronjob als Ausfall melden und eine
+    # Alarm-Mail schicken, obwohl alles nach Plan laeuft.
     return 0
 
 
