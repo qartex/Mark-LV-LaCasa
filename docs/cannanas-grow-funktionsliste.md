@@ -90,7 +90,7 @@ verwirft die Vorschau. Ohne bestätigte Vorschau passiert **nie** ein Schreibvor
 | Eintrag für den **Raum** (Zone) | ✅ | „Tagebucheintrag Madrid: heute gegossen“ |
 | Eintrag für eine **Pflanze** | ✅ | „Tagebucheintrag für Ztilton #6: Blätter kontrolliert“ |
 | Eintrag für eine **Charge** | ✅ | „Tagebucheintrag für die Charge Ztilton Woche 4: Schnitt ok“ |
-| **Messwerte** mit dem Eintrag (Temperatur, Luftfeuchte, pH, EC, Licht, Höhe, Blattzahl …) | ✅ | „Tagebucheintrag Madrid, Lufttemperatur 26 Grad, pH 6,2“ |
+| **Messwerte** mit dem Eintrag (Temperatur, Luftfeuchte, pH, EC, Licht, Höhe, Blattzahl …) | ✅ | „Tagebucheintrag Madrid, Lufttemperatur 26 Grad, pH 6,2“ — **gesprochen** geht jeder Wert; **gemessen** kommt nur die Temperatur (der Raum-Sensor), die Luftfeuchte erst mit einem Feuchte-Sensor |
 | **Zeitpunkt** des Eintrags selbst bestimmen | ✅ | „Tagebucheintrag vom 1. Oktober: …“ (seit Adapter 2.4.0) |
 | Gemessene Werte aus **Home Assistant** übernehmen | ✅ | „Tagebucheintrag Madrid“ — die Temperatur des Raums hängt sich automatisch an |
 | **Fotos** an den Eintrag hängen | ❌ | Datei-Upload ist nicht per Sprache (bewusst) |
