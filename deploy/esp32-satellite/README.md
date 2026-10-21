@@ -111,6 +111,14 @@ Check the artifact before flashing - it must be `c62c377a…`:
 shasum -a 256 ~/waveshare-va-test/config/esp32-satellite/.esphome/build/growraum-sprache-1-home-test/build/firmware.factory.bin
 ```
 
+Both fixes are proven **in the compiled binary**, not only in the source
+(`strings` on the factory image, 2026-10-21):
+
+```
+Wake word engine restarted after the client connected
+Sensitivity '%s': %s cutoff %u%s
+```
+
 Then plug the board into the Mac and run:
 
 ```sh
