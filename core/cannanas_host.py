@@ -575,9 +575,14 @@ def _spoken_status_with_duration(value):
     # The duration part is removed; what is left is the status word.
     word = _SPOKEN_DURATION.sub(' ', value)
     word = _SPOKEN_YEAR.sub(' ', word)
-    # The connective words around the status are not part of it.
-    word = re.sub(r'\b(?:seit|in|ist|schon|seitdem)\b', ' ', word,
-                  flags=re.IGNORECASE)
+    # The connective words around the status are not part of it. The
+    # contractions and the articles matter too: a voice says "im
+    # Wachstum" and "in der Bluete", and neither the article nor the
+    # contraction belongs to the phase name.
+    word = re.sub(
+        r'\b(?:seit|seitdem|in|im|ist|sind|war|schon|der|die|das|'
+        r'dem|den|ein|eine|einem|einen|zurueck)\b', ' ', word,
+        flags=re.IGNORECASE)
     word = ' '.join(word.split()).strip(' ,.')
     return word, days
 

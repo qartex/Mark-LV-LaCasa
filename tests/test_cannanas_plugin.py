@@ -945,6 +945,40 @@ class TestCannabisStatusStillDenied(PluginFixture):
         self.assertFalse(registry.has('cannabis_status'))
 
 
+class TestSpokenStatusArticles(PluginFixture):
+    """A voice says "im Wachstum" - the article is not part of the phase.
+
+    The adapter owns the canonical status, so the host must hand it the
+    bare word. "im Wachstum" and "in der Bluete" are how a person says
+    it; the contraction and the article belong to the sentence.
+    """
+
+    def _status_field(self, spoken):
+        from core.cannanas_host import _spoken_status_field
+
+        return _spoken_status_field(spoken)
+
+    def test_the_spoken_article_is_not_part_of_the_phase(self):
+        field = self._status_field("seit 3 Wochen im Wachstum")
+        self.assertEqual("Wachstum", field["status"])
+        self.assertEqual(21, field["since_days"])
+
+    def test_the_spoken_contraction_is_not_part_of_the_phase(self):
+        field = self._status_field("seit 3 Wochen in der Bluete")
+        self.assertEqual("Bluete", field["status"])
+        self.assertEqual(21, field["since_days"])
+
+    def test_a_plain_status_stays_a_plain_status(self):
+        field = self._status_field("Bluete")
+        self.assertEqual("Bluete", field)
+        self.assertNotIsInstance(field, dict)
+
+    def test_a_status_without_an_article_is_unchanged(self):
+        field = self._status_field("seit 2 Wochen in Bluete")
+        self.assertEqual("Bluete", field["status"])
+        self.assertEqual(14, field["since_days"])
+
+
 class TestSpokenDurationBecomesSinceDays(PluginFixture):
     """A spoken duration becomes the day the phase began.
 
