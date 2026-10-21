@@ -66,6 +66,17 @@ def check_board_firmware():
             'laeuft, erkennt der Satellit kein "Hey Jarvis". '
             'Handlung: Mac einschalten, ESP32 per USB anstecken, dann '
             'sh ~/waveshare-va-test/flash-satellite.sh')
+        # Ohne den Flash gibt es auch kein Sprecher-Enrollment: das Board
+        # streamt Mikrofon-Audio nur, wenn es selbst einen Turn startet,
+        # und das tut es nur mit laufender Engine. Die ferngesteuerte
+        # Alternative (set_voice_assistant_configuration) setzt den
+        # Wakeword, loest aber keinen Turn aus - das ist geprueft und
+        # bringt nichts.
+        finding(
+            'SPEAKER_ABHANGIG_VOM_FLASH: das Sprecher-Enrollment laesst sich '
+            'erst nach dem Flash durchfuehren - ohne laufende Engine startet '
+            'das Board keinen Aufnahme-Turn. Erst flashen, dann '
+            'systemctl --user start jarvis-speaker-capture@lukas')
     else:
         print(f'BOARD_OK: Firmware vom {day} - die Fixes sind auf dem Board',
               file=sys.stderr)
@@ -82,12 +93,14 @@ def check_speaker_profile():
     if 'PROFIL' in (out or '') and 'KEIN_PROFIL' not in (out or ''):
         print('SPEAKER_OK: ein Sprecherprofil liegt vor', file=sys.stderr)
         return
+    if any('SPEAKER_ABHANGIG_VOM_FLASH' in f for f in findings):
+        # Der Flash-Befund sagt es bereits, mit derselben Handlung.
+        return
     finding(
         'SPEAKER_ENROLL_OFFEN: es gibt noch kein Sprecherprofil, damit '
         'erkennt JARVIS nicht, wer spricht. Handlung: auf lacasa-server '
         'systemctl --user start jarvis-speaker-capture@lukas, dann vor dem '
         'Board "Hey Jarvis" sagen und etwa 4 Sekunden sprechen')
-
 
 def check_adapter_pin():
     code, out = ssh_run(
