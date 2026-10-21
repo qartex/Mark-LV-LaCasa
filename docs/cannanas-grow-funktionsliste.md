@@ -162,6 +162,12 @@ ein Feld, das die Lese-Route nie zurückgibt — und fragte die Pflanzen ohne
 vom 2026-10-09) haben null Mutterbezug — dort wurde die Beziehung beim Anlegen nie
 erfasst. Für sie ist „0 Stecklinge“ die richtige Antwort, weil dort keine sind.
 
+**Live nach dem Fix (2026-10-21):** 34 Mutterpflanzen, davon **6 mit Kindern**:
+15, 23 und 42 Stecklinge sind gemeldet, die übrigen zählen 0. Die beiden
+namenlosen Mütter werden als „Mutter 01f22f“ ausgesprochen, nicht als UUID-Wand.
+„Ztilton #1“ wird abgelehnt — **korrekt**, denn keine der 34 Mütter heißt Ztilton:
+die Ztilton-Chargen haben nie eine Mutter gehabt.
+
 **Wie die Zahl entsteht:** Beim Anlegen einer Charge gehört `mother_plants =
 [{plant_id, cutting_count}]` in den Request; die API materialisiert daraus genau
 `cutting_count` Child-Pflanzen mit `parent_id`. Die historischen Chargen belegen das:
