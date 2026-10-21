@@ -24,7 +24,8 @@ from core.user_turn import FinalizedTurn, finalize_turn
 
 FIXTURE = Path(__file__).resolve().parent / 'fixtures' / 'fake_adapter.py'
 
-EXPECTED_TOOLS = [    'get_adapter_info',
+EXPECTED_TOOLS = [
+    'get_adapter_info',
     'get_cannanas_overview',
     'find_zones',
     'find_strains',
@@ -40,6 +41,7 @@ EXPECTED_TOOLS = [    'get_adapter_info',
     'list_harvests',
     'get_grow_config',
     'zone_plant_status',
+    'mother_cutting_summary',
     'watering_intervals',
     'prepare_plant_create',
     'confirm_plant_create',
@@ -51,7 +53,10 @@ EXPECTED_TOOLS = [    'get_adapter_info',
     'confirm_plant_update',
     'prepare_batch_update',
     'confirm_batch_update',
+    'prepare_batch_move',
+    'confirm_batch_move',
     'prepare_batch_plant_names',
+    'confirm_batch_plant_names',
     'prepare_diary_create',
     'confirm_diary_create',
     'prepare_zone_update',
@@ -60,7 +65,6 @@ EXPECTED_TOOLS = [    'get_adapter_info',
     'confirm_harvest_create',
     'prepare_waste_disposal_create',
     'confirm_waste_disposal_create',
-
 ]
 
 

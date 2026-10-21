@@ -5,7 +5,8 @@ from pathlib import Path
 
 FIXTURE = Path(__file__).resolve().parent / 'fixtures' / 'fake_adapter.py'
 
-EXPECTED_TOOLS = [    'get_adapter_info',
+EXPECTED_TOOLS = [
+    'get_adapter_info',
     'get_cannanas_overview',
     'find_zones',
     'find_strains',
@@ -21,6 +22,7 @@ EXPECTED_TOOLS = [    'get_adapter_info',
     'list_harvests',
     'get_grow_config',
     'zone_plant_status',
+    'mother_cutting_summary',
     'watering_intervals',
     'prepare_plant_create',
     'confirm_plant_create',
@@ -32,7 +34,10 @@ EXPECTED_TOOLS = [    'get_adapter_info',
     'confirm_plant_update',
     'prepare_batch_update',
     'confirm_batch_update',
+    'prepare_batch_move',
+    'confirm_batch_move',
     'prepare_batch_plant_names',
+    'confirm_batch_plant_names',
     'prepare_diary_create',
     'confirm_diary_create',
     'prepare_zone_update',
@@ -41,7 +46,6 @@ EXPECTED_TOOLS = [    'get_adapter_info',
     'confirm_harvest_create',
     'prepare_waste_disposal_create',
     'confirm_waste_disposal_create',
-
 ]
 
 PINNED_VERSION = '2.6.0'
@@ -62,6 +66,34 @@ def _config(mode='ok', **extra):
         'expected_tools': EXPECTED_TOOLS,
         'adapter_env': {},
     }
+
+
+def _adapter_release_tools() -> list:
+    """The tool list of the adapter release this checkout pins.
+
+    It is read from the adapter repository, not from a copy of it: a
+    copy would only ever confirm itself.
+    """
+    import pathlib
+    import re
+
+    candidates = [
+        pathlib.Path('/home/lacasa15/services/cannanas-mcp/adapter'),
+        pathlib.Path(__file__).resolve().parents[2] / 'adapter',
+    ]
+    for base in candidates:
+        release = base / 'src/cannanas_mcp_adapter/_release.py'
+        if not release.is_file():
+            continue
+        text = release.read_text(encoding='utf-8')
+        start = text.find('EXPECTED_TOOLS')
+        if start < 0:
+            continue
+        end = text.find(']', start)
+        return re.findall(r'"([a-z_]+)"', text[start:end + 1])
+    raise AssertionError(
+        'the adapter release list is not readable; the host cannot be '
+        'checked against the tools that actually ship')
 
 
 class ClientFixture(unittest.TestCase):
@@ -133,6 +165,43 @@ class TestExactToolSetVerified(ClientFixture):
         client = self.make_client(config)
         self.assertFalse(client.start())
         self.assertTrue(client.degraded)
+
+
+class TestTheHostExpectsTheShippedAdapterSurface(unittest.TestCase):
+    """The host must expect exactly the tools the adapter ships.
+
+    The test adapter is a copy of the real one, so comparing the host
+    with the copy proves nothing. The only list that decides whether
+    the client starts at all is the adapter's own release list, so that
+    is the one the host is checked against.
+    """
+
+    def test_the_pinned_tool_set_matches_the_adapter_release(self):
+        from core.cannanas_client import ADAPTER_TOOLS
+
+        release = _adapter_release_tools()
+        self.assertEqual(sorted(release), sorted(ADAPTER_TOOLS()),
+                         'the host expects a different tool set than the '
+                         'shipped adapter; the client would refuse to start')
+
+    def test_every_shipped_tool_has_a_mark_lv_action(self):
+        """A shipped tool the model cannot call is dead weight."""
+        from core.cannanas_actions import CANNANAS_MODEL_ACTIONS
+
+        host_only = {'get_adapter_info', 'get_cannanas_overview'}
+        release = _adapter_release_tools()
+        for name in release:
+            if name.startswith('confirm_') or name in host_only:
+                continue
+            self.assertIn(name, CANNANAS_MODEL_ACTIONS,
+                          f'{name} ships but the model cannot call it')
+
+    def test_no_confirm_tool_is_model_facing(self):
+        from core.cannanas_actions import CANNANAS_MODEL_ACTIONS
+
+        for name in CANNANAS_MODEL_ACTIONS:
+            self.assertFalse(name.startswith('confirm_'), name)
+            self.assertFalse(name.startswith('cancel_'), name)
 
 
 class TestVersionAndSHAPinned(ClientFixture):
