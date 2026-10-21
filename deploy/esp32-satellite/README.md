@@ -63,6 +63,24 @@ boot path runs at priority 50 (after `micro_wake_word.setup()`) and
 repeats the start until the engine reports itself running, and a client
 reconnect restarts a dead engine.
 
+### What the board actually runs (measured 2026-10-21, after a restart)
+
+| Fact | Value |
+|---|---|
+| Firmware on the board | compiled **2026-10-19 07:05:29** - before every fix in this section |
+| ESPHome version | 2026.9.0 |
+| Wake word threshold | 0.6 |
+| Wake word sensitivity | **Custom** (so the slider applies even on the old firmware) |
+| Microphone gain | 24.0 dB |
+| Logger level | DEBUG |
+| Wake word activity after a restart | **none** - no "Detected", no "Inference task" |
+
+The board was restarted over the API (the "Restart" button entity) and the
+wake word still did not start. The threshold is not the reason: the board
+stands on "Custom", where the old firmware does apply the slider, and the
+engine still stays silent. The firmware from 2026-10-19 is the reason, and
+only a flash replaces it.
+
 ### The board is healthy
 
 Measured over the encrypted API on 2026-10-21: board 192.168.1.192,
