@@ -186,6 +186,111 @@ class TestReadActionCallsAdapterAndProjects(PluginFixture):
         self.assertIn('Madrid', result['summary'])
         self.assertIn('9', result['summary'])
 
+    def test_the_watering_interval_says_when_the_room_does_not_exist(self):
+        """A room that is not there is not "no entries"."""
+        self.client.results['watering_intervals'] = {
+            'ok': False, 'error': "Raum 'Atlantis' nicht gefunden",
+        }
+        result = self.run_plugin({'action': 'watering_intervals',
+                                  'room': 'Atlantis'})
+        self.assertFalse(result.get('ok', True))
+        self.assertIn('Atlantis', result['summary'])
+        self.assertNotIn('keine Eintraege', result['summary'])
+
+    # ── the zone the model chose (spoken room in the "zone" slot) ───────
+    def test_the_watering_interval_read_accepts_the_zone_slot(self):
+        """The model may name the room in the "zone" slot; it is the room."""
+        from core.cannanas_host import read_tool_call
+
+        _tool, args, _prefix = read_tool_call("watering_intervals",
+                                              {"zone": "Madrid"})
+        self.assertEqual("Madrid", args["room"])
+
+    def test_the_watering_interval_read_reaches_the_adapter_with_the_zone(self):
+        self.client.results['watering_intervals'] = {
+            'ok': True,
+            'raeume': [{'raum': 'Madrid', 'tage_seit_letztem_gies': 4,
+                        'letzter_eintrag': 'Giessen'}],
+            'hints': {'giessen': []},
+        }
+        self.run_plugin({'action': 'watering_intervals', 'zone': 'Madrid'})
+        self.assertEqual({'room': 'Madrid'}, self.client.calls[0]['arguments'])
+
+    # ── the mother plant the model chose ─────────────────────────────────
+    def test_the_cutting_summary_read_accepts_the_mother_plant_slot(self):
+        """The model names the mother in "mother_plant"; it must travel."""
+        from core.cannanas_host import read_tool_call
+
+        _tool, args, _prefix = read_tool_call("mother_cutting_summary",
+                                              {"mother_plant": "Ztilton #1"})
+        self.assertEqual("Ztilton #1", args["mother"])
+
+    def test_the_cutting_summary_read_reaches_the_adapter_with_the_mother(self):
+        self.client.results['mother_cutting_summary'] = {
+            'ok': True,
+            'mutters': [{'mother': 'Ztilton #1', 'stecklinge': 6, 'chargen': 2}],
+            'total_stecklinge': 6,
+        }
+        self.run_plugin({'action': 'mother_cutting_summary',
+                         'mother_plant': 'Ztilton #1'})
+        self.assertEqual('mother_cutting_summary', self.client.calls[0]['tool'])
+        self.assertEqual({'mother': 'Ztilton #1'},
+                         self.client.calls[0]['arguments'])
+
+    def test_the_cutting_summary_still_names_the_mother_without_the_slot(self):
+        """The fallback stays: plant_name and query are read as before."""
+        from core.cannanas_host import read_tool_call
+
+        _tool, args, _prefix = read_tool_call("mother_cutting_summary",
+                                              {"plant_name": "Ztilton #1"})
+        self.assertEqual("Ztilton #1", args["mother"])
+        _tool, args, _prefix = read_tool_call("mother_cutting_summary",
+                                              {"query": "Ztilton #1"})
+        self.assertEqual("Ztilton #1", args["mother"])
+
+    def test_the_cutting_summary_names_no_mother_without_a_name(self):
+        """An empty name asks for every mother — it is not a refusal."""
+        from core.cannanas_host import read_tool_call
+
+        _tool, args, _prefix = read_tool_call("mother_cutting_summary", {})
+        self.assertEqual("", args["mother"])
+
+    def test_the_cutting_summary_speaks_the_cuttings_of_the_mother(self):
+        """The gardener must hear the number he asked for."""
+        self.client.results['mother_cutting_summary'] = {
+            'ok': True,
+            'mutters': [{'mother': 'Ztilton #1', 'stecklinge': 6, 'chargen': 2}],
+            'total_stecklinge': 6,
+        }
+        result = self.run_plugin({'action': 'mother_cutting_summary',
+                                  'mother_plant': 'Ztilton #1'})
+        self.assertIn('Ztilton #1', result['summary'])
+        self.assertIn('6', result['summary'])
+        self.assertEqual(1, len(result['records']))
+        self.assertEqual('Ztilton #1', result['records'][0]['mother'])
+        self.assertEqual(6, result['records'][0]['stecklinge'])
+
+    def test_the_cutting_summary_says_so_when_there_is_no_cutting(self):
+        """No cuttings is an answer, not a missing entry."""
+        self.client.results['mother_cutting_summary'] = {
+            'ok': True, 'mutters': [], 'total_stecklinge': 0,
+        }
+        result = self.run_plugin({'action': 'mother_cutting_summary',
+                                  'mother_plant': 'Ztilton #1'})
+        self.assertTrue(result['ok'])
+        self.assertIn('keine', result['summary'].lower())
+
+    def test_the_cutting_summary_says_when_the_mother_does_not_exist(self):
+        """A mother that is not there is not "no cuttings"."""
+        self.client.results['mother_cutting_summary'] = {
+            'ok': False, 'error': "Mutterpflanze 'Atlantis' nicht gefunden",
+        }
+        result = self.run_plugin({'action': 'mother_cutting_summary',
+                                  'mother_plant': 'Atlantis'})
+        self.assertFalse(result.get('ok', True))
+        self.assertIn('Atlantis', result['summary'])
+        self.assertNotIn('keine Einträge', result['summary'])
+
 
 class TestPrepareStoresPendingAndReturnsPreview(PluginFixture):
     def test_prepare_binding_uses_the_adapters_own_boot_id(self):
@@ -214,6 +319,17 @@ class TestPrepareStoresPendingAndReturnsPreview(PluginFixture):
         self.assertEqual("Heute gegossen.", args["text"])
         self.assertNotIn("plant_or_batch", args)
         self.assertIs(binding, args["binding"])
+
+    def test_room_diary_accepts_the_zone_slot_as_the_room(self):
+        """The model may name the room in the "zone" slot; it is the room."""
+        binding = {"stable_device_id": "esp32-growroom-1"}
+        tool, args = prepare_tool_call(
+            "prepare_diary_create",
+            {"zone": "Madrid", "text": "Heute gegossen."},
+            binding,
+        )
+        self.assertEqual("prepare_diary_create", tool)
+        self.assertEqual("Madrid", args["room"])
 
     def test_room_diary_preview_is_spoken_as_a_sentence(self):
         from core.cannanas_host import complete_preview_text

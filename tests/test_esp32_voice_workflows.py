@@ -2,10 +2,17 @@ import hashlib
 import hmac
 import json
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
+
+ROOT = Path(__file__).resolve().parents[1]
+SCRIPTS = ROOT / "scripts"
+if str(SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS))
 
 
 class StubCannanasHost:
@@ -344,6 +351,186 @@ class DiaryMeasurementTests(unittest.TestCase):
         )
         measurements = host.prepares[0][1]["measurements"]
         self.assertEqual(19.8, measurements["air_temperature"])
+
+    def test_a_room_diary_entry_carries_the_measured_values_to_the_adapter(self):
+        """The whole path: sensors -> workflow -> host -> adapter payload.
+
+        The diary entry is only useful if the measured values really reach
+        the adapter — the host must not drop them on the way. This runs the
+        real host with a recording client, so the assertion is on the
+        arguments the adapter would really receive.
+        """
+        import tempfile
+        from pathlib import Path
+
+        from core.cannanas_audit import CannanasAudit
+        from core.cannanas_host import CannanasHost
+        from core.esp32_voice_workflows import CannanasRoomDiaryWorkflow
+
+        recorded = {}
+
+        class RecordingClient:
+            def call(self, tool, arguments, budget=None):
+                if tool.startswith("prepare_"):
+                    recorded["tool"] = tool
+                    recorded["arguments"] = dict(arguments)
+                if tool == "get_adapter_info":
+                    return {"ok": True, "config": {"boot_id": "adapter-boot-1"}}
+                return {
+                    "ok": True,
+                    "requires_confirmation": True,
+                    "confirmation_token": "opaque-token",
+                    "payload_hash": "hash",
+                    "preview": {"referenz": "Madrid", "typ": "Raum/Zone",
+                               "text": "Blätter kontrolliert."},
+                }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            host = CannanasHost(
+                env={
+                    "JARVIS_CANNANAS_ADAPTER_COMMAND": "/opt/fake/adapter",
+                    "JARVIS_CANNANAS_ADAPTER_ARGS": "",
+                    "JARVIS_CANNANAS_AUDIT_FILE": str(root / "audit.jsonl"),
+                    "CANNANAS_API_KEY": "dummy-not-real",
+                    "CANNANAS_CLUB_ID": "club-dummy",
+                    "CANNANAS_STATE_DIR": str(root / "state"),
+                    "CANNANAS_AUDIT_FILE": str(root / "adapter-audit.jsonl"),
+                },
+                client=RecordingClient(),
+                audit=CannanasAudit(root / "audit.jsonl"),
+            )
+            workflow = CannanasRoomDiaryWorkflow(
+                host=host, sensors=lambda: dict(self.SENSORS)
+            )
+            answer = workflow.prepare(
+                {"room": "Madrid", "text": "Blätter kontrolliert."}, self._turn()
+            )
+
+        self.assertIn("Vorschau", answer)
+        self.assertEqual("prepare_diary_create", recorded["tool"])
+        measurements = recorded["arguments"]["measurements"]
+        self.assertEqual(24.2, measurements["air_temperature"])
+        self.assertEqual(61.0, measurements["air_humidity"])
+        self.assertEqual("Madrid", recorded["arguments"]["room"])
+
+    def test_the_closed_enum_diary_entry_also_carries_the_measured_values(self):
+        """The voice path of the closed action enum must measure too.
+
+        The gardener says "Tagebucheintrag Madrid" — the bridge may answer
+        with the closed enum instead of the diary workflow. Both paths must
+        attach the measured values.
+        """
+        import core.cannanas_host as cannanas_host
+        import esp32_jarvis_bridge as bridge
+
+        recorded = {}
+
+        class RecordingClient:
+            def call(self, tool, arguments, budget=None):
+                if tool.startswith("prepare_"):
+                    recorded["arguments"] = dict(arguments)
+                return {"ok": True}
+
+        class RealHost:
+            def __init__(self):
+                self._client = RecordingClient()
+
+            def prepare(self, action, params, turn):
+                tool, args = cannanas_host.prepare_tool_call(
+                    action, params,
+                    {"stable_device_id": "esp32-growroom-1",
+                     "jarvis_session_id": "esp32-growroom-1",
+                     "auth_session_id": "auth-digest",
+                     "prepared_turn_id": "7",
+                     "adapter_boot_id": "adapter-boot-1"},
+                )
+                self._client.call(tool, args)
+                return {"ok": True, "summary": "Vorschau: Tagebucheintrag Madrid."}
+
+        host = RealHost()
+        previous = cannanas_host._HOST
+        cannanas_host.set_host(host)
+        self.addCleanup(cannanas_host.set_host, previous)
+
+        runner = bridge._optional_cannanas_runner(
+            sensors=lambda: dict(self.SENSORS)
+        )
+        answer = runner(
+            {"action": "prepare_diary_create", "room": "Madrid",
+             "text": "Blätter kontrolliert."},
+            self._turn(),
+        )
+        self.assertIn("Vorschau", answer)
+        measurements = recorded["arguments"].get("measurements") or {}
+        self.assertEqual(24.2, measurements.get("air_temperature"))
+        self.assertEqual(61.0, measurements.get("air_humidity"))
+
+    def test_the_cannanas_runner_reads_the_home_assistant_sensors(self):
+        """The shipped runner measures with the live Home Assistant."""
+        import core.cannanas_host as cannanas_host
+        import esp32_jarvis_bridge as bridge
+
+        seen = []
+
+        def sensors():
+            seen.append(True)
+            return {"zonen_madrid_temperatur_celsius": 24.2}
+
+        recorded = {}
+
+        class RealHost:
+            def prepare(self, action, params, turn):
+                tool, args = cannanas_host.prepare_tool_call(
+                    action, params,
+                    {"stable_device_id": "esp32-growroom-1",
+                     "jarvis_session_id": "esp32-growroom-1",
+                     "auth_session_id": "auth-digest",
+                     "prepared_turn_id": "7",
+                     "adapter_boot_id": "adapter-boot-1"},
+                )
+                recorded["arguments"] = dict(args)
+                return {"ok": True, "summary": "Vorschau: Tagebucheintrag Madrid."}
+
+        previous = cannanas_host._HOST
+        cannanas_host.set_host(RealHost())
+        self.addCleanup(cannanas_host.set_host, previous)
+
+        with mock.patch.object(bridge, "_home_assistant_sensors", sensors):
+            runner = bridge._optional_cannanas_runner()
+            answer = runner(
+                {"action": "prepare_diary_create", "room": "Madrid",
+                 "text": "Blätter kontrolliert."},
+                self._turn(),
+            )
+        self.assertIn("Vorschau", answer)
+        self.assertTrue(seen, "the runner must read the live sensors")
+        measurements = recorded["arguments"].get("measurements") or {}
+        self.assertEqual(24.2, measurements.get("air_temperature"))
+
+    def test_a_broken_sensor_source_does_not_cost_the_diary_entry(self):
+        """The measured values are a bonus; the entry must still be written."""
+        import core.cannanas_host as cannanas_host
+        import esp32_jarvis_bridge as bridge
+
+        def broken():
+            raise RuntimeError("home assistant down")
+
+        class RealHost:
+            def prepare(self, action, params, turn):
+                return {"ok": True, "summary": "Vorschau: Tagebucheintrag Madrid."}
+
+        previous = cannanas_host._HOST
+        cannanas_host.set_host(RealHost())
+        self.addCleanup(cannanas_host.set_host, previous)
+
+        runner = bridge._optional_cannanas_runner(sensors=broken)
+        answer = runner(
+            {"action": "prepare_diary_create", "room": "Madrid",
+             "text": "Blätter kontrolliert."},
+            self._turn(),
+        )
+        self.assertIn("Vorschau", answer)
 
 
 class LearningQueueTests(unittest.TestCase):

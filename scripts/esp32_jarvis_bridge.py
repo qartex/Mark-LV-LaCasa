@@ -1996,7 +1996,7 @@ def _optional_voice_workflows(queue_dir):
     return diary, queue
 
 
-def _optional_cannanas_runner():
+def _optional_cannanas_runner(sensors=None):
     """Build the voice-side Cannanas runner: reads and prepared writes only.
 
     The runner goes through the plugin, so the closed action enum, the host
@@ -2008,6 +2008,12 @@ def _optional_cannanas_runner():
     turn. Without the turn the host refuses every write ("nur fuer
     zugeordnete Geraete"), so the voice path would silently lose every
     spoken change.
+
+    A room diary entry takes its measured values from the Home Assistant
+    sensors, the same ones the briefing and the room diary workflow read.
+    The values are attached before the host prepares the entry, so the
+    numbers reach the adapter on every diary path — not only on the one
+    that goes through the room diary workflow.
     """
     try:
         from plugins import cannanas as cannanas_plugin
@@ -2016,8 +2022,28 @@ def _optional_cannanas_runner():
                   type(exc).__name__)
         return None
 
+    sensor_source = sensors if callable(sensors) else None
+
+    def measured_values(parameters: dict) -> dict:
+        """The measured values of a room diary entry; never a precondition."""
+        try:
+            from core.esp32_voice_workflows import measured_diary_values
+
+            source = sensor_source or _home_assistant_sensors
+            return measured_diary_values(parameters, source() or {})
+        except Exception as exc:
+            # The measured values are a bonus: a broken sensor source must
+            # not cost the gardener his diary entry.
+            _LOG.info("grow sensors unavailable status=disabled error_type=%s",
+                      type(exc).__name__)
+            return {}
+
     def run(parameters: dict, turn=None) -> str:
         args = dict(parameters or {})
+        if str(args.get("action") or "") == "prepare_diary_create":
+            values = measured_values(args)
+            if values and not args.get("measurements"):
+                args["measurements"] = values
         result = cannanas_plugin.run(args, session_memory=turn)
         summary = str(result.get("summary") or "").strip()
         if summary:

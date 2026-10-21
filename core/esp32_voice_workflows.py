@@ -40,6 +40,30 @@ def _key(value: object) -> str:
     return "".join(ch for ch in text.casefold() if ch.isalnum())
 
 
+def measured_diary_values(parameters: dict, sensors) -> dict:
+    """The measured values of the diary room, unless the gardener spoke his own.
+
+    The room of a diary entry may stand in the "room" slot or in the
+    "zone" slot the model chose; both name the same zone. Spoken values
+    win: the gardener who dictates a value knows better than a sensor
+    that may lag behind.
+
+    This is the one place that knows how a room becomes measured values,
+    so every diary path — the room workflow and the closed action enum —
+    attaches the same numbers.
+    """
+    spoken = (parameters or {}).get("measurements")
+    if isinstance(spoken, dict) and spoken:
+        return dict(spoken)
+    room = str((parameters or {}).get("room")
+               or (parameters or {}).get("zone") or "").strip()
+    if not room:
+        return {}
+    from core.growroom_measurements import room_measurements
+
+    return room_measurements(room, sensors if isinstance(sensors, dict) else {})
+
+
 def _record_name(record: dict) -> str:
     for field in ("name", "plant_name", "display_name"):
         value = str(record.get(field) or "").strip()
@@ -110,13 +134,9 @@ class CannanasRoomDiaryWorkflow:
         Spoken values win: the gardener who dictates a value knows better than
         a sensor that may lag behind.
         """
-        if isinstance(spoken, dict) and spoken:
-            return dict(spoken)
-        if not room:
-            return {}
-        from core.growroom_measurements import room_measurements
-
-        return room_measurements(room, self._sensors())
+        return measured_diary_values(
+            {"room": room, "measurements": spoken}, self._sensors()
+        )
 
     def prepare(self, parameters: dict, turn) -> str:
         parameters = dict(parameters or {})

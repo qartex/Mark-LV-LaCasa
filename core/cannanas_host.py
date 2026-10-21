@@ -218,6 +218,21 @@ def build_read_summary(prefix, records, exact, truncated) -> str:
 # room; a room without a watering entry stays unknown and is not guessed.
 
 
+def _read_refusal(result: dict) -> dict:
+    """The spoken answer to a read the adapter refused.
+
+    A refused read keeps its reason: a room or a mother that does not
+    exist must not sound like a room or a mother without entries.
+    """
+    reason = str(result.get('error') or '').strip()
+    if not reason:
+        reason = 'Die Angaben passen nicht zu dieser Aktion.'
+    if len(reason) > 160:
+        reason = reason[:160].rstrip() + '…'
+    return {'ok': False, 'summary': f'Die Abfrage wurde abgelehnt: {reason}',
+            'records': [], 'total_records': 0}
+
+
 def _watering_payload(result: dict) -> dict:
     """The spoken answer to "how long did each room go without water".
 
@@ -225,6 +240,8 @@ def _watering_payload(result: dict) -> dict:
     room with the days it went without water. A room whose interval is
     unknown says so: "unbekannt" is an answer, a missing room is not.
     """
+    if not result.get('ok', True):
+        return _read_refusal(result)
     raeume = result.get('raeume') or []
     records = []
     parts = []
@@ -253,6 +270,53 @@ def _watering_payload(result: dict) -> dict:
         else 'Giess-Intervalle: keine Eintraege.'
     if hints:
         summary += ' Giessen noetig: ' + ', '.join(str(name) for name in hints) + '.'
+    return {'summary': summary, 'records': records,
+            'total_records': len(records)}
+
+
+def _cutting_payload(result: dict) -> dict:
+    """The spoken answer to "how many cuttings do I have from that mother".
+
+    The mothers become the records of the read, and the summary names every
+    mother with the cuttings she produced. A mother without a cutting is
+    an answer ("0"), not a missing entry.
+
+    A refused read keeps its reason: a mother that does not exist must not
+    sound like a mother without cuttings.
+    """
+    if not result.get('ok', True):
+        return _read_refusal(result)
+    mutters = result.get('mutters') or []
+    records = []
+    parts = []
+    for entry in mutters:
+        if not isinstance(entry, dict):
+            continue
+        mother = str(entry.get('mother') or '').strip()
+        if not mother:
+            continue
+        try:
+            cuttings = int(entry.get('stecklinge') or 0)
+        except (TypeError, ValueError):
+            cuttings = 0
+        try:
+            batches = int(entry.get('chargen') or 0)
+        except (TypeError, ValueError):
+            batches = 0
+        records.append({
+            'mother': mother,
+            'stecklinge': cuttings,
+            'chargen': batches,
+        })
+        parts.append(f'{mother}: {cuttings} Stecklinge')
+    summary = ('Stecklinge: ' + ', '.join(parts) + '.') if parts \
+        else 'Stecklinge: keine Einträge.'
+    total = result.get('total_stecklinge')
+    if total is not None and parts:
+        try:
+            summary += f' Insgesamt {int(total)} Stecklinge.'
+        except (TypeError, ValueError):
+            pass
     return {'summary': summary, 'records': records,
             'total_records': len(records)}
 
@@ -288,6 +352,12 @@ def read_tool_call(action: str, params: dict) -> 'tuple[str, dict, str]':
     room = str(params.get('room') or '').strip()
     status = str(params.get('status') or '').strip()
     plant_name = str(params.get('plant_name') or '').strip()
+    # The model may name a zone in the "zone" slot; for a read that is the
+    # room, never a second object.
+    zone = str(params.get('zone') or '').strip()
+    # The mother plant of a cutting summary: the model has its own slot
+    # for her, and the name must travel to the adapter.
+    mother_plant = str(params.get('mother_plant') or '').strip()
     if action == 'overview':
         return 'get_cannanas_overview', {}, 'Übersicht'
     if action == 'find_zones':
@@ -339,12 +409,13 @@ def read_tool_call(action: str, params: dict) -> 'tuple[str, dict, str]':
         # target slot the model chose, so every spoken name of the
         # room is taken; the adapter resolves it to a zone.
         return ('watering_intervals',
-                {'room': plant_name or room or query}, 'Giess-Intervall')
+                {'room': plant_name or room or zone or query},
+                'Giess-Intervall')
     if action == 'mother_cutting_summary':
-        # The mother may be named as the target or as the query; an
-        # empty name asks for every mother.
+        # The mother may be named as the target, as the query or in her
+        # own slot; an empty name asks for every mother.
         return ('mother_cutting_summary',
-                {'mother': plant_name or query}, 'Stecklinge')
+                {'mother': mother_plant or plant_name or query}, 'Stecklinge')
     raise ValueError(f'unknown read action: {action}')
 
 
@@ -796,7 +867,9 @@ def prepare_tool_call(action: str, params: dict, binding: dict) -> 'tuple[str, d
         elif plant_target:
             args['plant'] = plant_target
         else:
-            args['room'] = room
+            # The room may stand in the "zone" slot the model chose; for a
+            # room diary both name the same zone.
+            args['room'] = room or str(params.get('zone') or '').strip()
         # The entry can carry its own date.
         spoken_date = _spoken_value(params, 'date', params.get('written_at'))
         if spoken_date is not None:
@@ -1067,6 +1140,8 @@ class CannanasHost:
             payload['records'] = []
         if action == 'watering_intervals':
             payload.update(_watering_payload(result))
+        if action == 'mother_cutting_summary':
+            payload.update(_cutting_payload(result))
         self._audit_read(action)
         return payload
 

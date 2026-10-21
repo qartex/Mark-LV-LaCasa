@@ -92,7 +92,7 @@ verwirft die Vorschau. Ohne bestätigte Vorschau passiert **nie** ein Schreibvor
 | Eintrag für eine **Charge** | ✅ | „Tagebucheintrag für die Charge Ztilton Woche 4: Schnitt ok“ |
 | **Messwerte** mit dem Eintrag (Temperatur, Luftfeuchte, pH, EC, Licht, Höhe, Blattzahl …) | ✅ | „Tagebucheintrag Madrid, Lufttemperatur 26 Grad, pH 6,2“ |
 | **Zeitpunkt** des Eintrags selbst bestimmen | ✅ | „Tagebucheintrag vom 1. Oktober: …“ (seit Adapter 2.4.0) |
-| Gemessene Werte aus **Home Assistant** übernehmen | 🟡 | HA liefert die Werte, das Füllen ist offen |
+| Gemessene Werte aus **Home Assistant** übernehmen | ✅ | „Tagebucheintrag Madrid“ — die Temperatur des Raums hängt sich automatisch an |
 | **Fotos** an den Eintrag hängen | ❌ | Datei-Upload ist nicht per Sprache (bewusst) |
 | Eintrag **nachträglich ändern** | 🟡 | API vorhanden (`updateClubDiary`), Sprache offen |
 | **Historie** der Tagebücher lesen | ✅ | „Tagebuch von Ztilton #6“ |
@@ -138,7 +138,7 @@ verwirft die Vorschau. Ohne bestätigte Vorschau passiert **nie** ein Schreibvor
 | **Charge samt Pflanzen** in einen anderen Raum umziehen | ✅ | „Zieh die Charge Ztilton #6 mit allen Pflanzen nach Helsinki“ |
 | **Status aus dem Alter** ableiten (Blüte seit 3 Wochen) | ✅ | „Ztilton #3 ist seit 3 Wochen in Blüte“ — setzt Status **und** Blütendatum |
 | **Stecklingsbilanz** je Mutterpflanze | ✅ | „Wie viele Stecklinge habe ich von Mutter Ztilton #1?“ |
-| **Tagebuch mit Messwerten** aus Home Assistant | ✅ | „Tagebucheintrag Madrid“ — Temperatur und Feuchte kommen vom Sensor |
+| **Tagebuch mit Messwerten** aus Home Assistant | ✅ | „Tagebucheintrag Madrid“ — die Temperatur kommt vom Sensor des Raums |
 | **Namenlose Pflanzen benennen** (mit Nummerierung) | ✅ | „Benenne alle Pflanzen der Charge Ztilton #6 mit Nummerierung“ → „Ztilton #6 (1)“, „Ztilton #6 (2)“ … |
 | **Mutterpflanze in Reserve** markieren | ✅ | „Ztilton #1 ist in Reserve“ — landet als Tag „reserve“ in der Pflanze |
 | **Gieß-Intervall** je Raum | ✅ | „Wie lange wurde Madrid nicht gegossen?“ |
@@ -148,6 +148,11 @@ Mutterpflanzen geführt sind (`mother_plants` ist überall leer). Die Stecklings
 antwortet deshalb heute mit „keine Einträge“ — die Funktion ist bereit, aber es fehlen
 noch die Daten. Genau so ist es mit dem Gieß-Intervall: kein Tagebucheintrag erwähnt das
 Gießen, also sagen die Räume „unbekannt ohne Giessen“ statt einer erfundenen Zahl.
+
+**Was die Sensoren wirklich liefern:** Home Assistant hat je Growraum einen Temperatursensor
+(`sensor.zonen_<raum>_temperatur_celsius`). Die Luftfeuchte wird derzeit **nicht** von
+einem Zonen-Sensor geliefert — kommt ein Sensor mit Feuchte dazu, hängt der Eintrag sie
+automatisch mit an. Ohne Sensor bleibt der Eintrag bestehen, nur eben ohne Messwert.
 
 ## 9b. Was die Sprachsteuerung heute einschränkt
 
@@ -180,7 +185,7 @@ noch offen ist, ist die **Datenlage** und nicht mehr der Code:
 1. **Chargen-Pflanzen-Zuordnung**: „Zieh die Charge Ztilton Woche 4 mit allen 12 Pflanzen nach Helsinki“ — heute zwei Ansagen, ein Wunsch.
 2. **Status aus dem Datum**: „Ztilton #3 ist seit drei Wochen in Blüte“ → Setzt `cultivation_flowering_date` und den Status automatisch.
 3. **Stecklingsbilanz**: „Wie viele Stecklinge habe ich von Mutter A?“ — verlangt die Schnittzahlen aus den Chargen.
-4. **Tagebuch aus Home Assistant**: „Tagebucheintrag Madrid“ übernimmt Temperatur/Feuchte/pH aus den Sensoren, statt Werte diktieren zu müssen.
+4. **Tagebuch aus Home Assistant**: „Tagebucheintrag Madrid“ übernimmt die gemessenen Werte des Raums (heute die Temperatur) aus den Sensoren, statt Werte diktieren zu müssen.
 5. **Chargen-Notizen als Namen**: Die 268 Pflanzen sind in Cannanas namenlos. Ein Werkzeug „benenne alle Pflanzen der Charge Ztilton #6 mit Nummerierung“ würde die Sprachsteuerung überhaupt erst natürlich machen.
 6. **Mutterpflanzen-Archiv**: Eine Mutter, die nicht mehr geschnitten wird, sollte als „in Reserve“ markiert werden können.
 7. **Gieß-Intervall** je Raum aus dem Tagebuch ableiten: „Wie lange wurde Madrid nicht gegossen?“
