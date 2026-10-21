@@ -15,7 +15,7 @@
   },
   "vendored_phase1_core": {
     "path": "core.yaml",
-    "sha256": "2307d0d4d5f00ef57aae6cc365f37dd6c840bf5ec5f6d35d22286d9afc3e5db8"
+    "sha256": "52cddc1ea29a4225cd0778e97e723f146ce430855da7c37bf4e2050dd0bef23b"
   },
   "vendored_startup_sound": {
     "path": "startup.mp3",

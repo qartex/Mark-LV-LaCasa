@@ -89,6 +89,39 @@ class ESP32WakeWordEngineTests(unittest.TestCase):
     def setUp(self):
         self.core = CORE.read_text(encoding="utf-8")
 
+    # -- 3. a client reconnect must be able to revive the engine -----------
+
+    def test_a_client_reconnect_restarts_a_dead_wake_word_engine(self):
+        """The engine must come back when a client connects.
+
+        Symptom: the board went deaf after a restart and stayed deaf
+        through 43 reconnects, because only the boot path ever started
+        the engine.
+        """
+        connect = self._voice_assistant_connect_block()
+        self.assertIsNotNone(
+            connect, "voice_assistant has no on_client_connected block")
+        self.assertIn(
+            "micro_wake_word.start",
+            connect,
+            "a client reconnect must be able to restart the wake word "
+            "engine; otherwise a lost start race is permanent",
+        )
+        self.assertIn(
+            "is_running()",
+            connect,
+            "the restart must be conditional on the engine actually "
+            "being down, so a healthy engine is not restarted",
+        )
+
+    def test_the_boot_path_and_the_reconnect_path_both_start_the_engine(self):
+        """Both paths must exist: one for the boot, one for the recovery."""
+        self.assertGreaterEqual(
+            self.core.count("micro_wake_word.start"),
+            2,
+            "the engine needs a boot path and a reconnect path",
+        )
+
     # -- 1. the operator's threshold must be the effective cutoff -----------
 
     def test_threshold_slider_is_applied_in_every_sensitivity_position(self):
@@ -272,6 +305,31 @@ class ESP32WakeWordEngineTests(unittest.TestCase):
     def _on_boot_body(self) -> str:
         return "\n".join(body for _, body in _on_boot_blocks(self.core))
 
-
-if __name__ == "__main__":
-    unittest.main()
+    def _voice_assistant_connect_block(self):
+        # The body of the voice assistant's on_client_connected block.
+        # Several components have an on_client_connected; only the one
+        # inside the voice_assistant block may restart the engine.
+        lines = self.core.splitlines()
+        start = None
+        for number, line in enumerate(lines):
+            if line.startswith('voice_assistant:'):
+                start = number
+                break
+        if start is None:
+            return None
+        body = []
+        inside = False
+        for line in lines[start + 1:]:
+            if line and not line[0].isspace():
+                break
+            stripped = line.strip()
+            if stripped.startswith('on_client_connected:'):
+                inside = True
+                continue
+            if inside:
+                if stripped.startswith('on_client_disconnected:'):
+                    break
+                if stripped.startswith('on_error:'):
+                    break
+                body.append(line)
+        return chr(10).join(body) if body else None

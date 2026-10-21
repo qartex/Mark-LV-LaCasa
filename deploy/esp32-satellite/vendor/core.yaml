@@ -532,6 +532,20 @@ voice_assistant:
     - lambda: id(init_in_progress) = false;
     - lambda: id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
     - script.execute: control_leds
+    # The wake word engine must survive a client reconnect.
+    #
+    # MicroWakeWord::start() has no retry of its own, and the engine is
+    # started only once during boot. If that one start loses the race
+    # against the component setup, the board stays deaf for the whole
+    # uptime - every later client (the bridge included) would reconnect to
+    # a satellite that never listens. The upstream vendor core restarts
+    # the engine on every client connection for exactly that reason.
+    - if:
+        condition:
+          lambda: return !id(mww).is_running();
+        then:
+          - micro_wake_word.start:
+          - logger.log: "Wake word engine restarted after the client connected"
     # The boot chime remains wired but its switch is permanently disabled below.
     - if:
         condition:
