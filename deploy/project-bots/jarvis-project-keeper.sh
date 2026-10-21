@@ -685,6 +685,37 @@ check_sensors() {
   fi
 }
 
+# Die Sprecherdatei traegt persoenliche Daten (Name, Aufgaben, Raum) und
+# muss owner-only sein. Die Bridge verweigert sie sonst mit einem
+# PermissionError - und das faellt nur im Log auf, nicht im Alltag.
+check_briefing_permissions() {
+  local out rc
+  out=$(/usr/bin/timeout "$SSH_TIMEOUT" "$SSH_BIN" "${SSH_OPTS[@]}" -T "$SERVER" \
+    'for f in /home/lacasa/Mark-LV-LaCasa/config/briefing-speakers.json; do
+       if [ -e "$f" ]; then stat -c "%a %U" "$f" 2>/dev/null || echo "FEHLT"; else echo "FEHLT"; fi
+     done' 2>/dev/null)
+  rc=$?
+  if [ $rc -ne 0 ] || [ -z "$out" ]; then
+    add_problem "BRIEFING_UNPRUEFBAR: die Rechte der Sprecherdatei liessen sich nicht pruefen"
+    return 1
+  fi
+  local mode owner
+  mode=$(printf '%s' "$out" | /usr/bin/head -1 | /usr/bin/awk '{print $1}')
+  owner=$(printf '%s' "$out" | /usr/bin/head -1 | /usr/bin/awk '{print $2}')
+  if [ "$mode" != "600" ]; then
+    add_problem "BRIEFING_DATEI_OFFEN: die Sprecherdatei hat die Rechte ${mode:-?} statt 600 - die Bridge verweigert das Morgen-Briefing dann mit einem PermissionError (Fix: chmod 600)"
+    return 1
+  fi
+  # Der Owner muss lacasa sein - der Benutzer, unter dem die Bridge laeuft.
+  # Der Wächter selbst laeuft als root, deshalb ist der Vergleich mit
+  # $(id -un) hier richtiglos.
+  if [ -n "$owner" ] && [ "$owner" != "lacasa" ]; then
+    add_problem "BRIEFING_DATEI_FREMDER_OWNER: die Sprecherdatei gehoert ${owner}, die Bridge laeuft als lacasa"
+    return 1
+  fi
+  add_note "BRIEFING_OK: die Sprecherdatei ist owner-only (600)"
+}
+
 check_queue() {
   local out rc
   out=$(remote_queue)
@@ -720,6 +751,7 @@ main() {
   if ! deadline_reached; then check_checkouts; else add_problem "PRUEFUNG_ABGEBROCHEN: die Zeitgrenze des Laufs war erreicht - nicht alle Pruefungen liefen"; fi
   if ! deadline_reached; then check_board; else add_problem "PRUEFUNG_ABGEBROCHEN: die Zeitgrenze des Laufs war erreicht - nicht alle Pruefungen liefen"; fi
   if ! deadline_reached; then check_sensors; else add_problem "PRUEFUNG_ABGEBROCHEN: die Zeitgrenze des Laufs war erreicht - nicht alle Pruefungen liefen"; fi
+  if ! deadline_reached; then check_briefing_permissions; else add_problem "PRUEFUNG_ABGEBROCHEN: die Zeitgrenze des Laufs war erreicht - nicht alle Pruefungen liefen"; fi
   if ! deadline_reached; then check_queue; else add_problem "PRUEFUNG_ABGEBROCHEN: die Zeitgrenze des Laufs war erreicht - nicht alle Pruefungen liefen"; fi
 
   local now new_state count
