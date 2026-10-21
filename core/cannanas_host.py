@@ -275,6 +275,21 @@ def _watering_payload(result: dict) -> dict:
             'total_records': len(records)}
 
 
+def _looks_like_id(text: str) -> bool:
+    """Whether a label is a raw record id rather than a name.
+
+    The mother plants of this club are nameless, and a mother whose batch
+    carries no label comes through as her uuid. Spoken out loud, that is
+    a wall of hex nobody can remember.
+    """
+    stripped = text.strip()
+    if len(stripped) < 8:
+        return False
+    if not all(char in '0123456789abcdefABCDEF-' for char in stripped):
+        return False
+    return stripped.count('-') >= 1
+
+
 def _cutting_payload(result: dict) -> dict:
     """The spoken answer to "how many cuttings do I have from that mother".
 
@@ -319,6 +334,11 @@ def _cutting_payload(result: dict) -> dict:
         label = mother
         if mother_id and seen_labels.get(mother, 0) > 1:
             label = f'{mother} ({mother_id[:6]})'
+        elif _looks_like_id(mother):
+            # A mother without a name and without a batch label comes
+            # through as her raw id. Spoken out loud that is a wall of
+            # hex, so it is shortened the same way a duplicate label is.
+            label = f'Mutter {mother_id[:6]}' if mother_id else mother
         records.append({
             'mother': label,
             'mother_id': mother_id,

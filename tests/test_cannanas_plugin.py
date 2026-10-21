@@ -945,6 +945,45 @@ class TestCannabisStatusStillDenied(PluginFixture):
         self.assertFalse(registry.has('cannabis_status'))
 
 
+class TestTheSpokenMotherLabel(PluginFixture):
+    """A mother without a name comes through as her raw id.
+
+    The mother plants of this club are nameless, and a mother whose batch
+    carries no label arrives as her uuid. Spoken out loud that is a wall
+    of hex, so it is shortened the way a duplicate label is.
+    """
+
+    def _payload(self, mutters):
+        from core.cannanas_host import _cutting_payload
+
+        return _cutting_payload({'ok': True, 'mutters': mutters,
+                                 'total_stecklinge': 0})
+
+    def test_a_raw_mother_id_is_spoken_short(self):
+        raw = '01f22f44-41a9-4ef9-a9b8-2302df1daae1'
+        result = self._payload([
+            {'mother': raw, 'mother_id': raw, 'stecklinge': 0, 'chargen': 0},
+        ])
+        self.assertEqual('Mutter 01f22f', result['records'][0]['mother'])
+
+    def test_a_named_mother_keeps_her_name(self):
+        result = self._payload([
+            {'mother': 'Super Buff Cherry #26', 'mother_id': '3025b2ab-1',
+             'stecklinge': 15, 'chargen': 1},
+        ])
+        self.assertEqual('Super Buff Cherry #26', result['records'][0]['mother'])
+
+    def test_two_mothers_of_one_label_keep_the_id_apart(self):
+        result = self._payload([
+            {'mother': 'Ztilton #1', 'mother_id': 'aaaaaa11', 'stecklinge': 2,
+             'chargen': 1},
+            {'mother': 'Ztilton #1', 'mother_id': 'bbbbbb22', 'stecklinge': 3,
+             'chargen': 1},
+        ])
+        labels = [record['mother'] for record in result['records']]
+        self.assertEqual(['Ztilton #1 (aaaaaa)', 'Ztilton #1 (bbbbbb)'], labels)
+
+
 class TestSpokenStatusArticles(PluginFixture):
     """A voice says "im Wachstum" - the article is not part of the phase.
 
