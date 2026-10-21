@@ -147,15 +147,27 @@ verwirft die Vorschau. Ohne bestätigte Vorschau passiert **nie** ein Schreibvor
 
 | Geprüfft | Befund |
 |---|---|
-| 268 Pflanzen | **0** mit `is_mother`, **0** mit `parent_id`, **0** mit Tags |
-| 83 Chargen | keine führt ein `mother_plants`-Feld — das Feld existiert im Schema, wird aber nicht ausgeliefert |
-| 39 Stecklinge im Inventory | alle mit `quantity: 0`, `parent_id: null`, `source_inventory_ids: null` |
+| `GET /plants` (Vorgabe) | 268 Pflanzen — **0** mit `is_mother`, **0** mit `parent_id` |
+| `GET /plants?archived=true` | **803** Pflanzen — **34** Mütter (`is_mother`), **164** mit `parent_id` |
+| `GET /batches` | **0 von 83** führen ein `mother_plants`-Feld — es ist ein reines Schreibfeld |
+| 39 Stecklinge im Inventory | alle mit `quantity: 0`, `parent_id: null` |
 
-Die Stecklingsbilanz antwortet deshalb heute mit „0 Stecklinge“ statt „keine Einträge“
-— die Funktion ist bereit und rechnet korrekt, es fehlen die Daten. Die Mutter hat noch
-nie eine Charge mit Mutter-Angabe angelegt, deshalb ist die Beziehung in der Datenbank
-nicht vorhanden. Sobald eine Charge mit „6 Stecklinge von Mutter Ztilton #1“ angelegt
-wird, greift die Bilanz ohne Codeänderung.
+**Die Stecklingsbilanz war kaputt, nicht die Daten.** Sie las `batches[].mother_plants` —
+ein Feld, das die Lese-Route nie zurückgibt — und fragte die Pflanzen ohne
+`archived` ab, also ohne die 34 Mütter und 164 Stecklinge zu sehen. Der Fix liest
+`plants[].parent_id` und `plants[].is_mother` mit `archived=true`.
+
+**Was trotzdem 0 bleibt:** Die 164 mutter-verknüpften Pflanzen liegen sämtlich in
+**archivierten** Chargen. Die 83 aktiven Chargen (Ztilton #1…#6, Psycho #1…#4, alle
+vom 2026-10-09) haben null Mutterbezug — dort wurde die Beziehung beim Anlegen nie
+erfasst. Für sie ist „0 Stecklinge“ die richtige Antwort, weil dort keine sind.
+
+**Wie die Zahl entsteht:** Beim Anlegen einer Charge gehört `mother_plants =
+[{plant_id, cutting_count}]` in den Request; die API materialisiert daraus genau
+`cutting_count` Child-Pflanzen mit `parent_id`. Die historischen Chargen belegen das:
+dort gilt durchgehend `total_pflanzen == pflanzen_mit_parent_id` bei genau einer Mutter
+je Charge. Ab dem ersten „Charge Ztilton #7 von Mutter Ztilton #1, 6 Stecklinge“
+greift die Bilanz — für die aktuellen Chargen erst ab dem Anlegen mit Mutter-Angabe.
 
 Genau so ist es mit dem Gieß-Intervall: kein Tagebucheintrag erwähnt das Gießen, also
 sagen die Räume „unbekannt ohne Giessen“ statt einer erfundenen Zahl.
