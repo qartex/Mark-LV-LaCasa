@@ -289,6 +289,14 @@ def _cutting_payload(result: dict) -> dict:
     mutters = result.get('mutters') or []
     records = []
     parts = []
+    # Count the labels first: a label that appears twice needs the id to
+    # stay unambiguous in the spoken answer.
+    seen_labels: dict = {}
+    for entry in mutters:
+        if isinstance(entry, dict):
+            label = str(entry.get('mother') or '').strip()
+            if label:
+                seen_labels[label] = seen_labels.get(label, 0) + 1
     for entry in mutters:
         if not isinstance(entry, dict):
             continue
@@ -303,12 +311,20 @@ def _cutting_payload(result: dict) -> dict:
             batches = int(entry.get('chargen') or 0)
         except (TypeError, ValueError):
             batches = 0
+        mother_id = str(entry.get('mother_id') or '')
+        # Two mothers can carry the same label (they inherit it from their
+        # batch). Then the label alone would name the wrong one, so the
+        # id makes the entry distinct.
+        label = mother
+        if mother_id and seen_labels.get(mother, 0) > 1:
+            label = f'{mother} ({mother_id[:6]})'
         records.append({
-            'mother': mother,
+            'mother': label,
+            'mother_id': mother_id,
             'stecklinge': cuttings,
             'chargen': batches,
         })
-        parts.append(f'{mother}: {cuttings} Stecklinge')
+        parts.append(f'{label}: {cuttings} Stecklinge')
     summary = ('Stecklinge: ' + ', '.join(parts) + '.') if parts \
         else 'Stecklinge: keine Einträge.'
     total = result.get('total_stecklinge')
