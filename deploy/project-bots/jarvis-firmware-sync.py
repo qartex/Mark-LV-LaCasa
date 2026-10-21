@@ -24,7 +24,18 @@ SERVER = 'lacasa@lacasa-server'
 MAC = 'qartex@100.115.163.32'
 REPO_DIR = '/home/lacasa/Mark-LV-LaCasa-esp32'
 MAC_VENDOR = '/Users/qartex/waveshare-va-test/config/esp32-satellite/vendor'
-FILES = ('core.yaml', 'provenance.json')
+MAC_ESP = '/Users/qartex/waveshare-va-test/config/esp32-satellite'
+# Jede Datei, die den ESPHome-Build auf dem Mac bestimmt. Geaendert wird
+# nur, was den Build beeinflusst - die Secrets bleiben unangetastet.
+FILES = (
+    ('core.yaml', REPO_DIR + '/deploy/esp32-satellite/vendor/core.yaml',
+     MAC_VENDOR + '/core.yaml'),
+    ('provenance.json', REPO_DIR + '/deploy/esp32-satellite/vendor/provenance.json',
+     MAC_VENDOR + '/provenance.json'),
+    ('waveshare-phase1.yaml',
+     REPO_DIR + '/deploy/esp32-satellite/waveshare-phase1.yaml',
+     MAC_ESP + '/waveshare-phase1.yaml'),
+)
 LOG = '/root/.hermes/logs/jarvis-firmware-sync.log'
 
 
@@ -54,10 +65,7 @@ def remote_hash(host, path):
 
 def main():
     findings = []
-    for name in FILES:
-        server_path = f'{REPO_DIR}/deploy/esp32-satellite/vendor/{name}'
-        mac_path = f'{MAC_VENDOR}/{name}'
-
+    for name, server_path, mac_path in FILES:
         server_hash = remote_hash(SERVER, server_path)
         if server_hash is None:
             findings.append(f'QUELLE_FEHLT: {name} ist auf lacasa-server '
