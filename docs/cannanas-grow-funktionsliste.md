@@ -1,7 +1,7 @@
 # Cannanas-Funktionsliste für JARVIS (Stand 2026-10-20)
 
 Diese Liste zeigt, was JARVIS über Sprache mit Cannanas kann — und was noch fehlt.
-Adapter-Stand: `cannanas-mcp-adapter` 2.5.0 (38 Werkzeuge), Mark-LV auf `feat/esp32-satellite-phase1`.
+Adapter-Stand: `cannanas-mcp-adapter` 2.6.0 (40 Werkzeuge), Mark-LV auf `feat/esp32-satellite-phase1`.
 
 **So funktioniert jede Änderung:** JARVIS liest den Zustand, berechnet eine Vorschau und
 spricht sie vor. Erst nach deinem gesprochenen **„ja“** wird geschrieben. „Abbrechen“
@@ -131,7 +131,7 @@ verwirft die Vorschau. Ohne bestätigte Vorschau passiert **nie** ein Schreibvor
 | Finanzen, Mitglieder, Chat, Cart, Rollen, POS, Transport | Kein Grow-Bereich |
 | `grow-configs` ändern | Club-weit; ein Sprachbefehl dafür wäre zu global |
 
-## 8b. Die sieben neuen Gärtner-Werkzeuge (Adapter 2.5.0)
+## 8b. Die sieben neuen Gärtner-Werkzeuge (Adapter 2.5.0 und 2.6.0)
 
 | Funktion | Status | So sagst du es |
 |---|---|---|
@@ -194,8 +194,8 @@ noch offen ist, ist die **Datenlage** und nicht mehr der Code:
 
 ## Technischer Nachweis
 
-- Adapter 2.5.0: 38 Werkzeuge, Allowlist geschlossen (nur dokumentierte Pfade aus dem gepinnten OpenAPI-Fixture), 205 Tests grün.
-- Mark-LV: geschlossene Aktions-Enum mit 30 Aktionen, 776 Tests grün.
+- Adapter 2.6.0: 40 Werkzeuge, Allowlist geschlossen (nur dokumentierte Pfade aus dem gepinnten OpenAPI-Fixture), 225 Tests grün.
+- Mark-LV: geschlossene Aktions-Enum mit 30 Aktionen, 798 Tests grün.
 - Live gegen die echte API geprüft (nur lesend): Zonen, Chargen, Pflanzen, Tagebücher, Ernten, Grow-Einstellungen.
 - Live-Prepare geprüft (ohne Bestätigung, also ohne Schreibvorgang): Zonen-Update, Pflanzen-Update, Chargen-Update, Tagebuch, Ernte, Verschmutzung.
 - Jeder bestätigte Write: Audit-Eintrag **vor** dem POST, Bestätigung gegen die Boot-ID des Adapters, Rückgabe-ID wird verifiziert.
