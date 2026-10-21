@@ -39,6 +39,37 @@ async def main():
     print('=' * 64)
     print()
 
+    # Die Bridge haelt den Voice-Assistant-Slot des Boards. Nur EIN Client
+    # darf darauf sein - sonst sieht der Test keinen Turn, auch wenn das
+    # Board hoert. Also: Bridge kurz stoppen, testen, wieder starten.
+    import subprocess
+
+    def systemctl_ok(action):
+        """True, wenn der Befehl erfolgreich war (returncode 0)."""
+        return subprocess.run(
+            ['systemctl', '--user', action, 'esp32-jarvis-bridge.service'],
+            capture_output=True, text=True, timeout=30).returncode == 0
+
+    bridge_was_active = systemctl_ok('is-active')
+    if bridge_was_active:
+        print('Bridge wird kurz gestoppt (sie haelt den Voice-Assistant-Slot) ...')
+        systemctl_ok('stop')
+        await asyncio.sleep(2)
+    print()
+
+    try:
+        await run_test()
+    finally:
+        if bridge_was_active:
+            print()
+            print('Bridge wird wieder gestartet ...')
+            systemctl_ok('start')
+    print()
+
+
+async def run_test():
+    from esp32_jarvis_bridge import load_api_key
+
     key = load_api_key(KEY)
     # Die Bridge spricht das Board ueber den Noise-PSK an - die API ist
     # verschluesselt, ein blosser Login genuegt nicht.
