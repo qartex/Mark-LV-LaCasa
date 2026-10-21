@@ -655,6 +655,56 @@ class TestPrepareForwardsSpokenFields(PluginFixture):
 
         self.assertIn("in_reserve", CANNANAS_PLANT_CHANGE_PARAMETERS)
 
+    def test_the_reserve_marker_is_a_spoken_parameter(self):
+        """The model may only speak what the schema offers it.
+
+        Without the parameter in the spoken list the model could not name
+        the marker at all: the host read it, the schema never offered it.
+        """
+        from core.cannanas_host import CANNANAS_SPOKEN_PARAMETERS
+
+        self.assertIn("in_reserve", CANNANAS_SPOKEN_PARAMETERS)
+
+    def test_the_reserve_marker_arrives_only_once(self):
+        """Flat and nested are two ways to say it, not two markers."""
+        from core.cannanas_host import prepare_tool_call
+
+        _tool, args = prepare_tool_call(
+            "prepare_plant_update",
+            {"plant_name": "Ztilton #1", "in_reserve": True,
+             "fields": {"in_reserve": True}},
+            self.BINDING)
+        self.assertEqual({"in_reserve": True}, args["fields"])
+
+    def test_the_plants_flag_is_a_spoken_parameter(self):
+        """'With their plants' must be offerable to the model."""
+        from core.cannanas_host import CANNANAS_SPOKEN_PARAMETERS
+
+        self.assertIn("with_plants", CANNANAS_SPOKEN_PARAMETERS)
+
+    def test_the_batch_move_travels_with_its_plants(self):
+        """The flag the gardener speaks must reach the adapter."""
+        from core.cannanas_host import prepare_tool_call
+
+        _tool, args = prepare_tool_call(
+            "prepare_batch_move",
+            {"plant_name": "Ztilton #6", "room": "Helsinki",
+             "with_plants": True},
+            self.BINDING)
+        self.assertEqual("Ztilton #6", args["batch"])
+        self.assertEqual("Helsinki", args["room"])
+        self.assertTrue(args["with_plants"])
+
+    def test_the_batch_move_without_the_flag_leaves_the_decision_to_the_adapter(self):
+        """No spoken flag means no flag: the adapter owns its default."""
+        from core.cannanas_host import prepare_tool_call
+
+        _tool, args = prepare_tool_call(
+            "prepare_batch_move",
+            {"plant_name": "Ztilton #6", "room": "Helsinki"},
+            self.BINDING)
+        self.assertNotIn("with_plants", args)
+
     def test_batch_update_forwards_room_and_notes_from_the_spoken_parameters(self):
         from core.cannanas_host import prepare_tool_call
 

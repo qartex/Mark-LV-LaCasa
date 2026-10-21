@@ -32,12 +32,12 @@ verwirft die Vorschau. Ohne bestätigte Vorschau passiert **nie** ein Schreibvor
 |---|---|---|
 | Status einer **Pflanze** (Saat → Keimung → Steckling → Wachstum → Blüte → Ernte → Trocknung → Curing → Quarantäne → Vernichtet) | ✅ | „Ztilton #3 ist jetzt in Blüte“ |
 | Status einer **Charge** | ✅ | „Die Charge Ztilton Woche 4 ist in Blüte“ |
-| Status **aus dem Datum** ableiten (z. B. „ist seit 3 Wochen in Blüte“) | 🟡 | Datenfeld `cultivation_flowering_date` existiert, Sprachlogik offen |
+| Status **aus dem Datum** ableiten (z. B. „ist seit 3 Wochen in Blüte“) | ✅ | „Ztilton #3 ist seit 3 Wochen in Blüte“ — setzt Status **und** Blütendatum |
 | Kultur-Daten setzen (Aussaat, Keimung, Steckling, Vegetation, Blüte, Ernte, Trocknung, Curing, Vernichtung) | ✅ | „Setz das Blütendatum auf den 5. Oktober“ |
 | Erwartetes **Erntedatum** | ✅ | „Ernte am 20. Oktober“ |
 | **Quarantäne** setzen | ✅ | „Ztilton #3 in Quarantäne“ |
-| Pflanze **archivieren** | 🟡 | `archived` technisch möglich, Sprache bewusst offen (Wirkung schwer rückgängig zu machen) |
-| Charge **archivieren** | ❌ | Der Adapter kennt dieses Feld bei Chargen nicht |
+| Pflanze **archivieren** | ✅ | „Archiviere Ztilton #3“ — der Marker `archived` ist im Schema angeboten; die Wirkung ist schwer rückgängig zu machen, also immer mit Vorschau und Bestätigung |
+| Charge **archivieren** | ❌ | Der Adapter kennt dieses Feld bei Chargen nicht (`UPDATE_FIELDS` der Charge enthält kein `archived`) |
 
 ## 3. Umziehen und Räume
 
@@ -45,7 +45,7 @@ verwirft die Vorschau. Ohne bestätigte Vorschau passiert **nie** ein Schreibvor
 |---|---|---|
 | **Pflanze** in einen anderen Raum umziehen | ✅ | „Zieh Ztilton #3 nach Helsinki“ |
 | **Charge** in einen anderen Raum umziehen | ✅ | „Die Charge Ztilton Woche 4 gehört nach Helsinki“ |
-| **Charge samt ihrer Pflanzen** umziehen | 🟡 | Heute: zwei Aktionen nötig (Charge umziehen, dann Pflanzen). Ein Zug Befehl für beides ist offen |
+| **Charge samt ihrer Pflanzen** umziehen | ✅ | „Zieh die Charge Ztilton #6 mit allen Pflanzen nach Helsinki“ — ein Zug, die Pflanzen wandern mit |
 | **Raum/Zone** anlegen | 🟡 | API vorhanden (`createZone`), Sprache offen |
 | **Raum** beschreiben (Größe, Licht, Belüftung, Temperatur, Feuchte, Leistung, Notizen) | ✅ | „Madrid: LED 400 Watt, Notiz Blüte-Raum“ |
 | **Raum** umbenennen | ✅ | „Halle in Trockenraum umbenennen“ |
@@ -60,7 +60,7 @@ verwirft die Vorschau. Ohne bestätigte Vorschau passiert **nie** ein Schreibvor
 | Pflanze zur **Mutter** erklären | ✅ | „Mach Ztilton #3 zur Mutterpflanze“ |
 | Mutterpflanze als **Elternteil** setzen | ✅ | „Ztilton #8 ist ein Schnitt von Ztilton #3“ |
 | **Schnittanzahl** pro Mutter bei der Charge | ✅ | „6 Stecklinge von Mutter A“ |
-| Mutterpflanzen **mit Schnittzahlen** zählen | 🟡 | Daten vorhanden, Auswertung „wie viele Stecklinge von welcher Mutter“ offen |
+| Mutterpflanzen **mit Schnittzahlen** zählen | ✅ | „Wie viele Stecklinge habe ich von Mutter Ztilton #1?“ |
 
 ## 5. Pflanzen und Bestände lesen
 
@@ -138,9 +138,9 @@ verwirft die Vorschau. Ohne bestätigte Vorschau passiert **nie** ein Schreibvor
 | **Charge samt Pflanzen** in einen anderen Raum umziehen | ✅ | „Zieh die Charge Ztilton #6 mit allen Pflanzen nach Helsinki“ |
 | **Status aus dem Alter** ableiten (Blüte seit 3 Wochen) | ✅ | „Ztilton #3 ist seit 3 Wochen in Blüte“ — setzt Status **und** Blütendatum |
 | **Stecklingsbilanz** je Mutterpflanze | ✅ | „Wie viele Stecklinge habe ich von Mutter Ztilton #1?“ |
-| **Tagebuch mit Messwerten** aus Home Assistant | ✅ | „Tagebucheintrag Madrid“ — die Temperatur kommt vom Sensor des Raums |
+| **Tagebuch mit Messwerten** aus Home Assistant | ✅ | „Tagebucheintrag Madrid“ — die Temperatur kommt vom Sensor des Raums. Gilt für beide Tagebuch-Wege: das Werkzeug `cannanas_diary_prepare` **und** die Aktion `prepare_diary_create` der geschlossenen Enum |
 | **Namenlose Pflanzen benennen** (mit Nummerierung) | ✅ | „Benenne alle Pflanzen der Charge Ztilton #6 mit Nummerierung“ → „Ztilton #6 (1)“, „Ztilton #6 (2)“ … |
-| **Mutterpflanze in Reserve** markieren | ✅ | „Ztilton #1 ist in Reserve“ — landet als Tag „reserve“ in der Pflanze |
+| **Mutterpflanze in Reserve** markieren | ✅ | „Ztilton #1 ist in Reserve“ — landet als Tag „reserve“ in der Pflanze. Das Modell darf den Marker als eigenen Parameter `in_reserve` setzen (auch innerhalb von `fields`) |
 | **Gieß-Intervall** je Raum | ✅ | „Wie lange wurde Madrid nicht gegossen?“ |
 
 **Was die Datenlage ergänzt:** Im Club gibt es keine Charge, deren Pflanzen als
@@ -160,7 +160,7 @@ automatisch mit an. Ohne Sensor bleibt der Eintrag bestehen, nur eben ohne Messw
 |---|---|
 | **Pflanzen sind nicht einzeln ansprechbar** | In Cannanas haben alle 268 Pflanzen `name = null`. Sie erben das Chargen-Label, deshalb ist ein Chargen-Label wie Ztilton #6 eine Charge. Eine Charge mit mehreren Pflanzen wird bewusst abgelehnt, damit nicht die falsche Pflanze geändert wird. **Abhilfe:** „Benenne alle Pflanzen der Charge Ztilton #6 mit Nummerierung“ — danach trägt jede Pflanze einen eigenen Namen. |
 | **Beim Anlegen sind nur wenige Felder möglich** | Der Adapter bietet fürs Anlegen weniger Felder als fürs Ändern. Gesprochene Felder, die nicht gesetzt werden können, werden **abgelehnt** (der Gärtner hört es) statt stillschweigend verworfen. |
-| **Archivieren ist nicht Sprache** | Die Wirkung ist schwer rückgängig zu machen, daher bleibt es bewusst eine Handarbeit. |
+| **Archivieren ist schwer rückgängig zu machen** | Die Pflanze lässt sich per Sprache archivieren, aber nur über die normale Kette: Vorschau und ausdrückliches „ja“. Das volle Rück-Archivieren (Wiederherstellen) bietet der Adapter nicht per Sprache an. |
 | **Kein Gieß-Intervall ohne passende Einträge** | Ein Raum ohne Tagebucheintrag, der das Gießen erwähnt, meldet „unbekannt“ — nicht „lange nicht gegossen“. Unbekannt ist nicht „nie“. |
 | **Ein leerer Tagebucheintrag wird nicht gespeichert** | Leere Texte würden eine Notiz löschen — das ist eine Löschung, keine Änderung, und wird abgelehnt. |
 
@@ -182,20 +182,17 @@ noch offen ist, ist die **Datenlage** und nicht mehr der Code:
 5. **Chargen-Beschreibungen** — `description` und `notes` der Charge sind der natürliche Ort
    für Sorten-Notizen wie „aus Phenom Hand #3“.
 
-1. **Chargen-Pflanzen-Zuordnung**: „Zieh die Charge Ztilton Woche 4 mit allen 12 Pflanzen nach Helsinki“ — heute zwei Ansagen, ein Wunsch.
-2. **Status aus dem Datum**: „Ztilton #3 ist seit drei Wochen in Blüte“ → Setzt `cultivation_flowering_date` und den Status automatisch.
-3. **Stecklingsbilanz**: „Wie viele Stecklinge habe ich von Mutter A?“ — verlangt die Schnittzahlen aus den Chargen.
-4. **Tagebuch aus Home Assistant**: „Tagebucheintrag Madrid“ übernimmt die gemessenen Werte des Raums (heute die Temperatur) aus den Sensoren, statt Werte diktieren zu müssen.
-5. **Chargen-Notizen als Namen**: Die 268 Pflanzen sind in Cannanas namenlos. Ein Werkzeug „benenne alle Pflanzen der Charge Ztilton #6 mit Nummerierung“ würde die Sprachsteuerung überhaupt erst natürlich machen.
-6. **Mutterpflanzen-Archiv**: Eine Mutter, die nicht mehr geschnitten wird, sollte als „in Reserve“ markiert werden können.
-7. **Gieß-Intervall** je Raum aus dem Tagebuch ableiten: „Wie lange wurde Madrid nicht gegossen?“
+**Bereits umgesetzt** (die sieben Vorschläge der früheren Fassung, siehe Abschnitt 8b):
+Chargen-Pflanzen-Zuordnung, Status aus dem Datum, Stecklingsbilanz, Tagebuch aus Home
+Assistant, Chargen-Notizen als Namen, Mutterpflanzen-Archiv („in Reserve“) und das
+Gieß-Intervall je Raum.
 
 ---
 
 ## Technischer Nachweis
 
 - Adapter 2.6.0: 40 Werkzeuge, Allowlist geschlossen (nur dokumentierte Pfade aus dem gepinnten OpenAPI-Fixture), 225 Tests grün.
-- Mark-LV: geschlossene Aktions-Enum mit 30 Aktionen, 798 Tests grün.
+- Mark-LV: geschlossene Aktions-Enum mit 28 Aktionen (17 Lesen + 11 Vorbereiten), 813 Tests grün.
 - Live gegen die echte API geprüft (nur lesend): Zonen, Chargen, Pflanzen, Tagebücher, Ernten, Grow-Einstellungen.
 - Live-Prepare geprüft (ohne Bestätigung, also ohne Schreibvorgang): Zonen-Update, Pflanzen-Update, Chargen-Update, Tagebuch, Ernte, Verschmutzung.
 - Jeder bestätigte Write: Audit-Eintrag **vor** dem POST, Bestätigung gegen die Boot-ID des Adapters, Rückgabe-ID wird verifiziert.

@@ -16,7 +16,6 @@ import os
 import re
 import threading
 import time
-import uuid
 
 from core.cannanas_audit import CannanasAudit, CannanasAuditClosed
 from core.cannanas_client import (
@@ -37,8 +36,10 @@ from core.cannanas_confirmation import (
 
 # ── boot identity ──────────────────────────────────────────────────────────
 
-# Fresh per JARVIS process: supplied with every prepare/confirm as
-# adapter_boot_id so a restart fences ordinary pending confirmations.
+# The write fence belongs to the adapter, not to this process: the adapter
+# reports its own boot id and refuses a confirm that carries any other one.
+# The host keeps no boot id of its own — an empty id means the write is
+# refused fail-closed, never a substitute id is sent.
 _ADAPTER_BOOT_ID = None
 
 
@@ -684,6 +685,14 @@ CANNANAS_SPOKEN_PARAMETERS = (
     'substrate',
     'fertilizer',
     'archived',
+    # A mother plant that is kept but no longer cut. The host reads the
+    # marker both as a flat parameter and inside the "fields" object; the
+    # schema must offer it, or the model can never say it.
+    'in_reserve',
+    # Whether the plants of a batch travel with it. The host reads it on
+    # the batch move; without it in the schema the model could not say
+    # "with their plants".
+    'with_plants',
     'fields',
 )
 
@@ -1068,9 +1077,9 @@ class CannanasHost:
         """The live adapter's own boot id, cached per client generation.
 
         The adapter fences every confirm on its own boot id, so the host
-        process uuid can never pass. If the id cannot be read, the host uuid
-        stays and the adapter refuses the confirm itself: fail closed, never a
-        wrong write.
+        process identity can never pass. If the id cannot be read, the
+        value stays empty and the host refuses the write itself: fail
+        closed, never a wrong write.
         """
         client = self.require_client()
         cached_client, cached_value = getattr(self, '_adapter_boot_cache', (None, ''))

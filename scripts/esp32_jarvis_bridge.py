@@ -288,7 +288,8 @@ CANNANAS_VOICE_PARAMETERS = {
         "type": "object",
         "description": (
             "Geaenderte Felder, z. B. status, room, notes, is_mother, "
-            "parent_plant, description. Werte sind gesprochen benannt."
+            "parent_plant, description, in_reserve (bool: Mutterpflanze "
+            "in Reserve). Werte sind gesprochen benannt."
         ),
     },
     "expected_yield": {"type": "number", "description": "Erwartete Erntemenge"},
@@ -296,6 +297,20 @@ CANNANAS_VOICE_PARAMETERS = {
     "substrate": {"type": "string", "description": "Substrat"},
     "fertilizer": {"type": "string", "description": "Düngung"},
     "archived": {"type": "boolean", "description": "Archiviert"},
+    "in_reserve": {
+        "type": "boolean",
+        "description": (
+            "Mutterpflanze in Reserve: true setzt den Marker, false "
+            "nimmt ihn weg."
+        ),
+    },
+    "with_plants": {
+        "type": "boolean",
+        "description": (
+            "Beim Umzug einer Charge: true ziehen die Pflanzen mit, "
+            "false nur die Charge."
+        ),
+    },
 }
 
 # The schema offers exactly the spoken parameters the host reads. A spoken

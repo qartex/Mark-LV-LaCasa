@@ -91,6 +91,11 @@ class FakeAdapter:
             return {'plant': args.get('plant'), **fields}
         if tool == 'prepare_batch_update':
             return {'batch': args.get('batch'), **fields}
+        if tool == 'prepare_batch_move':
+            preview = {'batch': args.get('batch'), 'room': args.get('room')}
+            if 'with_plants' in args:
+                preview['with_plants'] = args['with_plants']
+            return preview
         if tool == 'prepare_batch_plant_names':
             return {'batch': args.get('batch'),
                     'namen': [f'{args.get("prefix") or args.get("batch")} (1)']}
@@ -583,6 +588,59 @@ class TestTheSpokenYesConfirmsThePreview(VoicePathFixture):
                               if c['tool'].startswith('confirm_')])
 
 
+class TestTheGärtnerToolsReachTheAdapter(VoicePathFixture):
+    """The gardener tools of adapter 2.6.0 travel the whole voice path.
+
+    They were in the enum but had no test: a broken path stayed invisible.
+    """
+
+    def test_the_batch_move_reaches_the_adapter_with_its_room(self):
+        answer = self.call_cannanas({
+            'action': 'prepare_batch_move',
+            'plant_name': 'Ztilton #6',
+            'room': 'Helsinki',
+        })
+        args = self.prepare_arguments('prepare_batch_move')
+        self.assertEqual('Ztilton #6', args['batch'])
+        self.assertEqual('Helsinki', args['room'])
+        # The batch travels with its plants: the preview names the charge.
+        self.assertIn('Ztilton #6', answer)
+
+    def test_the_batch_move_carries_the_spoken_plants_flag(self):
+        """'with their plants' is a spoken decision, not an adapter default."""
+        self.call_cannanas({
+            'action': 'prepare_batch_move',
+            'plant_name': 'Ztilton #6',
+            'room': 'Helsinki',
+            'with_plants': True,
+        })
+        args = self.prepare_arguments('prepare_batch_move')
+        self.assertTrue(args['with_plants'])
+
+    def test_the_cutting_summary_answers_with_the_cuttings(self):
+        """The mother travels and the number of cuttings is spoken."""
+        self.adapter.results['mother_cutting_summary'] = {
+            'ok': True,
+            'mutters': [{'mother': 'Ztilton #1', 'stecklinge': 6, 'chargen': 2}],
+            'total_stecklinge': 6,
+        }
+        answer = self.call_cannanas({
+            'action': 'mother_cutting_summary',
+            'mother_plant': 'Ztilton #1',
+        })
+        self.assertEqual(['mother_cutting_summary'],
+                         [c['tool'] for c in self.adapter.calls])
+        self.assertEqual({'mother': 'Ztilton #1'},
+                         self.adapter.calls[0]['arguments'])
+        # The answer names the cuttings, not an empty list.
+        self.assertIn('Ztilton #1', answer)
+        self.assertIn('6', answer)
+        self.assertIn('Stecklinge', answer)
+        self.assertNotIn('keine Einträge', answer)
+        # A read never arms a confirmation.
+        self.assertIsNone(self.host.coordinator.current(DEVICE_ID))
+
+
 class TestTheModelFacingContract(VoicePathFixture):
     """What the model is offered: the closed enum and the spoken parameters."""
 
@@ -612,6 +670,83 @@ class TestTheModelFacingContract(VoicePathFixture):
         for parameter in schema['properties']:
             self.assertIn(parameter, cannanas_host.CANNANAS_SPOKEN_PARAMETERS,
                           parameter)
+
+    def test_the_reserve_marker_is_a_parameter_the_model_may_use(self):
+        """'In reserve' is a spoken decision: the model must be able to say it."""
+        self.call_cannanas({'action': 'overview'})
+        schema = self.offered_tools()['cannanas'].parameters_json_schema
+        reserve = schema['properties'].get('in_reserve')
+        self.assertIsNotNone(reserve, 'in_reserve is not offered to the model')
+        self.assertEqual('boolean', reserve['type'])
+        self.assertTrue(reserve['description'].strip())
+
+    def test_the_plants_flag_is_a_parameter_the_model_may_use(self):
+        """'With their plants' is a spoken decision: the model must say it."""
+        self.call_cannanas({'action': 'overview'})
+        schema = self.offered_tools()['cannanas'].parameters_json_schema
+        flag = schema['properties'].get('with_plants')
+        self.assertIsNotNone(flag, 'with_plants is not offered to the model')
+        self.assertEqual('boolean', flag['type'])
+        self.assertTrue(flag['description'].strip())
+
+    def test_the_fields_object_names_the_reserve_marker(self):
+        """The model may also set the marker inside the "fields" object."""
+        self.call_cannanas({'action': 'overview'})
+        schema = self.offered_tools()['cannanas'].parameters_json_schema
+        description = schema['properties']['fields']['description']
+        self.assertIn('in_reserve', description)
+
+    def test_every_action_of_the_enum_reaches_a_real_adapter_tool(self):
+        """No action of the enum may be a dead path.
+
+        The two dead paths of the last review — the cutting summary and the
+        batch move — were in the enum and had no test, so nobody noticed
+        that they were broken. Every action of the enum must map to a tool
+        the pinned adapter really ships.
+        """
+        from core.cannanas_actions import (
+            CANNANAS_PREPARE_ACTIONS,
+            CANNANAS_READ_ACTIONS,
+        )
+        from core.cannanas_client import ADAPTER_TOOLS
+
+        spoken = {
+            'prepare_plant_create': {
+                'plant_name': 'Ztilton #8', 'room': 'Madrid',
+                'strain': 'Ztilton', 'status': 'CUTTING'},
+            'prepare_strain_create': {
+                'plant_name': 'Ztilton', 'notes': 'Eine Sorte'},
+            'prepare_batch_create': {
+                'room': 'Madrid', 'strain': 'Ztilton', 'plant_count': 4,
+                'status': 'CUTTING'},
+            'prepare_plant_update': {
+                'plant_name': 'Ztilton #1', 'in_reserve': True},
+            'prepare_batch_update': {
+                'batch': 'Ztilton Woche 4', 'room': 'Helsinki'},
+            'prepare_batch_plant_names': {'batch': 'Ztilton #6'},
+            'prepare_batch_move': {
+                'batch': 'Ztilton #6', 'room': 'Helsinki', 'with_plants': True},
+            'prepare_diary_create': {
+                'room': 'Madrid', 'text': 'Heute gegossen.'},
+            'prepare_zone_update': {
+                'zone': 'Madrid', 'fields': {'notes': 'Lampe an'}},
+            'prepare_harvest_create': {
+                'plants': 'Ztilton #6', 'harvested_at': '2026-10-20'},
+            'prepare_waste_disposal_create': {'plants': 'Ztilton #6'},
+        }
+        shipped = set(ADAPTER_TOOLS())
+        binding = {'stable_device_id': 'esp32-1'}
+        for action in sorted(CANNANAS_READ_ACTIONS):
+            tool, arguments, prefix = cannanas_host.read_tool_call(
+                action, {'query': 'Ztilton', 'mother_plant': 'Ztilton #1'})
+            self.assertIn(tool, shipped, action)
+            self.assertTrue(prefix, action)
+            self.assertIsInstance(arguments, dict, action)
+        for action in sorted(CANNANAS_PREPARE_ACTIONS):
+            tool, arguments = cannanas_host.prepare_tool_call(
+                action, dict(spoken[action]), binding)
+            self.assertIn(tool, shipped, action)
+            self.assertIsInstance(arguments, dict, action)
 
     def test_the_system_instruction_names_the_grow_capabilities(self):
         instruction = bridge.DEFAULT_SYSTEM_INSTRUCTION
