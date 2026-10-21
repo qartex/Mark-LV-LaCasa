@@ -48,7 +48,7 @@ EXPECTED_TOOLS = [
     'confirm_waste_disposal_create',
 ]
 
-PINNED_VERSION = '2.7.0'
+PINNED_VERSION = '2.8.0'
 PINNED_SHA = 'a' * 64
 
 
@@ -222,7 +222,7 @@ class TestVersionAndSHAPinned(ClientFixture):
         from core.cannanas_client import PINNED_ADAPTER_VERSION, PINNED_WHEEL_SHA256
         self.assertEqual(PINNED_ADAPTER_VERSION, PINNED_VERSION)
         self.assertEqual(PINNED_WHEEL_SHA256,
-                         'b6889eceff02ee46ca3a0e4d787a7162e31683c097e40b29b7f5dea459625a92')
+                         '0e3e595f8f9d0ee4c74033a7f83e5fbed23c212bf72061cb7786d6a369b45c63')
 
     def test_zone_summary_is_on_the_read_allowlist(self):
         from core.cannanas_client import MCP_READ_TOOLS

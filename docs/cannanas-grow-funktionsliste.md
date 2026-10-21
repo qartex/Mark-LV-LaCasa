@@ -1,7 +1,7 @@
 # Cannanas-Funktionsliste für JARVIS (Stand 2026-10-20)
 
 Diese Liste zeigt, was JARVIS über Sprache mit Cannanas kann — und was noch fehlt.
-Adapter-Stand: `cannanas-mcp-adapter` 2.7.0 (40 Werkzeuge), Mark-LV auf `feat/esp32-satellite-phase1`.
+Adapter-Stand: `cannanas-mcp-adapter` 2.8.0 (40 Werkzeuge), Mark-LV auf `feat/esp32-satellite-phase1`.
 
 **So funktioniert jede Änderung:** JARVIS liest den Zustand, berechnet eine Vorschau und
 spricht sie vor. Erst nach deinem gesprochenen **„ja“** wird geschrieben. „Abbrechen“
@@ -214,7 +214,7 @@ Gieß-Intervall je Raum.
 
 ## Technischer Nachweis
 
-- Adapter 2.7.0: 40 Werkzeuge, Allowlist geschlossen (nur dokumentierte Pfade aus dem gepinnten OpenAPI-Fixture), 241 Tests grün.
+- Adapter 2.8.0: 40 Werkzeuge, Allowlist geschlossen (nur dokumentierte Pfade aus dem gepinnten OpenAPI-Fixture), 249 Tests grün.
 - Mark-LV: geschlossene Aktions-Enum mit 28 Aktionen (17 Lesen + 11 Vorbereiten), 819 Tests grün.
 - Live gegen die echte API geprüft (nur lesend): Zonen, Chargen, Pflanzen, Tagebücher, Ernten, Grow-Einstellungen.
 - Live-Prepare geprüft (ohne Bestätigung, also ohne Schreibvorgang): Zonen-Update, Pflanzen-Update, Chargen-Update, Tagebuch, Ernte, Verschmutzung.
