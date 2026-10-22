@@ -122,6 +122,41 @@ Nach einer Antwort hoert JARVIS weiter zu, damit du ohne neues
 von dir: „Mic muten", „Mikrofon stumm", „Sei stumm" oder „Hoer auf
 zuzuhoeren". Danach weckt „Hey Jarvis" den Dialog wieder.
 
+## Wichtig: HA zeigt den Satelliten als "unavailable" — das ist so gewollt
+
+In Home Assistant erscheinen die Entitaeten des Boards
+(`select.growraum_sprache_1_assistent`, `switch.growraum_sprache_1_microphone_mute`,
+`media_player.growraum_sprache_1` und die uebrigen) als **unavailable**, und
+im HA-Fehlerlog steht eine Zeile:
+
+```
+[aioesphomeapi.connection] 192.168.1.192: Connection error occurred:
+192.168.1.192: Connection requires encryption
+```
+
+**Das ist erwartet und darf waehrend des Tests nicht "repariert" werden.**
+Die ESPHome-Anbindung in HA hat einen anderen API-Key gespeichert, und
+wuerde sich nach dem Flash auch nicht von allein erwaehnen. Zwei Gruende
+sprechen dafuer, den Satelliten waehrend der Abnahme **nicht** in HA zu
+holen:
+
+1. Der Board-ESP32 darf nur **einen** Client auf dem Voice-Assistant-Slot
+   haben. Die produktive Bridge haelt ihn. Wuerde sich HA zusaetzlich
+   anmelden, kaeme es zum Konkurrenzkampf um genau diesen Slot — und der
+   Sprachpfad, den du testen willst, waere die erste, die leidet.
+2. Die Projektvorgabe lautet: **keine produktive HA-Integration fuer
+   Tests.**
+
+Die Stimme laeuft unabhaengig davon ueber die Bridge, und die Bridge
+arbeitet direkt mit dem Board — ohne HA dazwischen. Temperaturen und
+Briefing kommen aus HA, aber aus **anderen** Geraeten (den sechs
+`sensor.zonen_*_temperatur_celsius`), nicht vom Board.
+
+Wer den Satelliten spaeter doch in HA haben will, braucht den
+Board-Key (identisch mit dem Build-Eingang `api_encryption_key` auf dem
+Mac) **und** muss den Voice-Assistant-Slot eindeutig zuordnen. Vor dem
+Test bitte nicht anfassen.
+
 ## Ohne Menschen pruefen, ob das Board hoert
 
 Die TTS spricht "Hey Jarvis", das Board spielt es ueber seinen eigenen

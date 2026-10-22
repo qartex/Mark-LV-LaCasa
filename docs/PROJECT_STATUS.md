@@ -70,6 +70,13 @@
   Fehlbefund, kein Beweis.
 - **Port 8088** ist bewusst LAN-gebunden; alle Datenrouten verlangen ein
   gültiges Token, und im Tailnet ist nur `/app` publiziert.
+- **HA zeigt die Board-Entitäten als `unavailable`** — gewollt. Die
+  ESPHome-Anbindung in HA hat einen anderen API-Key; sie darf während der
+  Abnahme **nicht** repariert werden, weil sie sonst um den
+  Voice-Assistant-Slot konkurriert, den die Bridge hält. Der
+  Board-Key ist identisch mit dem Build-Eingang `api_encryption_key` auf
+  dem Mac (Fingerabdruck `e91f47f7`), er ändert sich also nicht durch
+  ein Flash.
 
 ## Wie man den Zustand prüft
 
