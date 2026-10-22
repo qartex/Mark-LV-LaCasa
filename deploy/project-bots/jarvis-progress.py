@@ -10,6 +10,8 @@ Geprueft wird:
   2. Sprecher-Enrollment - gibt es ein Profil?
   3. Adapter-Pin - laeuft der Host gegen die installierte Version?
   4. Checkouts - stehen Satellit und PC-JARVIS auf demselben Commit?
+  5. TTS-Kontingent - reicht das Gemini-Tageskontingent noch fuer den
+     Live-Test? (Jeder Turn kostet eine von zehn Anfragen pro Tag und Key)
 
 Stille bei gesund, eine Zeile je offenem Punkt bei Problemen.
 """
@@ -178,11 +180,65 @@ def check_checkouts():
     print(f'CHECKOUT_OK: beide Baeume stehen auf {commits[0]}', file=sys.stderr)
 
 
+def check_voice_quota():
+    """Wie viele Sprachaufrufe hat das Tageskontingent verbraucht?
+
+    Das Free-Tier erlaubt 10 Anfragen pro Tag und Modell. Jeder Turn des
+    Satelliten kostet eine davon. Die Zahl kommt aus dem Journal - ein
+    Probeaufruf wuerde das Kontingent verbrauchen, das fuer den Test da
+    sein soll.
+    """
+    code, out = ssh_run(
+        'journalctl --user -u esp32-jarvis-bridge.service --since "-24h" '
+        '--no-pager 2>/dev/null | grep -c "turn finished"')
+    if code != 0:
+        finding('TTS_KONTINGENT_UNPRUEFBAR: die Zahl der Sprachaufrufe liess '
+                'sich nicht zaehlen - das Tageskontingent kann nicht '
+                'abgeschaetzt werden')
+        return
+    try:
+        turns = int((out or '0').strip().splitlines()[-1])
+    except Exception:
+        finding('TTS_KONTINGENT_UNPRUEFBAR: die Zahl der Sprachaufrufe ist '
+                'unlesbar')
+        return
+
+    code2, out2 = ssh_run(
+        'ls /home/lacasa/waveshare-va-test/gemini-key*.txt 2>/dev/null | '
+        'wc -l')
+    try:
+        keys = int((out2 or '0').strip().splitlines()[-1])
+    except Exception:
+        keys = 0
+
+    # Zehn Anfragen pro Tag und Key. Die Zahl aus dem Journal zaehlt nur
+    # die Turns der BRIDGE - direkte TTS-Aufrufe (Loopback-Test,
+    # Sprecher-Enrollment) verbrauchen dasselbe Kontingent und stehen
+    # nicht im Journal. Die Zahl ist deshalb eine untere Grenze, und die
+    # Meldung sagt das.
+    #
+    # Und: tote Keys (401) zaehlen nicht mit. Die Reserve haengt an den
+    # Keys, die wirklich antworten - nicht an der Zahl der Dateien.
+    if turns >= 8:
+        finding(
+            f'TTS_KONTINGENT_KNAPP: die Bridge hat in den letzten 24 Stunden '
+            f'{turns} Sprachaufrufe gemacht, und die direkten TTS-Tests '
+            'kommen obendrauf. Das Free-Tier erlaubt 10 Anfragen pro Tag '
+            'und Key, und nicht jeder hinterlegte Key antwortet noch. Die '
+            'Stimme kann mitten im Test ausgehen. Handlung: einen Key mit '
+            'Kontingent ersetzen oder die Zahl der Testfragen begrenzen')
+        return
+    print(f'TTS_OK: mindestens {turns} Sprachaufrufe in 24 Stunden '
+          f'(nur die der Bridge, direkte Tests kommen obendrauf), '
+          f'{keys} Keys hinterlegt', file=sys.stderr)
+
+
 def main():
     check_board_firmware()
     check_speaker_profile()
     check_adapter_pin()
     check_checkouts()
+    check_voice_quota()
     if findings:
         print('\n'.join(findings))
     # Der Exitcode bleibt 0: die Meldung IST das Ergebnis, kein Fehler.

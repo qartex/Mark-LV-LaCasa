@@ -40,13 +40,56 @@ NOISE_PSK = pathlib.Path('/home/lacasa/waveshare-va-test/api-key.txt')
 SERVER_IP = '192.168.1.180'
 
 
+KEY_DIR = pathlib.Path('/home/lacasa/waveshare-va-test')
+KEY_FILES = ('gemini-key.txt', 'gemini-key-2.txt', 'gemini-key-3.txt',
+             'gemini-key-4.txt')
+
+
+def key_ring() -> list[str]:
+    """Dieselben Keys, die die Bridge benutzt - plus den aus der Config.
+
+    Die Bridge rotiert ueber mehrere Keys, weil das Free-Tier-Kontingent
+    pro Key und Modell begrenzt ist. Ein Test, der nur EINEN Key nimmt,
+    laeuft dann in ein 429, obwohl die Bridge sprechen koennte.
+    """
+    keys: list[str] = []
+    try:
+        cfg = json.loads(API_KEYS.read_text(encoding='utf-8'))
+        configured = cfg.get('gemini_api_key')
+        if isinstance(configured, str) and configured:
+            keys.append(configured)
+    except Exception:
+        pass
+    for name in KEY_FILES:
+        path = KEY_DIR / name
+        if not path.exists():
+            continue
+        value = path.read_text(encoding='utf-8').strip()
+        if value and value not in keys:
+            keys.append(value)
+    if not keys:
+        raise SystemExit('kein Gemini-Key gefunden')
+    return keys
+
+
 def api_key() -> str:
-    """Der Gemini-Key aus der Konfiguration, ohne ihn auszugeben."""
-    cfg = json.loads(API_KEYS.read_text(encoding='utf-8'))
-    key = cfg.get('gemini_api_key')
-    if not isinstance(key, str) or not key:
-        raise SystemExit('kein Gemini-Key in der Konfiguration')
-    return key
+    """Der erste Key, mit dem die TTS wirklich antwortet."""
+    from google import genai
+    from google.genai import types
+
+    last = None
+    for key in key_ring():
+        try:
+            client = genai.Client(api_key=key)
+            client.models.generate_content(
+                model=TTS_MODEL, contents='sag ok',
+                config=types.GenerateContentConfig(
+                    response_modalities=['AUDIO']))
+            return key
+        except Exception as exc:
+            last = exc
+    raise SystemExit(
+        f'kein Key mit TTS-Kontingent: {type(last).__name__}')
 
 
 def tts_pcm(text: str) -> tuple[bytes, int]:

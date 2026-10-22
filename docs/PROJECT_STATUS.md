@@ -49,7 +49,7 @@
 | Produktiver Cannanas-Write | Halbumzug- und Originalnamensemantik sind implementiert, aber nie gegen Produktionsdaten geprüft | Testclub |
 | Mutterbeziehungen | 34 Mütter und 164 Beziehungen existieren nur in **archivierten** Chargen; die aktuellen (Ztilton #1-#6, Psycho #1-#4) tragen keine | Datenlage |
 | Gießintervalle | Die Funktion ist implementiert, echte Gießdaten fehlen im Tagebuch | Datenlage |
-| Kompromittierte Gemini-Schlüssel | Die im Chat veröffentlichten Schlüssel sind widerrufen und außerhalb des Chats zu ersetzen | **Gärtner** |
+| Kompromittierte Gemini-Schlüssel | Die im Chat veröffentlichten Schlüssel sind widerrufen und außerhalb des Chats zu ersetzen. Von vier Keys antworten nur zwei, und nur **einer** hat Sprachkontingent — das Free-Tier erlaubt 10 Anfragen pro Tag und Modell, also **10 Sprachantworten pro Tag** | **Gärtner** |
 | Telegram | Die Vorgabe lautet „Telegram komplett raus". Die Betreiber-Cronjobs nutzen Telegram derzeit als Alarmkanal; der **Produktpfad** ist telegramfrei | Entscheidung |
 
 ## Grenzen, die man kennen muss

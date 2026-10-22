@@ -157,6 +157,42 @@ Board-Key (identisch mit dem Build-Eingang `api_encryption_key` auf dem
 Mac) **und** muss den Voice-Assistant-Slot eindeutig zuordnen. Vor dem
 Test bitte nicht anfassen.
 
+## Das Gemini-Kontingent: die harte Grenze fuer den Live-Test
+
+Das Gemini-Free-Tier erlaubt **10 Anfragen pro Tag und Modell**. Jeder
+Turn des Satelliten kostet **eine** davon — die Sprachausgabe. Zehn
+Antworten, und die Stimme ist fuer den Tag still. Das ist keine
+Eigenheit des Projekts, das ist das Kontingent des Anbieters.
+
+Der Stand vom 22.10., gemessen (nur die Werte, nie die Keys selbst):
+
+| Key | Sprachausgabe | Chat |
+|---|---|---|
+| `gemini-key.txt` | Kontingent leer (429) | OK |
+| `gemini-key-2.txt` | OK | OK |
+| `gemini-key-3.txt` | 401 — widerrufen | 401 |
+| `gemini-key-4.txt` | 401 — widerrufen | 401 |
+
+Die Bridge rotiert ueber alle vier und faengt sowohl 429 als auch 401 ab,
+die Stimme faellt also nicht beim ersten toten Key aus. **Aber:** von den
+vier Keys antwortet nur einer mit Kontingent, und die beiden 401er sind
+vermutlich genau die Keys, die wegen der Veroeffentlichung im Chat
+widerrufen wurden.
+
+**Was das fuer den Test bedeutet:**
+
+1. Der Live-Test sollte **unter zehn Fragen** bleiben, sonst geht die
+   Stimme mitten im Test aus. Der Fortschrittsbot meldet
+   `TTS_KONTINGENT_KNAPP`, wenn die Zahl kritisch wird.
+2. Die Keys im Chat veroeffentlicht sind kompromittiert und **muss der
+   Gaertner selbst ersetzen** — mit Keys, die Kontingent haben. Das ist
+   der eine Schritt, den ich nicht tun kann, und ohne ihn bleibt die
+   Reserve bei einem Key.
+3. Jeder **manuelle** TTS-Aufruf (der Loopback-Test, das
+   Sprecher-Enrollment) verbraucht dieselbe Tagesquote wie eine echte
+   Frage. Wenn du morgen viele Tests machst, plane die Reihenfolge so,
+   dass die **echten Fragen** zuerst kommen.
+
 ## Ohne Menschen pruefen, ob das Board hoert
 
 Die TTS spricht "Hey Jarvis", das Board spielt es ueber seinen eigenen
