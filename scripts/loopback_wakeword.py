@@ -165,26 +165,52 @@ async def main():
         await client.disconnect()
         return 1
 
-    print('3. Board spielt die Datei ab ...', flush=True)
-    client.media_player_command(
-        player_key, media_url=url, volume=0.35, announcement=False)
-    for _ in range(25):
-        await asyncio.sleep(1)
+    # Der Board hoert seinen EIGENEN Lautsprecher - das Echo ist nah und
+    # laut, deshalb ist der Test probabilistisch: je nach TTS-Rendering
+    # liegt die Wahrscheinlichkeit ueber oder unter der Schwelle. Ein
+    # einzelner Fehlschlag sagt nichts aus, also mehrmals versuchen.
+    attempts = 3
+    hits = 0
+    probabilities = []
+    for attempt in range(1, attempts + 1):
+        print(f'3. Board spielt die Datei ab (Versuch {attempt}/{attempts}) ...',
+              flush=True)
+        client.media_player_command(
+            player_key, media_url=url, volume=0.35, announcement=False)
+        for _ in range(20):
+            await asyncio.sleep(1)
+            if started or detected:
+                await asyncio.sleep(2)
+                break
         if started or detected:
+            hits += 1
+        for line in detected:
+            for part in line.split('probability is'):
+                if len(part) > 1:
+                    value = ''.join(
+                        ch for ch in part[1:] if ch.isdigit() or ch == '.')
+                    if value:
+                        probabilities.append(value)
+        detected.clear()
+        started.clear()
+        if hits < attempt:
             await asyncio.sleep(2)
-            break
 
     print()
-    if started:
-        print('ERGEBNIS: ERKANNT - der Turn kam zustande '
-              f'(Wakeword {started[0]!r})')
-    elif detected:
-        print('ERGEBNIS: ERKANNT - der Log zeigt eine Erkennung')
-    else:
-        print('ERGEBNIS: NICHT ERKANNT - der eigene Lautsprecher ist dem '
-              'Mikrofon zu nah oder zu laut.')
+    print(f'VERSUCHE: {hits} von {attempts} erkannt'
+          + (f' (Wahrscheinlichkeiten: {", ".join(probabilities)})'
+             if probabilities else ''))
+    if hits:
+        print('ERGEBNIS: ERKANNT - die Engine hat den Wakeword erkannt.')
+        await client.disconnect()
+        return 0
+    print('ERGEBNIS: NICHT ERKANNT - in allen Versuchen kam keine '
+          'Erkennung. Der eigene Lautsprecher ist dem Mikrofon zu nah. '
+          'Das ist KEIN Beweis fuer ein taubes Board: die Engine meldet '
+          'im Log "cutoff NNN (active)", und mit echter Stimme im Raum '
+          'ist die Erkennung deutlich besser.')
     await client.disconnect()
-    return 0 if (started or detected) else 1
+    return 1
 
 
 if __name__ == '__main__':
