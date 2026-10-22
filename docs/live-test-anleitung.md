@@ -18,25 +18,42 @@ Stimme fuer das Sprecher-Enrollment und der gemeinsame Test vor Ort.
 | Adapter | 2.8.0, gepinnt, 40 Werkzeuge, Hash-Kette konsistent |
 | Betreiber | Fortschritt, Projekt-Betreuer, Sicherheitsaudit, Firmware-Sync — schweigen bei gesundem Zustand |
 
-**Die vier Fixes, die jetzt drin sind:**
+**Die sechs Fixes, die jetzt drin sind:**
 
-1. `on_client_connected` startet die Wakeword-Engine neu, wenn sie tot
-   ist — ein Bridge-Reconnect macht das Board wieder taub.
-2. Der Schwellwert-Regler wirkt in **jeder** Empfindlichkeits-Position
+1. **Der Mikrofon-Fix** (der wichtigste): `voice_assistant.stop` bei
+   jedem Client-Wechsel stoppte die Mikrofonquelle. Die Quelle ist nicht
+   passiv, ihr Datengate schloss sich — und die **laufende** Engine
+   bekam nie wieder Ton. Sie meldete ehrlich „cutoff 153 (active)" und
+   war trotzdem taub. Der Reconnect-Pfad prüft jetzt
+   `microphone.is_capturing` und startet die Engine neu, wenn die Quelle
+   zu ist.
+2. **Der Ring** zeigt jetzt die Wakeword-Erkennung. Vorher rief nur
+   `control_leds` bei Boot und Client-Wechsel auf, nie bei einer
+   Phasenumstellung — der Ring blieb dunkel, während das Board zuhörte.
+3. Der Schwellwert-Regler wirkt in **jeder** Empfindlichkeits-Position
    (vorher nur in „Custom", sonst hat der Modell-Default 0.97 gewonnen).
-3. Der Guard setzt `--before usb-reset` — am nativen USB-JTAG kommt der
-   ESP32-S3 sonst nicht zuverlaessig in den Download-Modus.
-4. Der Flash-Waechter fragt den Produktionsserver, welche Firmware
-   laeuft, und fasst das Board nicht an, wenn sie schon aktuell ist.
+4. Der Guard setzt `--before usb-reset` — am nativen USB-JTAG kommt der
+   ESP32-S3 sonst nicht zuverlässig in den Download-Modus.
+5. Das Backup liest den Flash in **4-MB-Blöcken**: ein 16-MB-Read
+   bricht am nativen USB-Link bei 34 % ab („No more data to read from
+   the serial port"), eine niedrigere Baudrate hilft nicht.
+6. Die Bridge fragt ein Sprachmodell, das den Stil abgelehnt hat, beim
+   nächsten Mal **ohne** Stil — vorher kostete jeder Turn zwei
+   TTS-Anfragen statt einer. Das war die gemeldete Latenz.
 
-## Schritt 1: das Sprecher-Enrollment (5 Sekunden von dir)
+## Schritt 1: das Sprecher-Enrollment — erledigt
 
 Das Board streamt Mikrofon-Audio nur, wenn es selbst einen Turn startet —
 also erst nach dem Flash, und nur mit deiner Stimme. Die Datei
 `speaker-profiles.json` wurde nach einem Test mit der Synthese-Stimme
-geloescht: ein Profil aus einer fremden Stimme wuerde dich **aussperren**.
+gelöscht: ein Profil aus einer fremden Stimme würde dich **aussperren**.
 
-Auf lacasa-server:
+**Am 22.10. mit deiner Stimme erledigt:** `speaker-profiles.json`
+(owner-only, `0600`) enthält den Sprecher `lukas` mit dem Modell
+`res2net.onnx`, Schwelle 0.62. Die Bridge meldet
+`speaker identification status=enabled speakers=1`.
+
+Falls du das Enrollment wiederholen willst (etwa mit besserer Aufnahme):
 
 ```sh
 systemctl --user start jarvis-speaker-capture@lukas
@@ -44,9 +61,9 @@ systemctl --user start jarvis-speaker-capture@lukas
 
 Dann **vor dem Board "Hey Jarvis" sagen und etwa 4-5 Sekunden sprechen**.
 Das Skript nimmt genau diese Sekunden auf und schreibt daraus das
-Sprecherprofil (owner-only, `0600`).
+Sprecherprofil (owner-only).
 
-Pruefen, dass es geklappt hat:
+Prüfen, dass es geklappt hat:
 
 ```sh
 ls -l /home/lacasa/waveshare-va-test/speaker-profiles.json
@@ -57,6 +74,11 @@ Fehlt die Datei, sagt der Dienst dir, woran es lag:
 ```sh
 journalctl --user -u jarvis-speaker-capture@lukas -n 20 --no-pager
 ```
+
+**Wichtig:** der Capture-Dienst stoppt die Bridge vorher selbst (er
+braucht den Voice-Assistant-Slot) und startet sie danach wieder. Ohne
+diesen Stopp sieht der Capture keinen Turn und endet mit „no speech
+arrived", obwohl gesprochen wurde.
 
 ## Schritt 2: der gemeinsame Test
 
