@@ -758,6 +758,12 @@ class GeminiTurnEngine:
         self._history: list[dict] = []
         self._chat_model_pref: str | None = None
         self._tts_model_pref: str | None = None
+        # Models that only work WITHOUT a system instruction. A speech
+        # model rejects it, so every styled attempt is a doomed request:
+        # it burns quota and a round trip. The models that needed the
+        # plain retry are remembered and asked without the style next
+        # time.
+        self._models_needing_plain_config: set[str] = set()
         self._announcement_job_id = ""
         self._mute_requested = False
 
@@ -997,7 +1003,17 @@ class GeminiTurnEngine:
         last: BaseException | None = None
         for model in models:
             try:
-                result = self._call_with_retries(client, model, contents, config)
+                # A model that already rejected the optional shaping is
+                # asked without it right away: the styled call is doomed,
+                # and a doomed call costs quota and a round trip on every
+                # single turn.
+                call_config = config
+                if (model in self._models_needing_plain_config
+                        and retry_config is not None):
+                    call_config = retry_config
+                result = self._call_with_retries(
+                    client, model, contents, call_config
+                )
                 return model, result
             except Exception as exc:
                 if _is_retryable(exc) or _is_model_incompatible(exc):
@@ -1011,9 +1027,14 @@ class GeminiTurnEngine:
                         # lite TTS model rejects system_instruction outright).
                         _LOG.info("model retry status=plain-config model=%s", model)
                         try:
-                            return model, self._call_with_retries(
+                            result = self._call_with_retries(
                                 client, model, contents, retry_config
                             )
+                            # This model only works without the optional
+                            # shaping. Remember it, so the next call does
+                            # not pay for another doomed request.
+                            self._models_needing_plain_config.add(model)
+                            return model, result
                         except Exception as retry_exc:
                             if _is_retryable(retry_exc) or _is_model_incompatible(retry_exc):
                                 last = retry_exc
@@ -1238,15 +1259,16 @@ class GeminiTurnEngine:
                 )
             ),
         )
+        styled = types.GenerateContentConfig(
+            response_modalities=["AUDIO"],
+            system_instruction=style,
+            speech_config=plain_without_voice.speech_config,
+        )
         used_tts, speech_call = self._generate(
             client,
             tts_models,
             spoken,
-            types.GenerateContentConfig(
-                response_modalities=["AUDIO"],
-                system_instruction=style,
-                speech_config=plain_without_voice.speech_config,
-            ),
+            styled,
             retry_config=plain_without_voice,
         )
         self._tts_model_pref = used_tts

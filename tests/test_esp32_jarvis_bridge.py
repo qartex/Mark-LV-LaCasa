@@ -1684,6 +1684,48 @@ class CliAndLoggingTests(unittest.TestCase):
         self.assertEqual(2, len(calls), "same model must be retried without style")
         self.assertIsNone(calls[1][2].system_instruction)
 
+    def test_a_model_that_rejected_the_style_is_not_styled_again(self):
+        """The second turn must not waste a request on the styled call.
+
+        A speech model rejects the system_instruction, so every turn paid
+        for one doomed request before the working one. After the first
+        turn the model is known - it must be asked without the style.
+        """
+        class Err(Exception):
+            code = 400
+
+        calls = []
+
+        class Models:
+            def generate_content(self, model, contents, config):
+                calls.append((model, getattr(config, "system_instruction", None)))
+                if getattr(config, "system_instruction", None):
+                    raise Err("system_instruction rejected")
+                return SimpleNamespace(
+                    candidates=[SimpleNamespace(
+                        content=SimpleNamespace(
+                            parts=[SimpleNamespace(
+                                inline_data=SimpleNamespace(data=b"\x00\x00"))]))])
+
+        client = SimpleNamespace(models=Models())
+        style = SimpleNamespace(system_instruction="deutsch")
+        plain = SimpleNamespace(system_instruction=None)
+        engine = bridge.GeminiTurnEngine(GEMINI_KEY_MARKER)
+
+        engine._generate(client, ("speech-model",), "text", style,
+                         retry_config=plain)
+        self.assertEqual(2, len(calls), "the first turn needs the retry")
+
+        # The next turn must go straight to the working configuration.
+        calls.clear()
+        engine._generate(client, ("speech-model",), "text", style,
+                         retry_config=plain)
+        self.assertEqual(1, len(calls),
+                         "a model that already rejected the style must not "
+                         "be asked for it again: the doomed request wastes "
+                         "quota and a round trip")
+        self.assertIsNone(calls[0][1])
+
     def test_every_model_has_a_fallback_chain(self):
         self.assertIn(bridge.DEFAULT_MODEL, bridge.FALLBACK_CHAT_MODELS)
         self.assertIn(bridge.DEFAULT_TTS_MODEL, bridge.FALLBACK_TTS_MODELS)
