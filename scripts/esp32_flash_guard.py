@@ -443,9 +443,15 @@ def parse_flash_id_output(stdout: str, port: Path) -> ProbeResult:
 
 
 def _esptool_argv(esptool: str, port, baud: int, after: str, verb: str, tail: list) -> list[str]:
+    # --before usb-reset: the ESP32-S3 hangs on the native USB-Serial-JTAG.
+    # Without it esptool picks the reset itself ("default-reset" = DTR/RTS),
+    # and on native USB the chip then does not reliably reach the download
+    # mode: the board stayed in normal mode and the next step failed with
+    # "esptool flash-id failed". usb-reset uses the USB-JTAG reset, which
+    # makes the chain deterministic and self-healing.
     return [
         str(esptool), "--chip", CHIP_ARG, "--port", str(port), "--baud", str(baud),
-        "--after", str(after), verb,
+        "--before", "usb-reset", "--after", str(after), verb,
     ] + [str(item) for item in tail]
 
 
@@ -476,11 +482,47 @@ def _verify_argv(
                          [start, length, verify_file])
 
 
+# Die Art des Fehlers, ohne den Text. Die Meldung geht in Logs, und
+# esptool kann in seiner Ausgabe ein Geheimnis nennen - deshalb wird
+# der Text nur ausgewertet, nie wiedergegeben.
+_ESPTOOL_FAILURE_KINDS = (
+    ("port_not_open", "could not open port"),
+    ("port_busy", "resource temporarily unavailable"),
+    ("no_such_file", "no such file or directory"),
+    ("not_in_download_mode", "failed to connect"),
+    ("download_mode_failed", "download mode"),
+    ("timed_out", "timed out"),
+    ("timeout", "timeout"),
+    ("chip_not_found", "no chip detected"),
+    ("stub_failed", "stub flasher"),
+    ("checksum_mismatch", "checksum"),
+    ("write_failed", "failed to write"),
+)
+
+
+def _classify_esptool_failure(output: str) -> str:
+    """Die Art des esptool-Fehlers - ohne einen Zeichen des Originals."""
+    lowered = (output or "").lower()
+    for kind, marker in _ESPTOOL_FAILURE_KINDS:
+        if marker in lowered:
+            return kind
+    return "unknown"
+
+
 def _run(runner: Runner, argv: list[str], verb: str) -> RunResult:
     result = runner.run(argv)
     if result.returncode != 0:
+        # The argv and the KIND of the failure belong in the message: with
+        # the output suppressed, a failing call only showed an exit code,
+        # and the real cause (wrong port, chip not in download mode, baud)
+        # was invisible. The esptool output itself is NEVER echoed - it can
+        # name a secret, and this message ends up in a log.
+        kind = _classify_esptool_failure(
+            (result.stdout or "") + " " + (getattr(result, "stderr", "") or "")
+        )
         raise GuardError(
-            f"esptool {verb} failed with exit code {result.returncode} (output suppressed)"
+            f"esptool {verb} failed with exit code {result.returncode} "
+            f"({kind}); argv={' '.join(argv)}"
         )
     return result
 
