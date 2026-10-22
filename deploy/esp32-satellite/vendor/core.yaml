@@ -545,7 +545,30 @@ voice_assistant:
           lambda: return !id(mww).is_running();
         then:
           - micro_wake_word.start:
-          - logger.log: "Wake word engine restarted after the client connected"
+          - logger.log: "Wake word engine started after the client connected"
+        else:
+          - if:
+              condition:
+                microphone.is_capturing: i2s_mics
+              then:
+                - logger.log: "Microphone and wake word engine are running"
+              else:
+                # on_client_disconnected runs voice_assistant.stop, and that
+                # stops the microphone source (MicrophoneSource::stop ->
+                # mic_->stop). The source is not passive, so its data gate
+                # closes and the running engine receives no audio at all -
+                # the board is deaf. Only the engine's inference task opens
+                # the source again, so the engine has to be restarted.
+                - micro_wake_word.stop:
+                - delay: 300ms
+                - micro_wake_word.start:
+                - delay: 500ms
+                - if:
+                    condition:
+                      lambda: return !id(mww).is_running();
+                    then:
+                      - micro_wake_word.start:
+                - logger.log: "Microphone had been stopped - the wake word engine was restarted to reopen it"
     # The boot chime remains wired but its switch is permanently disabled below.
     - if:
         condition:
@@ -560,6 +583,13 @@ voice_assistant:
               id: play_sound
               priority: true
               sound_file: !lambda return id(boot_sound_custom);
+  on_wake_word_detected:
+    # The ring is the only feedback that the satellite heard. control_leds
+    # was called on boot and on client connect/disconnect only, so the ring
+    # stayed dark while the board listened, and the wake word phase
+    # (waiting_for_command) was never shown at all.
+    - lambda: id(voice_assistant_phase) = ${voice_assist_waiting_for_command_phase_id};
+    - script.execute: control_leds
   on_client_disconnected:
     - voice_assistant.stop:
     - lambda: id(voice_assistant_phase) = ${voice_assist_not_ready_phase_id};

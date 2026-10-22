@@ -114,6 +114,65 @@ class ESP32WakeWordEngineTests(unittest.TestCase):
             "being down, so a healthy engine is not restarted",
         )
 
+    # -- 4. a client reconnect must reopen a stopped microphone -------------
+
+    def test_a_client_reconnect_reopens_a_stopped_microphone(self):
+        """The microphone must run again after a client switch.
+
+        Symptom (2026-10-22, live in the Growroom Madrid): after the
+        speaker enrollment the board stopped hearing "Hey Jarvis" for
+        good, although the engine reported "cutoff 153 (active)".
+
+        on_client_disconnected runs voice_assistant.stop, and the voice
+        assistant's STOP_MICROPHONE state calls MicrophoneSource::stop().
+        The source is not passive, so its data gate
+        (``enabled_ || passive_``) closes and the RUNNING wake word engine
+        receives no audio at all. Only the engine's inference task opens
+        the source again (microphone_source_->start()), so the reconnect
+        path has to restart the engine when the MICROPHONE is down - the
+        engine's own state says nothing about the source's data gate.
+        """
+        connect = self._voice_assistant_connect_block()
+        self.assertIsNotNone(
+            connect, "voice_assistant has no on_client_connected block")
+        self.assertIn(
+            "microphone.is_capturing",
+            connect,
+            "a client reconnect must check whether the microphone is still "
+            "running; the engine's own state says nothing about the "
+            "microphone source's data gate",
+        )
+        self.assertIn(
+            "micro_wake_word.stop",
+            connect,
+            "a stopped microphone is only reopened by a fresh inference "
+            "task, so the engine has to be stopped and started again",
+        )
+
+    def test_the_ring_shows_that_the_wake_word_was_detected(self):
+        """The ring is the only feedback that the satellite heard.
+
+        Symptom: the ring stayed dark while the board listened. The phase
+        switch in control_leds handled the wake word phase, but nothing
+        called control_leds when the phase changed - only on boot and on
+        client connect/disconnect.
+        """
+        block = self._voice_assistant_trigger_block("on_wake_word_detected")
+        self.assertIsNotNone(
+            block, "voice_assistant has no on_wake_word_detected block")
+        self.assertIn(
+            "control_leds",
+            block,
+            "the detected wake word must update the LED ring, otherwise "
+            "there is no visible confirmation that the board heard",
+        )
+        self.assertIn(
+            "voice_assistant_phase",
+            block,
+            "the ring follows the voice assistant phase, so the detection "
+            "must set the phase before the ring is updated",
+        )
+
     def test_the_boot_path_and_the_reconnect_path_both_start_the_engine(self):
         """Both paths must exist: one for the boot, one for the recovery."""
         self.assertGreaterEqual(
@@ -304,6 +363,31 @@ class ESP32WakeWordEngineTests(unittest.TestCase):
 
     def _on_boot_body(self) -> str:
         return "\n".join(body for _, body in _on_boot_blocks(self.core))
+
+    def _voice_assistant_trigger_block(self, trigger: str):
+        """The body of a named trigger inside the voice_assistant block."""
+        lines = self.core.splitlines()
+        start = None
+        for number, line in enumerate(lines):
+            if line.startswith('voice_assistant:'):
+                start = number
+                break
+        if start is None:
+            return None
+        body = []
+        inside = False
+        for line in lines[start + 1:]:
+            if line and not line[0].isspace():
+                break
+            stripped = line.strip()
+            if stripped.startswith(trigger + ':'):
+                inside = True
+                continue
+            if inside:
+                if stripped.startswith('on_') and stripped.endswith(':'):
+                    break
+                body.append(line)
+        return chr(10).join(body) if body else None
 
     def _voice_assistant_connect_block(self):
         # The body of the voice assistant's on_client_connected block.

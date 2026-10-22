@@ -1,24 +1,24 @@
 {
   "upstream_core": {
-    "repository": "https://github.com/MichalZaniewicz/esphome-waveshare-esp32-s3-audio-va",
     "commit": "351067f95dffd072b53ce7f00b0a99ce3077ed06",
     "path": "base/core.yaml",
+    "repository": "https://github.com/MichalZaniewicz/esphome-waveshare-esp32-s3-audio-va",
     "sha256": "f76a3d4c6ed08dd41107dc5376396bdd01a54762e8d1cd794cff33d49f39e565"
-  },
-  "voice_assets": {
-    "repository": "https://github.com/esphome/home-assistant-voice-pe",
-    "commit": "d4e6fa43d6a1a7d342b7d4d403567e06516719de"
-  },
-  "wakeword_models": {
-    "repository": "https://github.com/esphome/micro-wake-word-models",
-    "commit": "40ff33f57f8fc6ad71a75ef085abbf742495b225"
   },
   "vendored_phase1_core": {
     "path": "core.yaml",
-    "sha256": "52cddc1ea29a4225cd0778e97e723f146ce430855da7c37bf4e2050dd0bef23b"
+    "sha256": "8c67e672bd9b3da70afdbe75846567a15db3a200787b4f6a9f940065f02e8bb6"
   },
   "vendored_startup_sound": {
     "path": "startup.mp3",
     "sha256": "030e034ffed015d78985bea99a9f827e1dc9d0c7d6fbb1a3e90cb4012184552d"
+  },
+  "voice_assets": {
+    "commit": "d4e6fa43d6a1a7d342b7d4d403567e06516719de",
+    "repository": "https://github.com/esphome/home-assistant-voice-pe"
+  },
+  "wakeword_models": {
+    "commit": "40ff33f57f8fc6ad71a75ef085abbf742495b225",
+    "repository": "https://github.com/esphome/micro-wake-word-models"
   }
 }
