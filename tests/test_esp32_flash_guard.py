@@ -322,11 +322,29 @@ class TestBackup(GuardFixture):
         self.assertEqual(BACKUP_SHA256, m["backup"]["sha256"])
         self.assertEqual(str(self.backup_path), m["backup"]["path"])
         self.assertTrue(m["backup"]["created_at"])
-        self.assertEqual(["flash-id", "flash-id", "read-flash"], self.verbs(self.fake))
-        read_argv = self.fake.invocations[2]
-        self.assertIn("--after", read_argv)
-        self.assertEqual("no-reset", read_argv[read_argv.index("--after") + 1])
-        self.assertEqual((0, FLASH_SIZE, str(self.backup_path)), self.fake.read_calls[0])
+        # The flash is read in chunks: the native USB-Serial-JTAG of the
+        # ESP32-S3 drops the link during a long transfer (a full 16 MB read
+        # dies at ~34 % with "No more data to read from the serial port",
+        # and a lower baud does not help). A 4 MB block goes through
+        # reliably, so the guard reads in pieces and joins them.
+        reads = self.fake.read_calls
+        self.assertGreater(len(reads), 1, "the backup must read in chunks")
+        self.assertEqual(
+            ["flash-id", "flash-id"] + ["read-flash"] * len(reads),
+            self.verbs(self.fake),
+        )
+        for argv in self.fake.invocations[2:]:
+            self.assertIn("--after", argv)
+            self.assertEqual("no-reset", argv[argv.index("--after") + 1])
+        # The chunks must cover the flash without a gap or an overlap.
+        offset = 0
+        for address, size, _path in reads:
+            self.assertEqual(offset, address)
+            self.assertLessEqual(size, guard.BACKUP_CHUNK_BYTES)
+            offset += size
+        self.assertEqual(FLASH_SIZE, offset)
+        # And the joined image must be the whole flash.
+        self.assertEqual(BACKUP_PATTERN, self.backup_path.read_bytes())
 
     def test_backup_refuses_existing_output_without_running_esptool(self):
         self.backup_path.write_bytes(b"pretend-existing")

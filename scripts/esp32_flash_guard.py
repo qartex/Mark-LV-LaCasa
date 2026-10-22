@@ -45,6 +45,13 @@ DEFAULT_BAUD = 921600
 CHIP_ARG = "esp32s3"
 REQUIRED_CHIP = "ESP32-S3"
 FLASH_SIZE_BYTES = 16 * 1024 * 1024  # 16777216
+# The native USB-Serial-JTAG of the ESP32-S3 drops the link during long
+# transfers: a full 16 MB read dies at ~34 % with "No more data to read
+# from the serial port", and a lower baud does not help. A 4 MB block
+# goes through reliably (measured: 26.4 s at 1271 kbit/s), so the
+# backup reads the flash in pieces and joins them. Without this the
+# safety backup - and with it every flash - would be impossible here.
+BACKUP_CHUNK_BYTES = 4 * 1024 * 1024
 WRITE_OFFSET = 0x0
 ERASE_ALL = True
 FLASH_MODE = "dio"
@@ -613,13 +620,46 @@ def backup(port, output, manifest_dir, runner: Runner, *,
     manifest = store.load()
     probed = _probe_device(port, runner, esptool, baud, reset_after="no-reset")
     _require_device_match(manifest, probed)
-    argv = _esptool_argv(esptool, port, baud, "no-reset", "read-flash",
-                         [WRITE_OFFSET, FLASH_SIZE_BYTES, out])
+    # Read the flash in chunks and join them - see BACKUP_CHUNK_BYTES.
+    parts: list[Path] = []
     try:
-        _run(runner, argv, "read-flash")
+        for index, offset in enumerate(range(0, FLASH_SIZE_BYTES, BACKUP_CHUNK_BYTES)):
+            length = min(BACKUP_CHUNK_BYTES, FLASH_SIZE_BYTES - offset)
+            part = out.with_name(f".{out.name}.part{index}")
+            parts.append(part)
+            argv = _esptool_argv(esptool, port, baud, "no-reset", "read-flash",
+                                 [str(offset), str(length), part])
+            _run(runner, argv, "read-flash")
+            if not part.exists():
+                raise GuardError(
+                    f"esptool did not produce the backup chunk {index} "
+                    "(output suppressed)")
+            chunk_size = part.stat().st_size
+            if chunk_size != length:
+                raise GuardError(
+                    f"backup short read: expected {length} bytes in chunk "
+                    f"{index}, found {chunk_size}; partial image removed")
+            os.chmod(part, 0o600)
+        with open(out, "xb") as target:
+            for part in parts:
+                with open(part, "rb") as source:
+                    while True:
+                        block = source.read(1 << 20)
+                        if not block:
+                            break
+                        target.write(block)
+            target.flush()
+            os.fsync(target.fileno())
     except GuardError:
         _remove_unlink(out)
         raise
+    except OSError:
+        _remove_unlink(out)
+        raise GuardError(
+            "could not write the backup image (output suppressed)") from None
+    finally:
+        for part in parts:
+            _remove_unlink(part)
     if not out.exists():
         raise GuardError("esptool did not produce the backup image (output suppressed)")
     size = out.stat().st_size

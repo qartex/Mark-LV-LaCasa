@@ -39,10 +39,10 @@ VENV = WORK / 'venv'
 LOG = WORK / 'logs' / 'flash-when-plugged.log'
 ARTIFACT = (WORK / 'config/esp32-satellite/.esphome/build'
              / 'growraum-sprache-1-home-test/build/firmware.factory.bin')
-EXPECTED_SHA = 'c62c377a92d12b37231af932a1cd9e4538eff83da1997d82cc22a9b019bce9db'
+EXPECTED_SHA = 'a0223b29821c372007da23b40f2d5befcc84d0256def58e096bec1c8123839b0'
 # Der Build-Zeitpunkt der Firmware, die auf dem Board sein soll. Der Server
 # liefert genau diesen Stempel.
-EXPECTED_BUILD = '2026-10-21'
+EXPECTED_BUILD = '2026-10-22'
 SERVER = 'lacasa@lacasa-server'
 STAMP_CMD = (
     'cd /home/lacasa/Mark-LV-LaCasa-esp32 && '
