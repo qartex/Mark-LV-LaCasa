@@ -48,10 +48,13 @@ import inspect
 import io
 import logging
 import secrets
+import subprocess
 import sys
+import tempfile
 import time
 import wave
 from pathlib import Path
+import pathlib
 
 from esp32_api_acceptance import KeyFileError, load_api_key  # reused contract
 from core.cannanas_actions import CANNANAS_MODEL_ACTIONS
@@ -90,6 +93,81 @@ _LOG = logging.getLogger("esp32_jarvis_bridge")
 
 DEFAULT_RELAY_PORT = 16053
 DEFAULT_SAMPLE_RATE = 16000  # ESPHome voice-assistant microphone and speaker
+
+# Der Notfall-Sprecher. Die Gemini-Sprachausgabe klingt besser und bleibt
+# die Hauptstimme, aber ihr Kontingent ist hart begrenzt (10 Anfragen pro
+# Tag und Modell) - und wenn ALLE Keys leer sind, starb bisher die
+# Sprachausgabe und der Gaertner hoerte NICHTS. Piper ist lokal, braucht
+# kein Netz, kein Konto und ist gemessen (2026-10-22, i5-6500) schneller
+# als Echtzeit: 8 s Audio in 4 s.
+DEFAULT_LOCAL_TTS_ENGINE = "piper"
+
+
+def local_tts_pcm(text: str, sample_rate: int = DEFAULT_SAMPLE_RATE,
+                  *, model_path: str = "", piper_binary: str = "piper",
+                  timeout_s: float = 45.0) -> bytes | None:
+    """Synthetisiert lokal (Piper) und liefert rohes mono-PCM16.
+
+    Der Rueckgabe-Vertrag entspricht dem, was das Board erwartet:
+    16 kHz, mono, 16 Bit, rohe Samples ohne WAV-Kopf. Piper schreibt die
+    Datei als WAV und den Kopf schneidet die wave-Bibliothek ab.
+
+    None heisst: der lokale Weg steht nicht bereit oder ist
+    fehlgeschlagen. Der Aufrufer entscheidet dann, ob er die Stille als
+    Fehler meldet.
+    """
+    if not model_path or not pathlib.Path(model_path).exists():
+        _LOG.warning("local tts unavailable status=no-model model=%s", model_path)
+        return None
+    with tempfile.TemporaryDirectory(prefix="jarvis-local-tts-") as tmp:
+        wav_path = pathlib.Path(tmp) / "sample.wav"
+        try:
+            result = subprocess.run(
+                [piper_binary, "--model", model_path,
+                 "--output_file", str(wav_path)],
+                input=text, capture_output=True, text=True, timeout=timeout_s)
+        except (OSError, subprocess.SubprocessError) as exc:
+            _LOG.warning("local tts failed status=engine-error reason=%s",
+                         type(exc).__name__)
+            return None
+        if result.returncode != 0 or not wav_path.exists():
+            tail = (result.stderr or "")[-200:]
+            _LOG.warning("local tts failed status=exit-%s tail=%r",
+                         result.returncode, tail)
+            return None
+        with wave.open(str(wav_path), "rb") as handle:
+            rate = handle.getframerate()
+            channels = handle.getnchannels()
+            width = handle.getsampwidth()
+            frames = handle.readframes(handle.getnframes())
+        if width != 2:
+            _LOG.warning("local tts failed status=bit-depth width=%s", width)
+            return None
+    if channels == 2:
+        # Piper-Ausnahmen mit zwei Kanaelen sind selten; das Board will mono.
+        samples = array("h")
+        samples.frombytes(frames)
+        mono = array("h", [(samples[i] + samples[i + 1]) // 2
+                           for i in range(0, len(samples), 2)])
+        frames = mono.tobytes()
+        channels = 1
+    if rate != sample_rate:
+        ratio = sample_rate / rate
+        count = len(frames) // 2
+        samples = array("h")
+        samples.frombytes(frames[:count * 2])
+        out_len = int(count * ratio)
+        out = array("h", [0] * out_len)
+        for index in range(out_len):
+            position = index / ratio
+            left = int(position)
+            frac = position - left
+            a = samples[left] if left < count else 0
+            b = (samples[left + 1] if left + 1 < count else a)
+            out[index] = int(a + (b - a) * frac)
+        frames = out.tobytes()
+        rate = sample_rate
+    return frames
 DEFAULT_TTS_SOURCE_SAMPLE_RATE = 24000  # Gemini TTS raw PCM output
 DEFAULT_MODEL = "gemini-3.1-flash-lite-preview"
 DEFAULT_TTS_MODEL = "gemini-3.8-flash-lite-tts"
@@ -737,6 +815,8 @@ class GeminiTurnEngine:
         learning_queue=None,
         briefing_runner=None,
         cannanas_runner=None,
+        local_tts_model: str | None = None,
+        local_tts_binary: str | None = None,
     ):
         self._gemini_keys = (
             (gemini_key,) if isinstance(gemini_key, str) else tuple(gemini_key)
@@ -766,6 +846,11 @@ class GeminiTurnEngine:
         self._models_needing_plain_config: set[str] = set()
         self._announcement_job_id = ""
         self._mute_requested = False
+        # Der Notfall-Sprecher: Piper, lokal, ohne Netz und ohne Kontingent.
+        # Ohne Modell ist er aus und die Sprachausgabe verhaelt sich wie
+        # bisher (die Gemini-Kette wirft dann weiter durch).
+        self._local_tts_model = local_tts_model or ""
+        self._local_tts_binary = local_tts_binary or "piper"
 
     def current_key(self) -> str:
         return self._gemini_keys[self._key_index]
@@ -965,9 +1050,33 @@ class GeminiTurnEngine:
     def _tts_sync(self, text: str) -> bytes:
         from google import genai  # lazy, optional dependency
 
-        return self._turn_with_key_rotation(
-            lambda _key: self._speech_on_key(genai, text)
-        )
+        try:
+            return self._turn_with_key_rotation(
+                lambda _key: self._speech_on_key(genai, text)
+            )
+        except Exception as exc:
+            # Kein Key mehr (Kontingent oder abgelaufen): die lokale Stimme
+            # nimmt den Notfalldienst. Eine STILLE Antwort ist das
+            # schlechteste Ergebnis - der Gaertner hoert dann gar nichts,
+            # ohne zu wissen, warum. Piper ist lokal, schneller als
+            # Echtzeit und kennt kein Kontingent. Der naechste Turn
+            # versucht es wieder mit Gemini: der Fallback ist ein
+            # Notdienst, kein Dauerzustand.
+            pcm = local_tts_pcm(
+                text,
+                self._sample_rate,
+                model_path=self._local_tts_model,
+                piper_binary=self._local_tts_binary,
+            )
+            if pcm is None:
+                raise
+            _LOG.warning(
+                "speech fallback status=local reason=%s "
+                "gemini_calls=%s voice=%s",
+                type(exc).__name__, len(self._gemini_keys),
+                pathlib.Path(self._local_tts_model).name,
+            )
+            return pcm
 
     async def speak(self, text: str) -> bytes:
         """Render host-composed text (briefing) with the same voice/quota path."""
@@ -1364,6 +1473,8 @@ class JarvisBridge:
         max_utterance: float = DEFAULT_MAX_UTTERANCE_S,
         voice_level: int = DEFAULT_VOICE_LEVEL,
         system_instruction: str | None = None,
+        local_tts_model: str | None = None,
+        local_tts_binary: str | None = None,
         device_id: str = "growroom-sprache-1",
         diary_workflow=None,
         learning_queue=None,
@@ -1403,6 +1514,8 @@ class JarvisBridge:
             tts_voice=tts_voice,
             sample_rate=sample_rate,
             system_instruction=system_instruction,
+            local_tts_model=local_tts_model,
+            local_tts_binary=local_tts_binary,
             diary_workflow=diary_workflow,
             learning_queue=learning_queue,
             briefing_runner=briefing_runner,
@@ -1957,6 +2070,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--tts-model", default=DEFAULT_TTS_MODEL)
     parser.add_argument("--tts-voice", default=DEFAULT_TTS_VOICE)
+    parser.add_argument(
+        "--local-tts-model",
+        default=None,
+        help=(
+            "Piper model (.onnx) as the emergency voice when every Gemini "
+            "key is exhausted; without it the speech output behaves as before"
+        ),
+    )
+    parser.add_argument(
+        "--local-tts-binary",
+        default="piper",
+        help="absolute piper binary for the emergency voice",
+    )
     parser.add_argument("--sample-rate", type=int, default=DEFAULT_SAMPLE_RATE)
     parser.add_argument("--turn-timeout", type=float, default=DEFAULT_TURN_TIMEOUT_S)
     parser.add_argument("--capture-window", type=float, default=DEFAULT_CAPTURE_WINDOW_S)
@@ -2226,6 +2352,8 @@ def main(argv=None) -> int:
         max_utterance=args.max_utterance,
         voice_level=args.voice_level,
         device_id=args.device_id,
+        local_tts_model=args.local_tts_model,
+        local_tts_binary=args.local_tts_binary,
         diary_workflow=diary_workflow,
         learning_queue=learning_queue,
         briefing_runner=briefing_runner,

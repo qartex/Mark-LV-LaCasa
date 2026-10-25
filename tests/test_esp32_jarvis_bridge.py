@@ -1627,6 +1627,54 @@ class CliAndLoggingTests(unittest.TestCase):
         pcm = bridge._tts_pcm_from_response(wav)
         self.assertEqual(24, len(pcm) // 2)
 
+    def test_speech_falls_back_to_the_local_engine_when_every_key_is_dead(self):
+        """A silent answer is the worst outcome - the local voice takes over.
+
+        Observed live on 2026-10-22: every key and every TTS model hit
+        the free-tier quota and the turn produced no audio at all. Piper
+        on the same server measures faster than real time with no network
+        and no quota, so it becomes the emergency voice when the last
+        key is exhausted.
+        """
+        class Quota(Exception):
+            code = 429
+
+        calls = []
+
+        class Models:
+            def generate_content(self, model, contents, config):
+                calls.append(model)
+                raise Quota("429 RESOURCE_EXHAUSTED")
+
+        fake_genai = SimpleNamespace(
+            Client=lambda **kw: SimpleNamespace(models=Models()),
+            types=unittest.mock.MagicMock())  # speech/Voice/Config-Dummy
+        fake_genai.genai = fake_genai  # from google import genai
+        engine = bridge.GeminiTurnEngine(["key-one", "key-two"])
+        self.assertEqual("key-one", engine.current_key())
+
+        rendered = []
+
+        def fake_local(text, sample_rate=bridge.DEFAULT_SAMPLE_RATE, **kwargs):
+            rendered.append(text)
+            return b"\x01\x00" * 4
+
+        with unittest.mock.patch.object(bridge, "local_tts_pcm", fake_local), \
+                unittest.mock.patch.dict(
+                    sys.modules,
+                    {"google": fake_genai, "google.genai": fake_genai}):
+            pcm = asyncio.run(engine.speak("Guten Morgen"))
+
+        self.assertEqual(b"\x01\x00" * 4, pcm, "the local voice must render")
+        self.assertEqual(["Guten Morgen"], rendered)
+        self.assertGreaterEqual(
+            len(calls), 2, "every key must have been tried first")
+        # Und der naechste Turn versucht es wieder mit Gemini: der
+        # Fallback ist ein Notdienst, kein Dauerzustand.
+        self.assertEqual(
+            "key-two", engine.current_key(),
+            "the rotation must have moved past the dead key")
+
     def test_tts_default_model_is_a_quota_available_tts_model(self):
         self.assertEqual("gemini-3.8-flash-lite-tts", bridge.DEFAULT_TTS_MODEL)
 
